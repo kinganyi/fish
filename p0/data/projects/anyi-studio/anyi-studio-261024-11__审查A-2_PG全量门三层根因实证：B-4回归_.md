@@ -1,0 +1,10 @@
+# 审查A-2 PG全量门三层根因实证：B-4回归 + per-test schema依赖public + 容器shm不足
+
+> 编码：anyi-studio-261024-11 ｜ 类型：fact ｜ 记录于 2026-10-24T01:57:07Z
+
+审查A-2 PG 全量测试两轮实证（pg-t08 / pg-a2 专用容器）：465 failed / 2859 errors / 3076 passed **两轮数字逐位相同**——确定性失败，与容器无关。决定性实验链：全新库（仅预跓001）单测 4.6s 确定性复现 relation "orders" does not exist；public 补全 baseline 全套后同用例成功 ⇒ **conftest PG per-test schema 机制隐式依赖 public schema 完整性（系统性缺陷）**。
+
+"PG 全量门从未跑通"完整三层根因：①B-4 baseline 顺序倒挂（b3d7ec3 回归）；②per-test schema 依赖 public 状态（本轮新发现）；③pg-t08 容器 shm 512MB 未落实 1g 建议（段错误历史三次，含测试当日一次，但非失败主因）。
+
+修复：conftest PG 模式改 template schema 克隆或显式重放全 DDL 链；修后以 shm 1g 容器为基准环境纳入 CI 夜间 job。产物：logs/a2_be_pg_full{,2}.log + 总报告 §2.2。
+

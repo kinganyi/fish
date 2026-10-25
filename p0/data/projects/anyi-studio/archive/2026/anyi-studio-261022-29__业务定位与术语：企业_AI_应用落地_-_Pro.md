@@ -1,0 +1,26 @@
+# 业务定位与术语：企业 AI 应用落地 / Productized Service / DPM·DPA·IPA
+
+> 编码：anyi-studio-261022-29 ｜ 类型：fact ｜ 记录于 2026-10-21T22:36:48Z
+
+## 定位
+- 做企业 AI 应用落地：小工具 / 单一能力 / 单项目约 ¥4-5 万 / 周期一个月
+- 团队 2-3 人；船长花园是练手项目，不是主营业务
+- 模式：前期每单积累可复用模板，后期一个月并发多单（模板复利）
+
+## 交付五步
+前期沟通需求 → 架构与业务流程梳理 → 数据基础建设 → AI 开发与程序部署 → 交付使用
+
+## 对外术语
+- **BPM**（Business Process Management，业务流程管理）：整套动作的学科名
+- **DPA**（Digital Process Automation，数字流程自动化）：Gartner 术语，低代码平台上的流程自动化，最贴「轻量、一个月交付」
+- **IPA**（Intelligent Process Automation，智能流程自动化）：流程 + AI
+- **PCE**（Process Cycle Efficiency，流程周期效率）= 增值时间 ÷ 总前置时间；船长花园 6.7% → 41.2%
+- 商业模式：**Productized Service（产品化服务）+ FDE as a Service**
+- 对外避免用 BPR（业务流程再造），暗示推翻重来会吓到客户
+
+## 四步产线（对客户的交付叙事）
+业务工作流上飞书 → 数据治理 → 自动化通知 → 接入 AI
+
+## 定位话术
+双层交付：① 基础盘 = 流程上云（不上 AI 也成立）② 加速器 = AI 产线
+

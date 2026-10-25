@@ -1,0 +1,211 @@
+%% 大肥鱼生命系统 · 类图（数据模型全景）· v0.2
+%% 权威：10-架构设计-平台化-v0.2.md §2.7 —— 与文档逐字同源，改图必须两处同改
+%% v0.1 原件在 docs/历史版本/v0.1/class-diagram.mermaid（对照 11 评审报告用）
+classDiagram
+    %% ================= 真相层（不可变） =================
+    class Event {
+        +int seq
+        +string event_id
+        +string ts
+        +string type
+        +json actor
+        +json subject
+        +json payload
+        +string cause
+        +string schema
+    }
+
+    %% ================= 身份层 =================
+    class AgentAccount {
+        +string account_id
+        +string account_key
+        +string display_name
+        +string host
+        +string device_id
+        +string kind
+        +string status
+    }
+    class Citizen {
+        +string citizen_id
+        +string display_name
+        +string kind
+        +string host
+        +string account_id
+        +string host_session_key
+        +string alias
+        +string evidence_level
+        +string trust_level
+        +string last_seen_at
+        +string archived_at
+        +string status
+        +int is_owner
+    }
+    class CitizenArchive {
+        +string citizen_id
+        +string archived_at
+        +string archive_reason
+        +string archived_by
+    }
+    class SessionToken {
+        +string token_hash
+        +string citizen_id
+        +string agent_id
+        +string channel
+        +string evidence_level
+        +string inherited_from
+        +string expires_at
+        +string revoked_at
+    }
+    class AgentRun {
+        +string agent_id
+        +string citizen_id
+        +string label
+        +string role
+        +string status
+        +string spawned_at
+    }
+    class ProjectStint {
+        +string stint_id
+        +string citizen_id
+        +string project
+        +string from_ts
+        +string to_ts
+        +string set_by
+        +string closed_reason
+    }
+
+    %% ================= 记忆层 =================
+    class Memory {
+        +string code
+        +string title
+        +string project
+        +string owner
+        +string agent_id
+        +string attribution
+        +string evidence_level
+        +string mem_type
+        +string status
+        +string recorded_at
+        +string session_actor
+        +string body_sha256
+    }
+    class FtsIndex {
+        +string code
+        +string title_idx
+        +string body_idx
+    }
+    class Link {
+        +string from_code
+        +string to_code
+        +string rel
+        +string source
+    }
+
+    %% ================= 在场层 =================
+    class Board {
+        +string board_id
+        +string scope
+        +string scope_key
+        +string period_key
+        +string path
+        +string status
+    }
+    class Presence {
+        +string board_id
+        +string citizen_id
+        +string agent_id
+        +string state
+        +string doing
+        +json surfaces
+        +string expires_at
+    }
+
+    %% ================= 语境层（人写/AI 建议） =================
+    class PersonaKey {
+        +string kid
+        +string algo
+        +string pubkey
+        +string prev_kid
+        +string attested_sig
+        +int is_genesis
+    }
+    class PersonaKeyArchive {
+        +int archive_id
+        +string kid
+        +int recover_round
+    }
+    class PersonaAdaptationArchive {
+        +int archive_id
+        +string adaptation_id
+        +int recover_round
+    }
+    class PersonaAdaptation {
+        +string adaptation_id
+        +string slot_key
+        +string new_value
+        +string prev_adaptation_id
+        +string kid
+        +string sig
+        +string sig_msg
+        +string applied_at
+        +string applied_by
+    }
+    class PersonaSlotLatest {
+        <<view>>
+        +string slot_key
+        +string value
+        +string applied_at
+        +string kid
+    }
+    class PersonaSuggestion {
+        +string suggestion_id
+        +string slot_key
+        +string proposed_value
+        +string proposed_by
+        +string status
+        +string decided_by
+    }
+    class PersonaTriggerState {
+        +string account_id
+        +int counter
+        +int defer_until
+        +string last_asked_at
+    }
+
+    %% ================= 知识库层（无正文） =================
+    class Vault {
+        +string vault_id
+        +string root_path
+        +string mode
+        +int depth_default
+    }
+    class KbNode {
+        +string vault_id
+        +string path
+        +string kind
+        +int depth
+        +int summary_len
+        +int child_files
+    }
+
+    %% ================= 关系 =================
+    AgentAccount "1" --> "*" Citizen : 血缘 account_id
+    Citizen "1" --> "*" SessionToken : 签发（channel × evidence 受 CHECK 约束）
+    SessionToken "0..1" --> "1" SessionToken : inherited_from（只允许一跳）
+    Citizen "1" --> "*" AgentRun : 派生子 agent
+    Citizen "1" --> "*" ProjectStint : 项目档期（同时只一个开）
+    Citizen "1" --> "*" Memory : owner
+    AgentRun "1" --> "*" Memory : agent_id
+    Citizen ..> CitizenArchive : 超期归档（先关陈旧档期）
+    Memory "1" -- "1" FtsIndex : 派生索引
+    Board "1" --> "*" Presence : 在场
+    PersonaKey "1" --> "*" PersonaAdaptation : 签名（kid 须挂在链上）
+    PersonaKey "0..1" --> "1" PersonaKey : prev_kid（换钥须旧钥私钥签）
+    PersonaKey ..> PersonaKeyArchive : --recover 时留档
+    PersonaAdaptation ..> PersonaAdaptationArchive : --recover 时留档
+    PersonaAdaptation "*" --> "1" PersonaAdaptation : prev_adaptation_id（链）
+    PersonaSlotLatest ..> PersonaAdaptation : 视图=每槽最新一行
+    PersonaSuggestion "*" --> "1" PersonaSlotLatest : 目标是
+    AgentAccount "1" -- "1" PersonaTriggerState : 计数与 defer
+    Vault "1" --> "*" KbNode : 目录索引
+    Event ..> PersonaAdaptation : persona.adapted（须 signed + sig）

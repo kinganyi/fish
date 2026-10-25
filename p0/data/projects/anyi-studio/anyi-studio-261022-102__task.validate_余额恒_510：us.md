@@ -1,0 +1,34 @@
+# task.validate 余额恒 510：users.id 与 identity_id 两套积分主体键并存（已修 f477f2f）
+
+> 编码：anyi-studio-261022-102 ｜ 类型：lesson ｜ 记录于 2026-10-22T08:43:25Z
+
+## 客户报的缺陷成立，根因比他猜的更重
+
+他猜「与 paid_* 同源（取了错误的账户）」。**方向对，但机制不同**：
+
+`paid_*` 是**租户**取错（tenant_id=None → 0）；这次是**主体键**取错（users.id vs identity_id）。
+
+## 生产实证（两行数据对上了）
+
+| 键 | balance | total_earned | total_spent | updated_at | 含义 |
+|---|---|---|---|---|---|
+| `users.id=7`（dayong 的 users 行） | **510** | 1210 | 700 | **10-17** | 任务所有者键 → 早停更 |
+| `identity_accounts.id=6` | **0** | 2250 | 2224 | **10-22 16:06** | 资金主体键 → 与 /api/points 完全一致 |
+
+`task.validate` 旧代码：`_principal_user_id()` → 7 → `get_account(7)` → 510。
+扣费链：`task_manager` 走 `money_subject_key_for()` → 6 → `check_and_hold(6, …)`。
+
+⇒ **预检看 510、实际扣另一本账**。`points_service.subject_id_of()` 的 docstring 里已经写过这个坑（F-WB-1：
+「避免注册赠送用 identity_id、业务路由用 user.id 两套口径」）——MCP 网关又把它引回来了。
+
+## 已修 `f477f2f`（未部署）
+
+抽出 `_balance_points_for(principal)`：`users.id` 定位档案 → `money_subject_key_for()` 收敛 → `get_account`。
+与预扣链用**同一个收敛入口**，保证“看到的就是要扣的”。
+测试 2 例 + 变异自证（改回 raw uid → 1F/1P）。回归 27 文件 **812P/0F/1S**。
+
+## 客户实战里的两个有价值发现
+
+1. `asset.list` 一次返回 49 张素材的 `card_name → id` ⇒ **整个「下载 47 张素材 + 逐张上传」环节可省**
+2. 他们自修了 `task_cost()`（走 `paid_cny`），否则算力回填会静默归零 —— 与我在 v2.1 里提的风险完全吻合
+

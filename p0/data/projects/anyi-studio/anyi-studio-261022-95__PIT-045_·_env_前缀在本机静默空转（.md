@@ -1,0 +1,21 @@
+# PIT-045 · env 前缀在本机静默空转（uv shim 遮蔽）｜ 指针→anyi-studio-261022-66
+
+> 编码：anyi-studio-261022-95 ｜ 类型：lesson ｜ 记录于 2026-10-22T05:53:41Z
+
+## 指针
+
+→ 宿主：`anyi-studio-261022-66`（PIT 错题本·本机环境陷阱，含 PIT-045）
+→ 权威源：`notes/error-ledger.md` ⟦PIT-045 env 前缀静默空转⟧
+
+## 一句话
+
+本机 `env VAR=1 <cmd>` / `env -u VAR <cmd>` **exit=0 但命令根本没有执行**：PATH 前部的 `C:\Users\15596\.local\bin\env`（uv 安装的 shim）遮蔽了 `/usr/bin/env`，shim 不接收也不执行其后参数。
+
+后果极危：PIT-039 的 pytest 剥离模板（`env -u …`）因此**静默失效**——“跑测试”实际零执行，可致“报告已跑”但未跑。
+
+对症：① 改用 shell 内建 `unset …; VAR=0 <python> -m pytest …`；② 或全路径 `/usr/bin/env -u …`；③ 任何包装类命令执行后先验副作用/输出再采信。
+
+## 为什么单列
+
+`recall` 只搜标题；查 `PIT-045` 不命中宿主（`anyi-studio-261022-83`）。
+

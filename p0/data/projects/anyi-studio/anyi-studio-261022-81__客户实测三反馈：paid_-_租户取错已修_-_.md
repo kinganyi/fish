@@ -1,0 +1,37 @@
+# 客户实测三反馈：paid_* 租户取错已修 / 角色判断我写错 / 渠道不可指定是设计
+
+> 编码：anyi-studio-261022-81 ｜ 类型：lesson ｜ 记录于 2026-10-22T05:47:11Z
+
+客户（杨智勇/dayong）2026-10-22 实测报告提了三条。结论：**1 条真 bug（已修）、​1 条我写错、​1 条是设计**。
+
+## 反馈 1（真 bug，已修 `9b4bd59`）paid_* 全 null
+
+生产核查订单行**存在**：`task_20261020_202839_520fc12b` → `point_delta=13 / balance_delta=12.3039 / tenant_id=1`。
+
+根因：`principal.tenant_id` = **key 绑定租户**，用户级 key（`api_keys.tenant_id IS NULL`）下恒 None；
+旧代码 `int(getattr(principal,"tenant_id",0) or 0)` → **0** → `WHERE tenant_id = 0` → 一行都查不到。
+
+修法：新增 `_data_tenant_id()`，`effective_tenant_id`（=home_tenant_id ?? tenant_id）优先。
+变异自证：改回旧写法后只有接线用例变红（1F/3P），还原 4P。
+
+## 反馈 2（我写错了，已向客户更正）
+
+v2.0 回执里写「你的 key 是 user 级，拿不到 paid_cny」——**错**。
+实测：`dayong` 的 `tenant_members.member_role = admin` → `mcp_role = tenant_admin`、`money_visible=true`。
+金额为 null 与角色无关，就是反馈 1 那个租户取错。
+根因是我把「**key** 是用户级（tenant_id NULL）」误读成「**角色**是 user」。
+
+## 反馈 3（设计如此，不是 bug）不能指定渠道
+
+`align_submission_model()` 语义：入参属某路由 → 取该路由「**最新首位可用且满足参数**」的候选。
+生产 `seedance2.5` 候选链：`apimodels-seedance-2.5-global`(仅720p/30s) → **hcatom-seedance-2.5** → `notoken-…` → `apimodels-…`。
+他们要 720p@4s，`-global` 不满足被跳 → 落到 hcatom。**因此三种写法全归一化到 hcatom。**
+
+这是 10-21 「公开码迁移」的产品决定：**用户只发起路由名，渠道由系统决定**（渠道名是商业机密）。
+若要给客户渠道选择权，只能（a）平台调候选顺序（影响所有人）或（c）另建一个公开码路由指向固定候选（不暴露渠道名）。
+
+## 顺带确认客户两条实操要点
+
+- 参数名是 `model_id` 不是 `model` —— registry.py 中确实只收 `model_id`
+- `record_id` 确实 `required: ["record_id"]`（registry.py:279），但幂等仍是内存实现
+

@@ -1,0 +1,32 @@
+# fish-devA · 开发副本（不是主工作树）
+# 基线：主树 2026-10-26 01:2x 快照；主树继续由 fish-主AI-3 开发，本副本独立演进。
+
+# ── Python 缓存 ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest_cache
+
+# ── 数据库与备份（二进制 / 高频变动 / 已有备份机制）──────────
+p0/data/index.sqlite
+p0/data/index.sqlite-wal
+p0/data/index.sqlite-shm
+p0/data/_backups/
+p0/data/_audit/
+p0/data/_reports/
+p0/data/看板-*.md
+p0/data/citizens/
+历史版本/
+
+# ── 门面根（生成物，可重建）────────────────────────────────
+fish-home/
+
+# ── 研究资料与会话全记录（后者含历史 token 明文）────────────
+_research/
+24-会话全记录-卷1-对话主卷.md
+24-会话全记录-卷2-工具调用.md
+
+# ── 开发工具状态 ───────────────────────────────────────────
+.ai-memory/
+*.tmp
+*.log

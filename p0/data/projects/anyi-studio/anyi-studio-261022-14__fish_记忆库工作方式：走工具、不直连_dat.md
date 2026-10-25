@@ -1,0 +1,28 @@
+# fish 记忆库工作方式：走工具、不直连 data/sqlite、编码由系统分配
+
+> 编码：anyi-studio-261022-14 ｜ 类型：rule ｜ 记录于 2026-10-21T22:25:37Z
+
+# fish 记忆库工作方式（anyi-studio / workbuddy-main）
+
+## 一、四类动作各走哪个工具
+| 目的 | 工具 | 关键参数 |
+|---|---|---|
+| 记东西 | `remember` | `project="ANYI"`（本项目固定前缀）、`title`（一句话 ≤80 字）、`body`(Markdown)、`mem_type`、`tags[]`、`cause`、`attachments[]` |
+| 查东西 | `recall`（模糊）或 `resolve_code`（精确） | `recall(query=编码/编码片段/标题关键词, limit)`；`resolve_code(code=完整编码)` 会告诉你「存在吗、是什么、衰减到哪一步」 |
+| 看相关 | `neighbors` | `neighbors(code, n=3, strategy=code/time/tag/type/mixed)` |
+| 体检 | `healthcheck` | 无参，返回 事件数/记忆数/休眠/断链 |
+
+## 二、硬约束
+1. **编码由系统分配，不要自己编**。编码形如 `17926159596950B9E67A9298E4`（26 位），自造编码会造出孤立记忆、断链。
+2. **不要直接读写 `data/` 目录或 sqlite**。那是绕路——会跳过系统的编码分配、SHA256 去重、衰减、断链检查。一切读写走工具。
+3. **附件用本地绝对路径**：`attachments=[{"path": "/绝对/路径/图.png", "caption": "说明"}]`，系统会复制进 `blobs/` 并按 SHA256 去重（同一文件重复挂不会重复占用）。
+
+## 三、mem_type 语义（决定会不会衰减）
+- `identity` / `rule` —— **永不衰减**，适合身份、铁律、工作方式
+- `fact` / `episode` / `lesson` / `artifact` —— 会衰减；但 **`recall` 召回会刷新衰减（被想起即唤醒）**
+
+## 四、本项目约定
+- 项目前缀固定 `ANYI`（对应 anyi-studio 工作空间 `I:/app/anyi-studio-AI工作空间`）
+- 本会话身份：`workbuddy-main`（公民 `17926159596950B9E67A9298E4`，形态 role，宿主 workbuddy，会话名 anyi-dev），主人＝安逸
+
+

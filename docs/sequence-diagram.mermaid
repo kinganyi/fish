@@ -1,0 +1,196 @@
+%% 大肥鱼生命系统 · 关键流程时序图（6 张）· v0.2
+%% 权威：10-架构设计-平台化-v0.2.md §4.1–§4.6 —— 与文档逐字同源，改图必须两处同改
+%% v0.1 原件在 docs/历史版本/v0.1/sequence-diagram.mermaid（对照 11 评审报告用）
+%% Mermaid 一次渲染一张：用 `%% ==== 流程 N ====` 切段，编辑器里按段预览。
+
+%% ==== 流程 1 · 会话开场（三条通道，证据级别各不相同） · 正文 §4.1 ====
+sequenceDiagram
+    autonumber
+    participant H as 宿主(DSH/WorkBuddy/ZCode)
+    participant HK as hook(SessionStart)
+    participant SH as 工具 shell
+    participant M as 模型
+    participant C as fish CLI
+    participant S as fish MCP
+    participant DB as index.sqlite
+
+    Note over H,DB: 通道 A（hook 已挂）：宿主投递 payload → machine<br/>通道 B（未挂 hook）：模型在工具 shell 跑一条 CLI → machine<br/>通道 C（只有 MCP）：session_open → 只可能 self-reported
+    alt 通道 A · hook
+        H->>HK: SessionStart(payload: session_id, cwd)
+        HK->>C: fish session-open --from-hook（payload 走 stdin）
+        C->>C: 校验 payload 必含 session_id/cwd，缺失即非 0 退出（不降级）
+    else 通道 B · shell
+        M->>SH: fish session-open --from-shell
+        SH->>C: 同一进程内启动
+        C->>C: 读自身 env 的 DSH_SESSION_ID / CODEBUDDY_SESSION_ID
+    else 通道 C · 只有 MCP
+        M->>S: session_open(alias, account_key, project)   %% 无 machine_session_id 参数
+        S->>S: 证据级别固定 = self-reported
+    end
+    C->>DB: SELECT citizens WHERE host=? AND host_session_key=? AND archived_at IS NULL
+    alt 已存在该会话公民
+        C->>DB: UPDATE last_seen_at；alias/项目变化则记档期或改 alias
+    else 首次
+        C->>DB: upsert agent_accounts(account_key=host[:profile])
+        C->>DB: INSERT citizens(kind=visitor, account_id, host_session_key, evidence_level=machine)
+        C->>DB: INSERT project_stints(from=now)（若给了 project）
+        C->>DB: append_event('session.opened', {channel, token_fp, evidence})
+    end
+    C->>DB: INSERT session_tokens(channel='cli'|'hook', evidence_level='machine')
+    C-->>M: session_key + 身份四维 + 证据级别 + 到期时间
+    M->>S: 之后每次调用带 session_key
+    S->>DB: SELECT … WHERE token_hash=sha256(key) AND 未过期未撤销
+    S-->>M: 归属四元组（无状态，不缓存；inherited 走一跳）
+
+%% ==== 流程 2 · 进入项目：看板（含 ensure_board）→ 签到 → 项目 brief · 正文 §4.2 ====
+sequenceDiagram
+    autonumber
+    participant M as 模型
+    participant S as fish MCP
+    participant B as board.py
+    participant DB as index.sqlite
+    participant F as 看板 md 文件
+
+    M->>S: board(action=show, scope=project, project=ANYI, session_key=K)
+    S->>DB: 校验 K → (citizen, agent, evidence)
+    S->>B: show(ANYI, period=今天)
+    B->>DB: ensure_board(project, ANYI, 'YYMMDD') %% 幂等 upsert，无行则建
+    B->>DB: SELECT presence WHERE expires_at > now
+    B->>DB: SELECT 今日 board.checkin + memory.recorded（该项目）
+    B-->>S: 在场表 + 今日动态 + 待了结 + "你还没签到"
+    S-->>M: 文本（含"开工前请 checkin"）
+    M->>S: board(action=checkin, state=online, doing="做身份层", surfaces=["fishlib/identity.py"], note="…")
+    S->>B: checkin()
+    B->>DB: 若档期 project != 本次 → 关旧档（closed_reason='switch'）+ 开新档 + append_event('session.project_switched')
+    B->>DB: UPSERT presence(board_id, citizen_id, agent_id) ON CONFLICT DO UPDATE
+    B->>DB: append_event('board.checkin', {state, doing, surfaces, note})
+    B->>B: 渲染前算字节数；超 board.max_bytes → 升级 period_key 到 'YYMMDD-HH'
+    B->>F: 临时文件 + os.replace 原子写（内容 hash 未变则跳过）
+    S-->>M: "已签到 · 你在 ANYI 的占用面：fishlib/identity.py"
+
+%% ==== 流程 3 · 写一条记忆（归属来自凭证，不来自参数） · 正文 §4.3 ====
+sequenceDiagram
+    autonumber
+    participant M as 模型
+    participant S as fish MCP
+    participant ID as identity.py
+    participant MEM as memory.py
+    participant DB as index.sqlite
+    participant FS as projects/*.md
+
+    M->>S: remember(project=ANYI, title, body, session_key=K)
+    S->>ID: resolve(K) → {citizen?, agent?, evidence_level, attribution}
+    alt 无凭证
+        ID-->>S: {citizen: None, attribution: 'unattributed'}
+        Note over S: 按 §9.2 的口径处理（默认"允许+计数"，需用户决策改"拒绝"）
+    end
+    S->>MEM: record_memory(..., owner=解析结果)
+    MEM->>MEM: 校验 occurred_at（分配编码之前，避免空号）
+    MEM->>DB: BEGIN IMMEDIATE → next_code → UPDATE code_registry → COMMIT
+    MEM->>FS: 写正文 md + 计算 body_sha256（M-4 预留）
+    MEM->>DB: INSERT code_index(owner, agent_id, attribution, evidence_level, session_actor=alias快照)
+    MEM->>DB: append_event('memory.recorded', {code, occurred_at, owner, agent_id, evidence, …})
+    MEM->>DB: FTS 索引（ADR-005）+ 若 FTS 缺行则定向补
+    MEM-->>S: (code, rel_path)
+    S-->>M: 编码 / 路径 / 归属行 / 未签到提示（若未签到）
+
+%% ==== 流程 4 · 子 agent（继承一跳，不能链式漂白） · 正文 §4.4 ====
+sequenceDiagram
+    autonumber
+    participant P as 父会话(模型)
+    participant S as fish MCP
+    participant C1 as 子agent-A
+    participant DB as index.sqlite
+
+    P->>S: session_agent(action=spawn, label=工程师, session_key=Kp)
+    S->>DB: 校验 Kp → 父 (citizen=Cp, level=machine)
+    S->>DB: INSERT citizen_agents(agent_id=A1, citizen_id=Cp)
+    S->>DB: INSERT session_tokens(channel='mcp', evidence_level='inherited', inherited_from=hash(Kp), agent_id=A1)
+    S-->>P: agent_id=A1 + 子 token K1（一次性显示）
+    P->>S: session_agent(action=spawn, label=QA, session_key=Kp)
+    S-->>P: agent_id=A2 + K2
+    Note over P: 把 K1/K2 写进子 agent 的启动提示（通道 S3）
+    par 并行
+        C1->>S: remember(..., session_key=K1)
+        S->>DB: resolve(K1) → 一跳取父级别=machine → owner=Cp, agent_id=A1
+    and
+        C1->>S: session_open(parent_token=K1)  %% 试图再继承一层
+        S-->>C1: 拒绝（父为 inherited，不许链式漂白）
+    end
+
+%% ==== 流程 5 · 画像采纳（三层门 + 签名 + 验签读） · 正文 §4.5 ====
+sequenceDiagram
+    autonumber
+    participant M as 模型
+    participant S as fish MCP
+    participant PS as persona.py
+    participant U as 人（终端）
+    participant G as gate.py 控制台门
+    participant SG as signer.py
+    participant DB as index.sqlite
+    participant TR as events 触发器
+
+    M->>S: persona(action=suggest, slot_key=work.current_focus, proposed_value=…, rationale=…, session_key=K)
+    S->>PS: suggest()
+    PS->>DB: INSERT persona_suggestions(status=pending, proposed_by=citizen)
+    PS->>DB: append_event('persona.suggested', {slot, proposed, by})
+    S-->>M: "建议已进队列（id=PS-…），等主人采纳；你不能改画像，系统也没有采纳工具"
+
+    Note over M,S: ★ 门 1（工具面）：MCP 工具表里没有 persona_apply，tools/list 不含它
+    M->>M: 试图跑 CLI：fish persona apply PS-…
+    M->>G: 工具 shell 启动 CLI（无控制台、无口令来源）
+    G->>G: 检查 GetConsoleMode(stdin) 成功 + stdin 能读到非空口令
+    G-->>M: 失败：exit 4，「采纳必须在交互终端由人执行」（见 §4.7 边界）
+
+    U->>G: 在人自己的终端跑：fish persona apply PS-…
+    G->>G: 控制台检查通过 → getpass 读口令（不回显、不进 argv）
+    G->>SG: derive_seed(passphrase, salt, iters) → Ed25519 私钥（仅内存）
+    SG->>DB: SELECT kid, algo, pubkey, prev_kid, attested_sig FROM persona_keys
+    SG->>SG: 先验 kid 链（genesis→tip，逐枚用上一枚公钥验 attested_sig）→ 取 tip 为"当前活跃 kid"
+    SG->>SG: 用派生私钥自检：公钥必须与 tip 登记的一致（防口令错）
+    SG->>DB: BEGIN IMMEDIATE
+    SG->>DB: INSERT persona_adaptations(prev=上一条, kid, sig, sig_msg, applied_by='human:tty')
+    SG->>DB: UPDATE persona_suggestions SET status='accepted', decided_by=…
+    SG->>DB: append_event('persona.adapted', actor{evidence_level:'signed', sig, kid, sig_msg})
+    DB->>TR: BEFORE INSERT 校验：signed + sig + kid + sig_msg 四项齐全
+    alt 缺任一
+        TR-->>SG: ABORT('persona.adapted requires signed human actor with sig/kid/sig_msg')
+    else 形状通过（真伪由读取方验签）
+        SG->>DB: COMMIT
+    end
+    SG-->>U: 已采纳；kid=pk-…-01，sig 指纹 <前 12 位>，版本 N
+
+    M->>S: persona(action=view)
+    S->>PS: verified_slots()（★ 每行用公钥验签 + 校验链）
+    PS->>PS: 先验 kid 链（genesis→tip；伪造 kid 挂不上链 → 该 kid 的所有行不可信）
+    PS->>DB: SELECT * FROM persona_slots_latest
+    PS->>PS: 逐行 verify(sig, sig_msg) + 校验 sig_msg 字段与行一致 + 校验 prev 链
+    alt 有未验签/验签失败行
+        PS-->>M: 只返回验签通过的值，另附「N 条未验签变更被忽略（见 fish verify --security）」
+    else 全部通过
+        PS-->>M: 值 + "由主人在 <ts> 采纳（kid=…）"
+    end
+
+%% ==== 流程 6 · 归档清扫（S-2 的驱动者与顺序） · 正文 §4.6 ====
+sequenceDiagram
+    autonumber
+    participant T as 计划任务 fish_daily_report（每日 23:00）
+    participant R as daily_report.py
+    participant SW as sweeper.py
+    participant AR as archive.py
+    participant DB as index.sqlite
+
+    T->>R: 启动（实测在册，Last Result 0）
+    R->>R: ① wal_checkpoint(TRUNCATE) ② VACUUM INTO 备份 ③ 校验备份（失败则中止，不扫）
+    R->>SW: ④ sweep_stale_stints(apply=True)
+    SW->>DB: SELECT project_stints WHERE to_ts IS NULL AND from_ts < now - stint.max_open_hours
+    SW->>DB: BEGIN IMMEDIATE → 逐条 UPDATE to_ts + closed_reason='stale_timeout'
+    SW->>DB: append_event('session.closed', {reason:'stale_timeout', …})
+    SW->>DB: COMMIT
+    R->>AR: ⑤ archive_citizens(apply=True, limit=200)
+    AR->>DB: 候选 = archived_at IS NULL AND status IN ('active','retired') AND is_owner=0
+    AR->>DB: AND COALESCE(last_seen_at,created_at) < cutoff
+    AR->>DB: AND citizen_id NOT IN (SELECT … FROM project_stints WHERE to_ts IS NULL)  %% 此时已无陈旧开档
+    AR->>DB: BEGIN IMMEDIATE → 搬 citizens/citizen_agents → 删 tokens/presence → append_event('session.closed',{reason:'timeout_archive'})
+    AR->>DB: COMMIT
+    R->>R: ⑥ 把 stints_closed / citizens_archived 写进 _meta.json（可审计）

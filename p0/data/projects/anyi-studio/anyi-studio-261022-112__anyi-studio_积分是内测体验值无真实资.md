@@ -1,0 +1,34 @@
+# anyi-studio 积分是内测体验值无真实资金；users 表要彻底删不要兼容视图
+
+> 编码：anyi-studio-261022-112 ｜ 类型：rule ｜ 记录于 2026-10-22T09:57:21Z
+
+## 一、积分 = 内测体验值（定级前提）
+
+安逸原话（2026-10-22）：「现在平台中的所有『积分』都是内测体验性质的，且没有人真的给过我钱，是完全可以不考虑的问题，远不如系统架构问题重要。」
+
+**含义**：评估任何积分/余额/流水/批次类缺陷时，**先按“内测体验值”定级**，不要按资金系统标准定 P0。不存在外部对账、退款、提现需求。
+
+本次被降级的（保留留痕，不再追）：
+- 510 积分归属（已证为何能本人余额）
+- 3 户账实不符（大勇 +68、何能 +10、user12 +10）
+- D-1 平账门默认只检 tenant 1（且零生产调用方）
+- D-2 退款未命中明细写永久批（效期洗白）
+- D-3 daily_login 赠送因 RLS 拒绝流水而单边增发（enabled=1、amount=10，且幂等因流水写不进而失效）
+
+## 二、users 表：彻底删除，不建兼容视图
+
+安逸原话：「可以彻底删除相关任何多余的表和信息吗？我不能接受相关污染」
+
+**视图才是污染源**：它让 users 这个名字继续活在 schema 里，下一轮 AI 看到仍当它权威。**关键区别：改名后任何残留引用立刻报错（=最好的静态检查），视图会静默成功。**
+
+**能删干净的依据（生产实测）**：
+1. users 零独占数据：phone/email/must_change_password 全 0 条；password_hash/display_name 与 identity 100% 一致（diff=0）
+2. 指向 users.id 的真实外键只有 1 个（user_bindings_user_id_fkey）；全库外键仅 13 个 ⇒ 33 个 user_id 列里 32 个是裸列名，改值不级联失败
+3. 43 行，41 人两套 id 已相等 ⇒ 实际只需改 2 个人
+
+**三步路径**：①代码侧（require_identity_id 统一取号，95+215 处）②数据侧（2 人 10 列 ≈5294 行；user_bindings 摘 FK 改值重指；team_id 21 条归 tenant_members；source 归 identity）③ALTER TABLE users RENAME TO _dropped_users_20261022 → 观察 7 天 → DROP TABLE
+
+**第四步不可省：列名也是污染** — 32 个裸列值已是 identity 但名还叫 user_id。需 user_id→identity_id、owner_user_id→owner_identity_id、created_by→creator_identity_id。不做这步，认知负担只是从表名转到列名。
+
+**架构正解**：一套 UID = identity_accounts.id（全局唯一）+ tenant_members（人×站点关系，1:N，已在承载 member_role/quota_*）+ 业务表 tenant_id。多站点从未依赖 users；恰恰是 users.tenant_id NOT NULL 锁死了单站点。
+
