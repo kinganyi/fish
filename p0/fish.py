@@ -68,11 +68,12 @@ from fish_kb import (  # noqa: F401
     KB_TREE_MAX_DEPTH, KB_UNATTRIBUTED, KB_VIAS, _KB_ACCESS_DDL, _KB_ACCESS_INDEXES,
     _KB_DEVICE_NAMES, _KB_FIT_MARKER_RE, _KB_FM_KEY_RE, _KB_PASSWORD_PATTERN,
     _KB_PASSWORD_RE, _KB_PATH_STATS_COLUMNS, _KB_PATH_STATS_VIEW, _KB_SCHEMA,
-    _KB_TREE_DEPTH_RULE, _KB_VAULT_COLS, _KB_VAULT_DDL, _KB_VAULT_INDEXES,
+    _KB_TOC_TITLE_BYTES, _KB_TREE_DEPTH_RULE, _KB_VAULT_COLS, _KB_VAULT_DDL, _KB_VAULT_INDEXES,
     _KB_VAULT_SELECT, _STRICT_FALSE, _STRICT_TRUE, _kb_app_running,
     _kb_backfill_mandatory_globs, _kb_backup_finalize, _kb_backup_meta,
     _kb_backup_slug, _kb_backup_stats, _kb_cmd_backup, _kb_cmd_doctor, _kb_cmd_open,
-    _kb_cmd_rollback, _kb_cmd_search, _kb_cmd_stats, _kb_cmd_tree, _kb_cmd_vault,
+    _kb_cmd_rollback, _kb_cmd_search, _kb_cmd_stats, _kb_cmd_toc, _kb_cmd_tree,
+    _kb_cmd_vault,
     _kb_cmd_write, _kb_commands_ready, _kb_dir_bytes, _kb_effective_globs,
     _kb_exit_code, _kb_first_reparse, _kb_fit_text, _kb_fit_text_with_tail,
     _kb_fmt_mtime, _kb_guard, _kb_ignored, _kb_is_device_name, _kb_is_reparse_entry,
@@ -81,12 +82,12 @@ from fish_kb import (  # noqa: F401
     _kb_parse_budget, _kb_parse_frontmatter_args, _kb_quote, _kb_read_content_file,
     _kb_reject, _kb_rel_posix, _kb_render_document, _kb_same_name, _kb_scalar,
     _kb_scan_counts, _kb_search_impl, _kb_search_multi, _kb_sensitive_notice,
-    _kb_split_frontmatter, _kb_tree_dir, _kb_tree_impl, _kb_tree_lines,
+    _kb_split_frontmatter, _kb_toc_title, _kb_tree_dir, _kb_tree_impl, _kb_tree_lines,
     _kb_tree_tail_hint, _kb_validate_globs, _kb_vault_brief, _kb_vault_dict,
     _kb_vault_line, _kb_vault_norm, _kb_walk, _kb_within_budget, _kb_write_impl,
     _strict_bool, kb_atomic_write, kb_backup, kb_backup_prune, kb_detect_eol,
     kb_detect_text, kb_doctor, kb_log_access, kb_open, kb_read_text, kb_resolve_target,
-    kb_rollback, kb_search, kb_sha256_bytes, kb_sha256_file, kb_stats, kb_tree,
+    kb_rollback, kb_search, kb_sha256_bytes, kb_sha256_file, kb_stats, kb_toc, kb_tree,
     kb_vault_add, kb_vault_get, kb_vault_list, kb_vault_remove, kb_vault_scan,
     kb_vault_set_default, kb_vault_set_mode, kb_write,
 )
@@ -13273,6 +13274,8 @@ def cmd_kb(args):
                 return _kb_cmd_vault(conn, args)
             if act == "tree":
                 return _kb_cmd_tree(conn, args)
+            if act == "toc":
+                return _kb_cmd_toc(conn, args)
             if act == "open":
                 return _kb_cmd_open(conn, args)
             if act == "search":
@@ -13623,6 +13626,17 @@ def main():
     kt.add_argument("--max-chars", dest="max_chars", type=int, default=8000)
     kt.add_argument("--json", action="store_true")
     kt.set_defaults(func=cmd_kb)
+
+    # T05：目录快照（36/37 号"档 1"最小版）——分类概览 + 前 3 标题 + 分页。
+    ktc = ksub.add_parser("toc", help="目录快照（分类概览 + 前 3 标题 + 分页；海量库省 token）")
+    ktc.add_argument("path", nargs="?", default="", help="起点（vault 内相对路径；缺省=根）")
+    ktc.add_argument("--vault", default=None)
+    ktc.add_argument("--depth", type=int, default=2)
+    ktc.add_argument("--limit", type=int, default=None, help="每页最多几项（缺省=全部）")
+    ktc.add_argument("--offset", type=int, default=0, help="跳过的项数（翻页）")
+    ktc.add_argument("--max-chars", dest="max_chars", type=int, default=8000)
+    ktc.add_argument("--json", action="store_true")
+    ktc.set_defaults(func=cmd_kb)
 
     ko = ksub.add_parser("open", help="读单文件（必须给显式相对路径）")
     ko.add_argument("path")

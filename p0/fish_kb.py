@@ -1665,6 +1665,121 @@ def _kb_tree_impl(conn, vault_row, *, rel, depth, max_chars, max_tokens,
             "truncated_reasons": fitted["truncated_reasons"]}
 
 
+_KB_TOC_TITLE_BYTES = 2048      # 只读文件头这么多字节找标题（information scent 够用）
+
+
+def _kb_toc_title(path) -> str:
+    """取 `.md` 的标题：首个 `# xxx` 行；没有则用文件名（stem）。**只读文件头**。
+
+    为什么自己解码而不是调 `kb_detect_text`：那个函数只判"是不是文本"（返回
+    is_text/encoding/media），**不回传正文**；toc 只需要标题，按同一顺序试
+    utf-8-sig → utf-8 → gb18030 即可（与 KB-12 的编码口径一致）。
+    """
+    try:
+        raw = path.read_bytes()[:_KB_TOC_TITLE_BYTES]
+    except OSError:
+        return Path(path).stem
+    text = ""
+    for enc in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("# ") and len(line.strip()) > 2:
+            return line[2:].strip()[:60]
+    return Path(path).stem
+
+
+def kb_toc(conn, vault_row, *, rel="", depth=2, limit=None, offset=0,
+           max_chars=8000, max_tokens=1200, citizen_id=None, via="cli:kb") -> dict:
+    """目录快照（TOC）：**分类概览 + 每组前 3 个标题**（36/37 号的"档 1"最小版）。
+
+    与 `kb_tree` 的分工：
+      · `kb_tree` = "看某一层"（可递归展开到 depth，列文件名）；
+      · `kb_toc`  = "一眼看全库结构"：每个目录只给 **文件数 + 前 3 个标题**（information scent），
+        支持 `limit/offset` 对**当前层目录/文件**分页——海量库下 token 省 90%+。
+
+    为什么必须给标题（36 号 §2.4 的 GraphRAG 判据）：只有「10-漫剧（194 个文件）」
+    时，调用方判断不了"要不要下钻"；补上前 3 个标题（「西游逆局」「sss级机娘」…）
+    才有 information scent——这是分页"有效"与"无效"的分界。
+
+    判据：T1（分类+计数+前 3 标题）/ T2（token ≤ 同 depth 的 kb_tree 的 40%）/
+    T3（offset 越界 → 空 + 明说"不是空库"）/ T4（`limit` 截断必须给翻页提示）。
+    """
+    as_of = datetime.datetime.now().astimezone()
+    try:
+        want_depth = max(1, min(int(depth), KB_TREE_MAX_DEPTH))
+    except (TypeError, ValueError) as exc:
+        raise KBError("bad_usage", f"depth 必须是整数，收到 {depth!r}", detail=exc)
+    globs = _kb_effective_globs(vault_row.get("ignore_globs") or [])
+    root = Path(vault_row["path"])
+    if not root.is_dir():
+        raise KBError("offline", f"知识库不在线：{root}",
+                      hint="检查盘符/目录是否改名；toc 需要实时目录（无缓存）")
+    target = kb_resolve_target(vault_row, rel)
+    start = target["abs"]
+    if not start.exists():
+        raise KBError("not_found", f"知识库里没有这个目录：{target['rel']}")
+    t0 = time.perf_counter()
+    tree = _kb_tree_dir(vault_row, start, level=0, max_depth=want_depth, globs=globs)
+    ms = int((time.perf_counter() - t0) * 1000)
+    by_rel = {d["rel"]: d for d in tree["dirs"]}
+    items = []
+    for it in tree["children"]:
+        if it["is_dir"]:
+            child = by_rel.get(it["rel"])
+            titles = []
+            if child:
+                for c in child["children"]:
+                    if not c["is_dir"] and c["name"].lower().endswith(".md"):
+                        titles.append(_kb_toc_title(root / c["rel"]))
+                        if len(titles) >= 3:
+                            break
+            items.append({"kind": "dir", "name": it["name"], "rel": it["rel"],
+                          "files": child["notes"] if child else 0,
+                          "titles": titles})
+        else:
+            items.append({"kind": "file", "name": it["name"], "rel": it["rel"],
+                          "files": 1,
+                          "titles": [_kb_toc_title(root / it["rel"])]})
+    total = len(items)
+    off = max(0, int(offset or 0))
+    lim = None if limit in (None, 0) else max(1, int(limit))
+    page = items[off: off + lim] if lim else items[off:]
+    lines = [f"# 知识库目录快照 · {vault_row['name']}", ""]
+    lines.append(f"> {tree['notes']} 篇笔记 / {tree['files']} 个文件 / "
+                 f"{len(tree['dirs'])} 个目录（本层 {total} 项，显示 {len(page)} 项；"
+                 f"depth={want_depth}）")
+    lines.append("")
+    for row in page:
+        if row["kind"] == "dir":
+            head = f"{row['name']}/  {row['files']} 篇"
+            if row["titles"]:
+                head += "  ← " + "、".join(f"「{t}」" for t in row["titles"])
+            lines.append(head)
+        else:
+            title = row["titles"][0] if row["titles"] else row["name"]
+            lines.append(f"{row['name']}  ← 「{title}」")
+    if off >= total and total:
+        lines += ["", f"> offset={off} 越过本层 {total} 项——没有更多内容（不是空库）。"]
+    elif lim and off + lim < total:
+        lines += ["", f"> 还有 {total - off - lim} 项（翻页：--offset {off + lim} "
+                      f"--limit {lim}）"]
+    fitted = _kb_fit_text(lines, max_chars=max_chars, max_tokens=max_tokens)
+    _kb_log_quiet(conn, vault_row, rel=target["rel"], action="toc",
+                  citizen_id=citizen_id, via=via, bytes_=fitted["chars"],
+                  meta={"depth": want_depth, "total": total, "offset": off,
+                        "limit": lim, "scan_ms": ms})
+    return {"vault": _kb_vault_brief(vault_row), "as_of": iso_local(as_of),
+            "root": _kb_rel_posix(target["rel"]), "depth": want_depth,
+            "total": total, "offset": off, "limit": lim, "shown": len(page),
+            "items": page, "text": fitted["text"], "chars": fitted["chars"],
+            "tokens": fitted["tokens"], "truncated": fitted["truncated"]}
+
+
 def _kb_vault_brief(vault_row) -> dict:
     return {"name": vault_row.get("name"), "id": vault_row.get("vault_id"),
             "mode": vault_row.get("mode"), "path": vault_row.get("path")}
@@ -3032,6 +3147,23 @@ def _kb_cmd_tree(conn, args) -> int:
     print("")
     print(f"合计：{scan['files']} 文件 / {scan['bytes']} 字节 / {scan['ms']} ms"
           + ("（离线：上次扫描数）" if scan.get("stale") else "")
+          + f"｜chars={res['chars']} tokens={res['tokens']}"
+          + f" truncated={res['truncated']}")
+    return 0
+
+
+def _kb_cmd_toc(conn, args) -> int:
+    """`fish kb toc`（T05）：目录快照——分类概览 + 每组前 3 标题 + 分页。"""
+    vault = kb_vault_get(conn, args.vault)
+    res = kb_toc(conn, vault, rel=args.path or "", depth=args.depth,
+                 limit=args.limit, offset=args.offset,
+                 max_chars=args.max_chars, via="cli:kb")
+    if args.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0
+    print(res["text"])
+    print("")
+    print(f"合计：{res['total']} 项（显示 {res['shown']}）"
           + f"｜chars={res['chars']} tokens={res['tokens']}"
           + f" truncated={res['truncated']}")
     return 0
