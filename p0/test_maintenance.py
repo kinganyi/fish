@@ -280,7 +280,9 @@ class M3LedgerTest(_Base):
             self.assertIsNotNone(row[2], name)
             self.assertIsNotNone(row[3], name)
 
-        after = {task["name"]: task for task in fm.maintenance_status(self.conn)["tasks"]}
+        after = {task["name"]: task
+                 for task in fm.maintenance_status(
+                     self.conn, now=fm._parse_utc(NOW))["tasks"]}
         for name in ("kb_reindex", "links_rebuild", "push_log_prune",
                      "citizens_archive", "fts_verify"):
             self.assertFalse(after[name]["due"], name)

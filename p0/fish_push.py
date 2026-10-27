@@ -343,13 +343,25 @@ def _cand(conn, code, kind, *, title, reason, current_project,
         out["freshness"] = {k: freshness.get(k) for k in ("factor", "band", "age_days")}
     return out
 
-def _kb_use_index() -> bool:
-    """`FISH_KB_USE_INDEX=1` 才走索引路径（默认 legacy：零回归；显式开启后才换路径）。
+def _kb_use_index(conn=None) -> bool:
+    """是否走索引路径：环境变量 `FISH_KB_USE_INDEX` 优先，其次 config `push.kb_use_index`。
 
-    为什么默认不切：生产库里 `kb_index`/`kb_fts` 还不存在（T04 是"先交付索引层，
-    再接线"）；默认 legacy 保证"合并即回归"，开启前必须先跑一次 `rebuild_kb_index`。
+    默认 **False**（legacy 零回归）；生产库建好 `kb_index` 后由 config 开启
+    （hook 进程继承不到系统环境变量，config 才是实机主开关）。
+    索引陈旧/未建时由 K7 断路器返回空——**不会推错内容**。
     """
-    return (os.environ.get("FISH_KB_USE_INDEX") or "").strip() == "1"
+    env = (os.environ.get("FISH_KB_USE_INDEX") or "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if env in ("0", "false", "no", "off"):
+        return False
+    if conn is None:
+        return False
+    try:
+        return str(get_config(conn, "push.kb_use_index")).strip().lower() in (
+            "true", "1", "yes", "on")
+    except Exception:      # noqa: BLE001 —— 读不到就按关闭（零回归）
+        return False
 
 
 def _kb_push_candidates_index(conn, q, *, project, exclude, limit, now) -> list:
@@ -426,7 +438,7 @@ def _kb_push_candidates(conn, root, *, query, project=None, exclude=(), limit=2,
         return []
     # T04 接线（评审 🔴-1，2026-10-27）：`FISH_KB_USE_INDEX=1` 才走索引路径；
     # 默认 legacy（零回归——生产库还没有 kb_index 表）。
-    if _kb_use_index():
+    if _kb_use_index(conn):
         out = _kb_push_candidates_index(conn, q, project=project, exclude=exclude,
                                         limit=limit, now=now)
         return _breaker(conn, root, "kb", started, query, out)

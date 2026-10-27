@@ -27,6 +27,7 @@
 """
 import datetime
 import re
+import sys
 import uuid
 from pathlib import Path
 
@@ -134,6 +135,29 @@ import sqlite3
 import datetime
 import time
 
+_WARN_DERIVED_SEEN = {}
+
+
+def warn_derived(conn, what, exc=None) -> None:
+    """派生数据写失败 → **出声**（stderr 一行），但绝不抛。
+
+    为什么不是 raise：旁路数据（审计/采纳/图边）失败不该打挂主流程——这是设计者的
+    取舍，我保留；但"静默"会让复盘得出错误结论（06 号报告 P0-1 的实证：`tool-calls`
+    缺失会让人说"这工具从没人用"）。折中：成功路径照常，尾部一行
+    `⚠ 派生写入失败：<what>：<原因>`（每种限 20 次，避免刷屏）。
+    """
+    key = str(what or "")
+    try:
+        if _WARN_DERIVED_SEEN.get(key, 0) >= 20:
+            return
+        _WARN_DERIVED_SEEN[key] = _WARN_DERIVED_SEEN.get(key, 0) + 1
+        detail = f"：{type(exc).__name__}: {exc}" if exc is not None else ""
+        sys.stderr.write(f"⚠ 派生写入失败：{key}{detail}\n")
+        sys.stderr.flush()
+    except Exception:      # noqa: BLE001 —— 警告本身绝不能炸
+        pass
+
+
 CONFIG_DEFAULTS = {
     "neighbors.strategy": ("mixed", "enum", ["code", "time", "tag", "type", "mixed"]),
     "neighbors.n": (3, "int", None),
@@ -205,6 +229,9 @@ CONFIG_DEFAULTS = {
     "push.after_tool_budget_tokens": (100, "int", None),  # 工具后推送预算
     "push.situational_budget_tokens": (80, "int", None),  # 态势预警预算
     "push.after_tool_every_n_calls": (10, "int", None),   # 工具后推送频率：每 N 次最多 1 次
+    # T04 接线（评审 🔴-1 的收口）：知识库候选走 `kb_index`（FTS）而不是每次全库 walk。
+    # 默认 False（零回归）；生产库建好索引后由 config 开启；`FISH_KB_USE_INDEX` 环境变量优先。
+    "push.kb_use_index": (False, "bool", None),
     "push.gap_window_days": (14, "int", None),            # 遗漏检测窗口（§3.3-B ②）
     "push.gap_others_read_min": (3, "int", None),         # 「别人常读」的次数下限
     "push.situational_window_min": (10, "int", None),     # 态势窗口（§3.3-C ②）

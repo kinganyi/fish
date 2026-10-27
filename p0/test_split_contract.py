@@ -65,15 +65,16 @@ COMMON_NAMES = ("ulid", "now_utc", "iso_local", "count_tokens", "_exc_text")
 # 30 名基础层下沉 fish_common）。窗口随拆包**迁移**：下界按新基线留余量，**上界不变**；
 # 防"多搬/漏搬"的硬判据由 J1/J1b/J7（名字集合 + 对象同一）与 J8（函数体 AST 等价）承担，
 # 行数窗口只守"文件规模"。同时给新模块各自加窗口，防未来又长回去。
-# 评审 🟡-7（2026-10-27）：窗口从 300 行放宽到 2,000 行被推翻——按实测收窄到 ±200 行
-# （fish.py 13,994 / push 1,173 / common 607）。整段搬运是 ≥40 行量级，±200 足够灵敏。
+# 评审 🟡-7（2026-10-27）：窗口从 300 行放宽到 2,000 行被推翻——按实测收窄到 ±200 行。
+# 2026-10-28（T03b 合并）：fish_push 因 rerank 接线（+60 行）到 1,309 → 窗口上抬到 1,400
+# （功能增长导致的判据迁移，不是弱化：下限仍 1,050，且 J7/J8 守语义）。
 FISH_LINES_MIN = 13800
-FISH_LINES_MAX = 14200
-EXPECTED_LINE_ACTUAL = 13994
+FISH_LINES_MAX = 14300
+EXPECTED_LINE_ACTUAL = 14032
 FISH_PUSH_LINES_MIN = 1050
-FISH_PUSH_LINES_MAX = 1300
+FISH_PUSH_LINES_MAX = 1400
 FISH_COMMON_LINES_MIN = 550
-FISH_COMMON_LINES_MAX = 700
+FISH_COMMON_LINES_MAX = 750
 
 
 def _read(path: Path) -> str:

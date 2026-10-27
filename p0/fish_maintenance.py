@@ -268,10 +268,14 @@ def _record_run(conn, name, *, status, error, affected, seconds, at):
     conn.commit()
 
 
-def maintenance_status(conn):
-    """台账全貌（供 CLI/日报/判据读）：七个任务 + 到期判断 + 上次读数。"""
+def maintenance_status(conn, *, now=None):
+    """台账全貌（供 CLI/日报/判据读）：七个任务 + 到期判断 + 上次读数。
+
+    `now`：判定到期的时间基准（缺省 = 真 UTC now）。**测试必须传固定 NOW**——
+    否则"跑完立刻 due=False"的断言会在 NOW + interval 之后变成红（时间敏感）。
+    """
     ensure_maintenance_tables(conn)
-    now_dt = _utcnow()
+    now_dt = now if now is not None else _utcnow()
     tasks = []
     for name in TASK_ORDER:
         row = _ledger_row(conn, name)

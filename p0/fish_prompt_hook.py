@@ -117,11 +117,19 @@ def prompt_gate(session_id: str, prompt: str, data_dir=None, *, now=None) -> dic
     return {"pass": True, "reason": "ok", "digest": digest}
 
 
-def ask_fish(raw: str, host: str, data_dir=None, *, timeout: int = 10) -> str:
-    """把 payload 交给 `fish prompt-push`，返回它吐出的纯文本（失败返回空串）。"""
+def ask_fish(raw: str, host: str, data_dir=None, *, timeout: int = 3):
+    """把 payload 交给 `fish prompt-push`，返回 `(文本, 状态)`。
+
+    状态：`ok` / `timeout` / `fail` / `skip`（找不到 fish.py）。
+
+    **为什么 timeout 从 10 降到 3**（B 报告 BUG-1）：宿主对 UserPromptSubmit 的硬超时
+    也是 10s，两者等值 → 子进程稍慢一步就被宿主杀掉，并把**用户整条 prompt** 判成
+    block（记忆系统是旁路增强，不该有阻塞主流程的权力）。3s ≈ 稳态（1.5–2.1s）的
+    1.5 倍余量；超时也只是"本次不推"（fail-open）。
+    """
     if not FISH.exists():
         _dbg("找不到 fish.py")
-        return ""
+        return "", "skip"
     cmd = [sys.executable, str(FISH), "--root", str(Path(data_dir or DATA)),
            "prompt-push", "--host", host]
     env = dict(os.environ)
@@ -130,13 +138,89 @@ def ask_fish(raw: str, host: str, data_dir=None, *, timeout: int = 10) -> str:
         proc = subprocess.run(cmd, input=raw, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", env=env,
                               timeout=timeout)
-    except (subprocess.TimeoutExpired, OSError) as exc:
+    except subprocess.TimeoutExpired as exc:
+        _dbg("prompt-push 超时（%ss）：%r" % (timeout, exc))
+        return "", "timeout"
+    except OSError as exc:
         _dbg("prompt-push 失败：%r" % (exc,))
-        return ""
+        return "", "fail"
     if proc.returncode != 0:
         _dbg("prompt-push exit=%s stderr=%s" % (proc.returncode, (proc.stderr or "")[:200]))
-        return ""
-    return (proc.stdout or "").strip()
+        return "", "fail"
+    return (proc.stdout or "").strip(), "ok"
+
+
+# ---------------------------------------------------- 连续超时降级（B 报告 BUG-1 的建议）
+# 3 次连续超时 → 冷却 10 分钟（只心跳、不推送）。目的：在"磁盘忙/杀软扫描"的窗口里
+# 不再反复撞超时（每次撞都可能把用户的一句话判成 block）。
+COOLDOWN_AFTER_TIMEOUTS = 3
+COOLDOWN_SECONDS = 600
+_HOOK_STATE = "prompt_hook_state.json"
+
+
+def _save_hook_state(path, state) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass                    # 状态写不进去 → 只是少一层冷却，不影响正确性
+
+
+def _record_attempt(data_dir, status) -> int:
+    """记一次尝试；返回剩余冷却秒数（>0 = 本次不推送，只心跳）。"""
+    path = Path(data_dir or DATA) / "_audit" / _HOOK_STATE
+    state = {}
+    try:
+        if path.exists():
+            state = json.loads(path.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError):
+        state = {}
+    now = time.time()
+    until = float(state.get("cooldown_until") or 0)
+    if now < until:
+        return int(until - now)
+    streak = int(state.get("timeout_streak") or 0)
+    if status == "timeout":
+        streak += 1
+    elif status == "ok":
+        streak = 0
+    if streak >= COOLDOWN_AFTER_TIMEOUTS:
+        _save_hook_state(path, {"timeout_streak": 0,
+                                "cooldown_until": now + COOLDOWN_SECONDS})
+        return COOLDOWN_SECONDS
+    _save_hook_state(path, {"timeout_streak": streak, "cooldown_until": 0})
+    return 0
+
+
+def _prompt_enabled(data_dir=None) -> bool:
+    """`push.prompt_enabled` 的**快速**检查（不 import fish、不起子进程）。
+
+    为什么要有它（2026-10-28 生产事故）：关闭态下每次 hook 仍会起 `fish prompt-push`
+    （第二个 Python + import fish ≈ 2.7s 起步）；高峰期（并发 / 杀软扫描 / 磁盘忙）
+    这 2.7s 会被推到 10s 超时线——前端AI 在 anyi-studio 连续撞到的 `Hook timed out`
+    就是这个。功能已关时必须**秒退**。
+
+    fail-open：读不到库 / 读不到键 → 按"开启"处理（宁可多花一次子进程，也不因为
+    读库失败而悄悄关掉用户要的功能）。
+    """
+    try:
+        import sqlite3
+        db = Path(data_dir or DATA) / "index.sqlite"
+        if not db.exists():
+            return True
+        conn = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=2)
+        try:
+            row = conn.execute(
+                "SELECT value FROM config WHERE key='push.prompt_enabled'").fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return True
+        return str(row[0]).strip().lower() in ("true", "1", "yes", "on")
+    except Exception:      # noqa: BLE001 —— 读不到就按开启（fail-open 到旧行为）
+        return True
 
 
 def main(argv=None) -> int:
@@ -169,7 +253,15 @@ def main(argv=None) -> int:
     if not gate["pass"]:
         _dbg("gate: %s" % gate["reason"])
         return 0
-    text = ask_fish(raw, host, DATA)
+    # 关闭态秒退（2026-10-28 事故修复）：不 subprocess、不 import fish
+    if not _prompt_enabled(DATA):
+        _dbg("push.prompt_enabled=false → 秒退")
+        return 0
+    text, status = ask_fish(raw, host, DATA)
+    cooldown = _record_attempt(DATA, status)
+    if cooldown:
+        _dbg("连续超时降级：冷却 %ds（只心跳，不推送）" % cooldown)
+        return 0
     if not text:
         return 0
     _emit(text)
