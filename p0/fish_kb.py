@@ -1690,7 +1690,9 @@ def _kb_toc_title(path) -> str:
     text = ""
     for enc in ("utf-8-sig", "utf-8", "gb18030"):
         try:
-            text = raw.decode(enc)
+            # 评审 🟠-3（2026-10-27）：2048B 会切断多字节序列——`errors="ignore"` 让
+            # 截断处不炸（真库 21% 的标题此前因此静默退化成文件名）。
+            text = raw.decode(enc, errors="ignore")
             break
         except UnicodeDecodeError:
             continue
@@ -1753,6 +1755,10 @@ def kb_toc(conn, vault_row, *, rel="", depth=2, limit=None, offset=0,
             items.append({"kind": "file", "name": it["name"], "rel": it["rel"],
                           "files": 1,
                           "titles": [_kb_toc_title(root / it["rel"])]})
+    # 评审 🟠-1（2026-10-27）：`_kb_tree_dir` 每层只留前 `KB_MAX_ITEMS_PER_DIR` 项，
+    # 余下在 `tree["more"]` 里。`total` 必须报**真实子项数**——否则 >20 条的目录
+    # 会被 `offset` 越界分支说成"没有更多内容"（真库 634 条目录实测过）。
+    real_total = len(tree["children"]) + int(tree["more"] or 0)
     total = len(items)
     off = max(0, int(offset or 0))
     lim = None if limit in (None, 0) else max(1, int(limit))
@@ -1771,19 +1777,26 @@ def kb_toc(conn, vault_row, *, rel="", depth=2, limit=None, offset=0,
         else:
             title = row["titles"][0] if row["titles"] else row["name"]
             lines.append(f"{row['name']}  ← 「{title}」")
-    if off >= total and total:
-        lines += ["", f"> offset={off} 越过本层 {total} 项——没有更多内容（不是空库）。"]
+    if off >= real_total and real_total:
+        lines += ["", f"> offset={off} 越过本层 {real_total} 项——没有更多内容（不是空库）。"]
     elif lim and off + lim < total:
+        # 调用方主动 `limit` 截断：**优先**给翻页提示（别把"调用方截断"说成"显示上限"）
         lines += ["", f"> 还有 {total - off - lim} 项（翻页：--offset {off + lim} "
                       f"--limit {lim}）"]
+    elif off + len(page) < real_total:
+        # 本层真实子项多于**显示上限**：明说"还有多少没列"，不许说"没了"（评审 🟠-1）
+        lines += ["", f"> 本层共 {real_total} 项（显示上限 {KB_MAX_ITEMS_PER_DIR}）；"
+                      f"还有 {real_total - off - len(page)} 项未列出"
+                      f"——请缩 `--depth` 或换个起点看。"]
     fitted = _kb_fit_text(lines, max_chars=max_chars, max_tokens=max_tokens)
     _kb_log_quiet(conn, vault_row, rel=target["rel"], action="toc",
                   citizen_id=citizen_id, via=via, bytes_=fitted["chars"],
-                  meta={"depth": want_depth, "total": total, "offset": off,
+                  meta={"depth": want_depth, "total": real_total, "offset": off,
                         "limit": lim, "scan_ms": ms})
     return {"vault": _kb_vault_brief(vault_row), "as_of": iso_local(as_of),
             "root": _kb_rel_posix(target["rel"]), "depth": want_depth,
-            "total": total, "offset": off, "limit": lim, "shown": len(page),
+            "total": real_total, "offset": off, "limit": lim, "shown": len(page),
+            "more": max(0, real_total - off - len(page)),
             "items": page, "text": fitted["text"], "chars": fitted["chars"],
             "tokens": fitted["tokens"], "truncated": fitted["truncated"]}
 

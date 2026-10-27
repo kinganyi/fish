@@ -225,6 +225,11 @@ class KbMultiSearchTest(unittest.TestCase):
             fish_push._kb_search_multi = real_multi
         self.assertGreaterEqual(calls["multi"], 1, "应至少调一次 multi")
         self.assertIsInstance(out, list)
+        # 评审 🟡-9（2026-10-27）：T02 迁移时把「不许逐个调 kb_search」的负向断言整条删了。
+        # 改成**结构断言**：fish_push 里不存在 kb_search 绑定（旧回退路径已删），
+        # 所以"逐个调"在结构上不可能发生——比引用计数更稳。
+        self.assertFalse(hasattr(fish_push, "kb_search"),
+                         "fish_push 不应再持有 kb_search 绑定（旧回退已删）")
 
     # ── M5 `_kb_judge_component` 的 lru_cache（2026-10-27 第三轮优化）────
     def test_M5_lru_cache_does_not_change_result(self):

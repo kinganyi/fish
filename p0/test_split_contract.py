@@ -40,6 +40,7 @@ P0 = Path(__file__).resolve().parent
 FISH = P0 / "fish.py"
 FISH_KB = P0 / "fish_kb.py"
 FISH_COMMON = P0 / "fish_common.py"
+FISH_PUSH = P0 / "fish_push.py"
 
 spec = importlib.util.spec_from_file_location("fish", str(FISH))
 fish = importlib.util.module_from_spec(spec)
@@ -64,13 +65,15 @@ COMMON_NAMES = ("ulid", "now_utc", "iso_local", "count_tokens", "_exc_text")
 # 30 名基础层下沉 fish_common）。窗口随拆包**迁移**：下界按新基线留余量，**上界不变**；
 # 防"多搬/漏搬"的硬判据由 J1/J1b/J7（名字集合 + 对象同一）与 J8（函数体 AST 等价）承担，
 # 行数窗口只守"文件规模"。同时给新模块各自加窗口，防未来又长回去。
-FISH_LINES_MIN = 13500
-FISH_LINES_MAX = 15500
-EXPECTED_LINE_ACTUAL = 13980      # 只用于把话说明白（断言仍用窗口，不用这个数）
-FISH_PUSH_LINES_MIN = 900
-FISH_PUSH_LINES_MAX = 1500
-FISH_COMMON_LINES_MIN = 450
-FISH_COMMON_LINES_MAX = 900
+# 评审 🟡-7（2026-10-27）：窗口从 300 行放宽到 2,000 行被推翻——按实测收窄到 ±200 行
+# （fish.py 13,994 / push 1,173 / common 607）。整段搬运是 ≥40 行量级，±200 足够灵敏。
+FISH_LINES_MIN = 13800
+FISH_LINES_MAX = 14200
+EXPECTED_LINE_ACTUAL = 13994
+FISH_PUSH_LINES_MIN = 1050
+FISH_PUSH_LINES_MAX = 1300
+FISH_COMMON_LINES_MIN = 550
+FISH_COMMON_LINES_MAX = 700
 
 
 def _read(path: Path) -> str:
@@ -213,7 +216,10 @@ class SplitDependencyTest(unittest.TestCase):
         循环导入的症状不是报错而是"某一侧拿到半初始化的模块"——属性缺失会以
         `AttributeError` 在随机位置出现。所以方向用 AST 钉死，不靠"跑起来没炸"。
         """
-        for path, forbidden in ((FISH_KB, {"fish"}), (FISH_COMMON, {"fish", "fish_kb"})):
+        for path, forbidden in ((FISH_KB, {"fish"}),
+                                (FISH_COMMON, {"fish", "fish_kb"}),
+                                # 评审 🟡-8：T02 新增的 fish_push 也要查（漏 import 炸弹）
+                                (FISH_PUSH, {"fish"})):
             mods = _imported_modules(ast.parse(_read(path)))
             bad = sorted(m for m in mods if m in forbidden)
             self.assertEqual(bad, [], f"{path.name} 反向依赖了 {bad}")
@@ -253,31 +259,37 @@ class SplitDependencyTest(unittest.TestCase):
                          f"{proc2.stdout}{proc2.stderr}")
 
     def test_j3_no_unresolved_globals(self):
-        """J3：`fish_kb` 里**所有全局引用**都必须在模块顶层有定义或 import。
+        """J3：`fish_kb` / `fish_common` / `fish_push` 里**所有全局引用**都必须在顶层有定义或 import。
 
         为什么用 `symtable` 而不是"跑一遍"：漏 import 只在**那条分支被走到**时抛
         `NameError`。`kb backup prune` 里少个 `_exc_text`、`doctor` 少个 `shutil`，
         常规测试路径可能一辈子碰不到，而线上第一次碰到就是崩溃。
         `symtable` 能精确区分"全局引用"与"局部变量"，不会把循环变量算进来。
+
+        评审 🟡-8（2026-10-27）：T02 的 `fish_push.py` 恰好踩过"漏 import"的坑
+        （`fish_activity`/`fish_naming`/`fish_surface`/`fish_kb`），探针必须覆盖它。
         """
-        source = _read(FISH_KB)
-        table = symtable.symtable(source, "fish_kb.py", "exec")
-        module_names = set(table.get_identifiers())
-        missing = {}
 
-        def walk(tbl, scope):
-            for sym in tbl.get_symbols():
-                name = sym.get_name()
-                if sym.is_global() and name not in module_names \
-                        and not hasattr(builtins, name):
-                    missing.setdefault(name, set()).add(scope)
-            for child in tbl.get_children():
-                walk(child, child.get_name())
+        def missing_of(path):
+            table = symtable.symtable(_read(path), path.name, "exec")
+            module_names = set(table.get_identifiers())
+            missing = {}
 
-        walk(table, "<module>")
-        detail = {k: sorted(v) for k, v in sorted(missing.items())}
-        self.assertEqual(detail, {},
-                         "fish_kb 里有全局名既没定义也没 import（运行时才会炸）")
+            def walk(tbl, scope):
+                for sym in tbl.get_symbols():
+                    name = sym.get_name()
+                    if sym.is_global() and name not in module_names \
+                            and not hasattr(builtins, name):
+                        missing.setdefault(name, set()).add(scope)
+                for child in tbl.get_children():
+                    walk(child, child.get_name())
+
+            walk(table, "<module>")
+            return {k: sorted(v) for k, v in sorted(missing.items())}
+
+        for path in (FISH_KB, FISH_COMMON, FISH_PUSH):
+            self.assertEqual(missing_of(path), {},
+                             f"{path.name} 里有全局名既没定义也没 import（运行时才会炸）")
 
     def test_j5_new_modules_do_not_use_module_identity(self):
         """J5：新模块 0 处 `__file__` / `__name__`（模块级 dunder 的**取值**）。
@@ -286,7 +298,7 @@ class SplitDependencyTest(unittest.TestCase):
         搬进 `fish_kb` 后指向的是 `p0/`（恰好一样），搬进别处就指向别处——
         它让"这个模块在哪"变成隐式依赖。`type(x).__name__` 不在禁列（那是类型名）。
         """
-        for path in (FISH_KB, FISH_COMMON):
+        for path in (FISH_KB, FISH_COMMON, FISH_PUSH):
             tree = ast.parse(_read(path))
             hits = [node.lineno for node in ast.walk(tree)
                     if isinstance(node, ast.Name) and node.id in ("__file__", "__name__")]

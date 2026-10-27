@@ -246,6 +246,10 @@ CONFIG_DEFAULTS = {
     # 4GB WorkBuddy），挂上日报就等于每个日报用例/每次定时任务都去扫真实日志。
     # 开启：`fish config set corpus.daily_enabled 1`；临时关断：FISH_CORPUS_DISABLE=1。
     "corpus.daily_enabled": (False, "bool", None),
+    # 评审 🟠-2（2026-10-27）：`corpus_retag` 任务读 `corpus.daily_retag`，但该键
+    # 从未登记 → `_cfg_required` 抛 KeyError → 任务**永远 skipped**（测试用桩掩盖了它）。
+    # 语义：缺省关；开启后维护管道会按需重算项目归属（`retag` 全量）。
+    "corpus.daily_retag": (False, "bool", None),
     # 单帧解压上限（A①）：首采里 10+ 个帧超过旧的 8 MiB 被降级，实测最大帧 152 KB。
     "corpus.max_frame_bytes": (64 << 20, "int", None),
 

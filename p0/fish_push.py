@@ -7,9 +7,10 @@
 依赖方向：fish_push → fish_common（**不 import fish**，判据 J2）。
 """
 
+import datetime
+import os
 import re
 import sqlite3
-import datetime
 
 import fish_activity
 import fish_corpus
@@ -331,6 +332,64 @@ def _cand(conn, code, kind, *, title, reason, current_project,
         out["freshness"] = {k: freshness.get(k) for k in ("factor", "band", "age_days")}
     return out
 
+def _kb_use_index() -> bool:
+    """`FISH_KB_USE_INDEX=1` 才走索引路径（默认 legacy：零回归；显式开启后才换路径）。
+
+    为什么默认不切：生产库里 `kb_index`/`kb_fts` 还不存在（T04 是"先交付索引层，
+    再接线"）；默认 legacy 保证"合并即回归"，开启前必须先跑一次 `rebuild_kb_index`。
+    """
+    return (os.environ.get("FISH_KB_USE_INDEX") or "").strip() == "1"
+
+
+def _kb_push_candidates_index(conn, q, *, project, exclude, limit, now) -> list:
+    """索引路径：**K7 断路器** + `search_kb`（只查 FTS，不碰文件系统）。
+
+    34 号 §1.3.3 / §1.4 的 K7：索引陈旧 / 未建 / 无 active 行 → **返回空 + 无重扫**
+    （"宁可少推，也不推过期内容"）。索引新鲜时走 `search_kb`（<100ms 量级），
+    不再每次全库 walk。
+    """
+    try:
+        import fish_kb_index
+    except Exception:       # noqa: BLE001 —— 索引层坏了不能拖垮推送
+        return []
+    try:
+        fresh = fish_kb_index.kb_index_fresh(conn)
+    except Exception:       # noqa: BLE001
+        return []
+    if not fresh.get("fresh"):
+        return []                       # K7：断路器（陈旧/未建 → 空，不重扫）
+    try:
+        res = fish_kb_index.search_kb(conn, query=q, limit=max(int(limit) * 3, 6))
+    except Exception:       # noqa: BLE001
+        return []
+    exclude = set(exclude or ())
+    now_dt = now or datetime.datetime.now(datetime.timezone.utc)
+    since = (now_dt - datetime.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = []
+    for hit in res.get("hits") or []:
+        code = f"kb:{hit.get('vault_name')}:{hit.get('rel')}"
+        if code in exclude:
+            continue
+        recent = conn.execute(
+            "SELECT 1 FROM push_log WHERE code=? AND pushed_at >= ? LIMIT 1",
+            (code, since)).fetchone()
+        if recent:
+            continue
+        out.append({
+            "code": code, "kind": "kb",
+            "title": str(hit.get("rel") or ""),
+            "reason": f"知识库「{hit.get('vault_name')}」命中「{q[:24]}」",
+            "project": project, "benefit": 0.55, "cost": 0.05,
+            "weight": 1.0, "key": False, "score": 0.5,
+            "kb": {"vault": hit.get("vault_name"), "rel": hit.get("rel"),
+                   "snippet": str(hit.get("snippet") or "")[:40]},
+        })
+        exclude.add(code)
+        if len(out) >= max(int(limit), 1):
+            break
+    return out
+
+
 def _kb_push_candidates(conn, root, *, query, project=None, exclude=(), limit=2,
                         now=None) -> list:
     """知识库命中 → 推送候选（P0-1：把「AI 推给 AI」接进推送管线）。
@@ -350,6 +409,11 @@ def _kb_push_candidates(conn, root, *, query, project=None, exclude=(), limit=2,
     q = (query or "").strip()
     if not q:
         return []
+    # T04 接线（评审 🔴-1，2026-10-27）：`FISH_KB_USE_INDEX=1` 才走索引路径；
+    # 默认 legacy（零回归——生产库还没有 kb_index 表）。
+    if _kb_use_index():
+        return _kb_push_candidates_index(conn, q, project=project, exclude=exclude,
+                                         limit=limit, now=now)
     try:
         vaults = kb_vault_list(conn)
     except Exception:       # noqa: BLE001 —— 知识库是增强项，坏了不拖垮候选
