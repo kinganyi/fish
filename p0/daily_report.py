@@ -513,6 +513,7 @@ def maintenance_step(data_dir=None):
     try:
         sys.path.insert(0, str(HERE))
         import fish as fishlib                    # noqa: PLC0415 —— 延迟导入：日报不该依赖 fish 的加载期副作用
+        import fish_common                        # noqa: PLC0415 —— T02 起配置/FTS 原语已下沉，维护只按 shared 层取
         import fish_corpus                        # noqa: PLC0415 —— 语料门面只在维护/采集时用
         from fish_maintenance import run_maintenance   # noqa: PLC0415
 
@@ -524,9 +525,11 @@ def maintenance_step(data_dir=None):
                 "candidates_of": lambda cwd: fishlib.list_workspace_candidates(conn, cwd),
             }
             deps = {
-                "get_config": lambda key: fishlib.get_config(conn, key),
+                # T02 已把 get_config / reindex_fts 下沉到 fish_common：维护侧只按
+                # shared 层取（与 J2 的单向依赖一致），fish 侧同名只是再导出。
+                "get_config": lambda key: fish_common.get_config(conn, key),
                 "archive_citizens": fishlib.archive_citizens,
-                "reindex_fts": fishlib.reindex_fts,
+                "reindex_fts": fish_common.reindex_fts,
                 "build_links_on_write": fishlib.build_links_on_write,
                 # root 与 days 由 run_maintenance 透传（days 必须是
                 # fish_corpus.DEFAULT_WINDOW_DAYS，缺省不传会变成"不限"）。
