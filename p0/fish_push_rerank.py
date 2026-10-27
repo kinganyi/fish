@@ -22,6 +22,7 @@ import sqlite3
 import time
 from pathlib import Path
 
+import fish_common                        # 静默清零出口（模块引用，不进 __all__）
 import fish_corpus_rank as rank_mod      # 特征名/刻度/默认权重/Normalize 只有这一份
 
 from fish_common import (
@@ -394,6 +395,6 @@ def _breaker(conn, root, component, started, query, out) -> list:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
+    except OSError as exc:      # 断路器审计写不进去 → 出声（静默清零）
+        fish_common.warn_derived(conn, "breaker_audit", exc)
     return []

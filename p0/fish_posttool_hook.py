@@ -280,8 +280,8 @@ def maybe_detour(req, host) -> None:
                 "session": sid,
                 "host": host,
             }, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
+    except OSError as exc:      # 钩子审计写不进去 → 诊断（静默清零）
+        _dbg("detours 写入失败：%r" % (exc,))
     _emit(
         "（大肥鱼生命系统提示：你刚才直接读了 fish 的存储文件。"
         "查询记忆请用 recall / resolve_code，写入请用 remember，"

@@ -1819,8 +1819,8 @@ class FishServer:
             if ident.status == IDENTITY_VALID:
                 fish.mark_push_accepted_prefix(
                     self.conn, "kb:%", session_key=ident.session_key)
-        except Exception:       # noqa: BLE001 —— 回填是度量增强项
-            pass
+        except Exception as exc:       # noqa: BLE001 —— 回填失败要出声（静默清零）
+            fish.warn_derived(self.conn, "mark_push_accepted_prefix(kb)", exc)
 
         if action == "tree":
             res = fish.kb_tree(self.conn, vault, rel=(a.get("path") or "").strip(),

@@ -520,8 +520,8 @@ def _task_push_log_prune(conn, root, deps, now_dt):
              json.dumps({"system": "maintenance"}, ensure_ascii=False), "push_log",
              json.dumps(detail, ensure_ascii=False, sort_keys=True),
              None, None, "evt@1"))
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as exc:
+        fish_common.warn_derived(conn, "maintenance.pruned event", exc)
     conn.commit()
     return int(judged or 0) + int(activity or 0), detail
 

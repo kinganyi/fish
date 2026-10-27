@@ -2182,8 +2182,8 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
         try:
             hints.extend(find_similar_memories(
                 conn, title=title, body=body or "", exclude={code}))
-        except Exception:
-            pass  # 查重是提示：绝不能让"提示失败"变成"写入失败"
+        except Exception as exc:      # 查重是提示：不阻塞写入，但失败要出声（静默清零）
+            warn_derived(conn, "find_similar_memories", exc)
     return code, rel
 
 
