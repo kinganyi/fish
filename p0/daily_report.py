@@ -479,6 +479,87 @@ def corpus_ingest_step(root=None, *, enabled=None, reason=None):
         return f"语料采集失败：{type(e).__name__}: {e}"
 
 
+# ------------------------------------------------------------------ 离线维护管道
+# 2026-10-27 · T04b（34 号 §2.2/§2.3）：把"平时没人记得跑"的维护动作挂到已有的
+# 每日调度上。**挂载不改既有步骤**：报告 / 收口 / 归档 / 语料 / 备份的顺序与语义
+# 全都保持原样，维护只是在语料之后、备份之前多跑一段。
+
+# 日报负责哪几个维护任务：**语料采集除外**——它在日报里已有唯一 owner
+# （`corpus_ingest_step`，带 CLI/env/配置三档闸门）。若这里再跑一次：
+#   ① 配置开启时会在同一天**采两遍**（分钟级动作，第二遍还会抢写锁）；
+#   ② `--no-corpus` 会被维护任务绕过（那是用户明确说"这次别采"）。
+# 其余六个任务归维护管道：间隔由台账判，不会与既有步骤重复。
+MAINTENANCE_DAILY_ONLY = ("kb_reindex", "links_rebuild", "push_log_prune",
+                          "citizens_archive", "fts_verify", "corpus_retag")
+
+
+def maintenance_step(data_dir=None):
+    """日报的一步（T04b）：跑离线维护管道，返回**一行**文本。
+
+    依赖注入是这一步的核心工作：`fish_maintenance` 按依赖纪律**不 import `fish`**，
+    六个门面能力由这里显式接上（`get_config` / `archive_citizens` / `reindex_fts` /
+    `build_links_on_write` / `corpus_ingest` / `corpus_retag`）。
+
+    两个语料 callable 必须带 `project_of/citizen_of/candidates_of` 解析器：没有它们，
+    `ingest` 会把项目静默标成 unmapped、`retag` 会直接拒绝执行——而按设计，
+    "查不到"要如实记 unmapped，不是猜一个。
+
+    `data_dir` 可覆盖根目录（判据把整套流程落在临时目录里，不碰生产 `p0/data`）。
+
+    **异常一律转成一行文本**：维护是派生数据，失败不许拖垮报告/备份，也不改退出码
+    （与推送收口、看板归档、公民归档同一口径）。
+    """
+    data = Path(data_dir) if data_dir is not None else DATA
+    try:
+        sys.path.insert(0, str(HERE))
+        import fish as fishlib                    # noqa: PLC0415 —— 延迟导入：日报不该依赖 fish 的加载期副作用
+        import fish_common                        # noqa: PLC0415 —— T02 起配置/FTS 原语已下沉，维护只按 shared 层取
+        import fish_corpus                        # noqa: PLC0415 —— 语料门面只在维护/采集时用
+        from fish_maintenance import run_maintenance   # noqa: PLC0415
+
+        conn = fishlib.connect(data)
+        try:
+            resolvers = {
+                "project_of": lambda cwd: fishlib.resolve_project_by_cwd(conn, cwd),
+                "citizen_of": lambda key: fishlib.fish_activity.resolve_citizen(conn, key),
+                "candidates_of": lambda cwd: fishlib.list_workspace_candidates(conn, cwd),
+            }
+            deps = {
+                # T02 已把 get_config / reindex_fts 下沉到 fish_common：维护侧只按
+                # shared 层取（与 J2 的单向依赖一致），fish 侧同名只是再导出。
+                "get_config": lambda key: fish_common.get_config(conn, key),
+                "archive_citizens": fishlib.archive_citizens,
+                "reindex_fts": fish_common.reindex_fts,
+                "build_links_on_write": fishlib.build_links_on_write,
+                # root 与 days 由 run_maintenance 透传（days 必须是
+                # fish_corpus.DEFAULT_WINDOW_DAYS，缺省不传会变成"不限"）。
+                "corpus_ingest": lambda *, root=None, days=None: fish_corpus.ingest(
+                    hosts=("dsh", "workbuddy"),
+                    root=Path(root) if root else data, days=days, **resolvers),
+                "corpus_retag": lambda *, root=None: fish_corpus.retag(
+                    root=Path(root) if root else data, **resolvers),
+            }
+            res = run_maintenance(conn, data, deps=deps,
+                                  only=list(MAINTENANCE_DAILY_ONLY))
+        finally:
+            conn.close()
+    except Exception as e:                 # noqa: BLE001 —— 派生数据，不许拖垮主流程
+        return f"维护失败：{type(e).__name__}: {e}"
+
+    parts = []
+    for task in res["tasks"]:
+        label = task["status"]
+        if label == "skipped":
+            label = f"skip:{task.get('reason') or '?'}"
+        parts.append(f"{task['name']}={label}({task['affected']})")
+    line = (f"维护：执行 {res['ran']} / 跳过 {res['skipped']} / 失败 {res['errors']}；"
+            + "，".join(parts))
+    if res["errors"]:
+        first = next(t for t in res["tasks"] if t["status"] == "error")
+        line += f"；首个错误：{first['name']} {first['error']}"
+    return line
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="fish 每日任务：生成报告 + 数据库备份",
@@ -565,6 +646,11 @@ def main(argv=None):
     corpus_line = corpus_ingest_step(enabled=corpus_decision["enabled"],
                                      reason=corpus_decision["reason"])
 
+    # 离线维护管道（T04b · 34 号 §2.2/§2.3）：语料步之后、备份之前——
+    # 备份要拍下"维护之后"的形状（索引/FTS/边/清理都已完成），顺序不能反。
+    # 失败只落一行、不改退出码：维护是派生数据，不许让日报假红。
+    maintenance_line = maintenance_step()
+
     # 备份即使报告失败也要做：数据安全 > 报告成功
     backup_ok, backup_line = True, ""
     try:
@@ -598,6 +684,8 @@ def main(argv=None):
             f.write(citizen_line + "\n")
         if corpus_line:
             f.write(corpus_line + "\n")
+        if maintenance_line:
+            f.write(maintenance_line + "\n")
         f.write(backup_line + "\n")
 
     print(f"[{stamp}] 报告 exit={report_code}；{backup_line}")
@@ -611,6 +699,8 @@ def main(argv=None):
         print(f"[{stamp}] {citizen_line}")
     if corpus_line:
         print(f"[{stamp}] {corpus_line}")
+    if maintenance_line:
+        print(f"[{stamp}] {maintenance_line}")
     return 0 if (report_code == 0 and backup_ok) else 1
 
 
