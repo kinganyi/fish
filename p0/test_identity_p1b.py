@@ -51,6 +51,9 @@ import fish  # noqa: E402
 import mcp_server  # noqa: E402
 
 FISH = HERE / "fish.py"
+# T02 拆包（2026-10-27）：`_session_labels_for` 已搬进 `fish_push.py`——判据 I 扫**模块树**
+# 而不是单文件（SQL 冻结的语义不变：同名函数的 citizens 语句仍逐条比对）。
+FISH_PUSH = HERE / "fish_push.py"
 MCP = HERE / "mcp_server.py"
 
 # 身份类 env：跑子进程前必须全部清掉（见模块头）。
@@ -867,12 +870,16 @@ class FishIdentityP1bTest(unittest.TestCase):
         # 不是放宽判据——原来那些函数的语句一字未改，仍是逐条冻结的。
         self.assertEqual(len(counts), 6, "基线自检：应为 6 个函数")
         self.assertEqual(EXPECTED_STMT_COUNT, 8, "基线自检：应为 8 条语句")
-        got = citizens_sql_by_function(FISH)
+        got = {}
+        for path in (FISH, FISH_PUSH):
+            if path.exists():
+                got.update(citizens_sql_by_function(path))
         for func, stmts in SESSION_CITIZEN_SQL.items():
             with self.subTest(func=func):
-                self.assertIn(func, got, f"fish.py::{func} 不见了（被改名/删除？）")
+                self.assertIn(func, got,
+                              f"模块树（fish.py/fish_push.py）:: {func} 不见了（被改名/删除？）")
                 self.assertEqual(got[func], tuple(sorted(set(stmts))),
-                                 f"fish.py::{func} 的 citizens 语句被改过")
+                                 f"{func} 的 citizens 语句被改过")
         # 反向：不许再多出**未声明**的会话公民引用函数（P1-a 判据 G 的同一条纪律）
         extra = {f for f in got if "session" in f or f in ("load_citizen", "touch_citizen")}
         self.assertEqual(extra, set(EXPECTED_NEW_FUNCS),

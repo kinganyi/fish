@@ -648,14 +648,20 @@ CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL,
             self.assertIn(key, out, f"`fish config list` 读不出 {key}")
 
     def test_F_mutation_unregistered_key_goes_red(self):
-        """变异自证：键没登记时读它必须 KeyError（"登记"这件事本身可判红）。"""
+        """变异自证：键没登记时读它必须 KeyError（"登记"这件事本身可判红）。
+
+        T02 拆包：`CONFIG_DEFAULTS` / `get_config` 已下沉 `fish_common`——patch 必须打在
+        **使用方模块**（`fish_common`）上；`mock.patch.object(fish, ...)` 只改了 fish.py 的
+        导入副本（from-import 快照），`get_config` 读的还是 `fish_common.CONFIG_DEFAULTS`。
+        """
+        import fish_common
         root = self._root("mut-f")
         self._seed(root)
-        mutated = {k: v for k, v in fish.CONFIG_DEFAULTS.items()
+        mutated = {k: v for k, v in fish_common.CONFIG_DEFAULTS.items()
                    if k != "push.gap_window_days"}
         conn = fish.connect(root)
         try:
-            with mock.patch.object(fish, "CONFIG_DEFAULTS", mutated):
+            with mock.patch.object(fish_common, "CONFIG_DEFAULTS", mutated):
                 with self.assertRaises(KeyError):
                     fish.get_config(conn, "push.gap_window_days")
         finally:
