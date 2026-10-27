@@ -232,6 +232,11 @@ CONFIG_DEFAULTS = {
     # T04 接线（评审 🔴-1 的收口）：知识库候选走 `kb_index`（FTS）而不是每次全库 walk。
     # 默认 False（零回归）；生产库建好索引后由 config 开启；`FISH_KB_USE_INDEX` 环境变量优先。
     "push.kb_use_index": (False, "bool", None),
+    # ⑤ 推送门槛（BUG-2 收口，2026-10-28）：
+    # 地板 0.0 = 关（首周建议 0.15）；元记忆罚 0.5；语料通道默认关。
+    "push.score_floor": (0.0, "float", None),
+    "push.meta_penalty": (0.5, "float", None),
+    "push.corpus_enabled": (False, "bool", None),
     "push.gap_window_days": (14, "int", None),            # 遗漏检测窗口（§3.3-B ②）
     "push.gap_others_read_min": (3, "int", None),         # 「别人常读」的次数下限
     "push.situational_window_min": (10, "int", None),     # 态势窗口（§3.3-C ②）

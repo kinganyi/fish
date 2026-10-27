@@ -48,7 +48,7 @@ from fish_surface import normalize_surface, surface_hit  # noqa: F401 —— 对
 import fish_common  # noqa: F401 —— 模块本身也要在（判据 J1d 查对象同一性）
 from fish_common import (  # noqa: F401
     _exc_text, count_tokens, fts_match_expr, fts_text, index_tokens, iso_local,
-    now_utc, ulid, warn_derived)
+    now_utc, ulid)
 
 # 原始对话语料层（2026-10-27 · 语料层 T01/T02）：独立库 `corpus.sqlite`，与主库零耦合。
 # 项目/公民解析器以回调注入（这里不把 fish 的解析逻辑搬进语料模块，避免循环导入）。
@@ -93,7 +93,7 @@ from fish_kb import (  # noqa: F401
 )
 
 # T02：下沉到 fish_common 的基础层 + push 领域（re-export，判据 J1）
-from fish_common import (ATTENTION_OPEN_KEYWORDS, ATTENTION_OPEN_WINDOW_DAYS, ATTENTION_TITLE_MAX_CHARS, CONFIG_DEFAULTS, _ALIAS_KINDS, _ALIAS_MAX_HOPS, _DEFAULT_DECAY, _alias_map, _board_seen_columns, _clip_chars, _index_one_fts, _key_type, _open_loop_predicate, _open_loop_rows, _presence_columns, _presence_has_session, _utc_str, _walk_alias, board_period, clean_prompt, compute_decay, ensure_fts, get_config, load_decay_cfg, local_date, parse_utc, push_outcome_window_hours, reindex_fts, resolve_name, resolve_project_names)  # noqa: F401
+from fish_common import (ATTENTION_OPEN_KEYWORDS, ATTENTION_OPEN_WINDOW_DAYS, ATTENTION_TITLE_MAX_CHARS, CONFIG_DEFAULTS, _ALIAS_KINDS, _ALIAS_MAX_HOPS, _DEFAULT_DECAY, _alias_map, _board_seen_columns, _clip_chars, _index_one_fts, _key_type, _open_loop_predicate, _open_loop_rows, _presence_columns, _presence_has_session, _utc_str, _walk_alias, board_period, clean_prompt, compute_decay, ensure_fts, get_config, load_decay_cfg, local_date, parse_utc, push_outcome_window_hours, reindex_fts, resolve_name, resolve_project_names, warn_derived)  # noqa: F401
 from fish_push import (FRESHNESS_EXEMPT_TYPES, PROMPT_MAX_TERMS, STALE_SENSITIVE_TYPES, _CJK_RUN_RE, _CODE_RE, _LATIN_RE, _PROMPT_STOPWORDS, _PUSH_TAG, _PUSH_W, _SILENCE_CAP_DAYS, _SILENCE_FLOOR, _activity_overlap_candidates, _activity_overlap_hit, _cand, _conv_push_candidates, _declared_row_fresh, _kb_push_candidates, _project_of, _push_history, _recent_pushed_codes, _seen_in_session, _session_labels_for, _silence_weight, build_prompt_candidates, build_push_block, build_push_candidates, extract_terms, links_for, mark_push_accepted, mark_push_accepted_prefix, memory_freshness, search_memories_any, select_push_candidates)  # noqa: F401
 
 
@@ -2228,8 +2228,8 @@ def supersede_memory(conn, old_code: str, new_code: str, reason: str = "",
     try:
         add_link(conn, old_code, new_code, "supersedes", "explicit", 1.0,
                  reason or "被新记录替代")
-    except Exception:
-        pass
+    except Exception as exc:      # 取代边丢了 → 出声（静默清零）
+        warn_derived(conn, "add_link(supersedes)", exc)
     return f"{old_code} 已标记为被 {new_code} 替代"
 
 

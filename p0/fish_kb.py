@@ -40,7 +40,7 @@ import sys
 import time
 from pathlib import Path
 
-from fish_common import _exc_text, count_tokens, iso_local, now_utc, ulid
+from fish_common import _exc_text, count_tokens, iso_local, now_utc, ulid, warn_derived
 
 # K3：`None → 'unattributed'` 的映射只在写入审计时做一次；常量在这里定死，
 # MCP 侧（mcp_server.UNATTRIBUTED）靠判据锁住两处字面量一致。
@@ -2098,8 +2098,8 @@ def _kb_search_multi(conn, vault_row, needles, *, limit_per_needle=2,
             for hit in result[n]["hits"]:
                 _kb_log_quiet(conn, vault_row, rel=hit["rel"], action="search_hit",
                               via=via, citizen_id=citizen_id)
-    except Exception:      # noqa: BLE001
-        pass
+    except Exception as exc:      # noqa: BLE001
+        warn_derived(conn, "kb_search_log", exc)
     return result
 
 
@@ -3308,7 +3308,7 @@ _IMPORTED = frozenset({
     # J1（fish 侧缺名）与 J1b（再导出清单不一致）会同时红。
     "datetime", "fnmatch", "functools", "hashlib", "json", "ntpath", "os", "re",
     "secrets", "shutil", "sqlite3", "stat", "subprocess", "sys", "time", "Path",
-    "count_tokens", "iso_local", "now_utc", "ulid", "_exc_text",
+    "count_tokens", "iso_local", "now_utc", "ulid", "_exc_text", "warn_derived",
     # 自己也在 globals 里，必须显式排除，否则会被算进 __all__
     "_IMPORTED",
 })

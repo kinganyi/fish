@@ -1197,6 +1197,57 @@ def _with_ctx_project(conn, cands, project):
     return cands
 
 
+def _cfg_float(conn, key, default) -> float:
+    """读浮点配置（读不到/写坏 → 默认值，绝不抛）。"""
+    try:
+        return float(_cfg_any(conn, key, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+#: 元记忆的标题/理由特征（06 号报告 BUG-2：讲述 fish 自身的记忆极易被关键词命中）
+_META_HINTS = ("fish", "大肥鱼", "注入", "看板", "推送", "记忆系统")
+
+
+def _is_meta_candidate(cand) -> bool:
+    """元记忆：讲述 fish 自身、且**没有项目归属**（有项目的不是自指）。"""
+    if str(cand.get("project") or "").strip():
+        return False
+    text = f"{cand.get('title') or ''} {cand.get('reason') or ''}".lower()
+    return any(hint in text for hint in _META_HINTS)
+
+
+def _apply_push_gates(conn, cands) -> list:
+    """⑤ 推送门槛（BUG-2 的收口，2026-10-28）：G2/G3/G4。
+
+      · **G2 相关度地板** `push.score_floor`（默认 0.0 = 关；首次开启建议 0.15）：
+        低于地板的候选丢弃——**空比错好**（错推一次，模型就学会忽略整个通道）。
+      · **G3 元记忆降权** `push.meta_penalty`（默认 0.5）：元记忆乘惩罚，压掉自指循环。
+      · **G4 语料通道开关** `push.corpus_enabled`（默认 False）：`corpus` 候选默认不进
+        ——语料是"我说过的话"，记忆是"我确认过的事"，可信度不同级（N7）。
+    """
+    floor = _cfg_float(conn, "push.score_floor", 0.0)
+    penalty = _cfg_float(conn, "push.meta_penalty", 0.5)
+    corpus_on = str(_cfg_any(conn, "push.corpus_enabled", False)).strip().lower() in (
+        "true", "1", "yes", "on")
+    out = []
+    for cand in cands:
+        if not isinstance(cand, dict):
+            continue
+        if str(cand.get("kind") or "") == "corpus" and not corpus_on:
+            continue                                   # G4
+        score = float(cand.get("score") or 0.0)
+        if penalty < 1.0 and _is_meta_candidate(cand):
+            cand = dict(cand)                          # G3：不改入参
+            cand["score"] = round(score * penalty, 6)
+            cand["gated"] = "meta_penalty"
+            score = cand["score"]
+        if score < floor:
+            continue                                   # G2
+        out.append(cand)
+    return out
+
+
 def select_push_candidates(conn, cands, *, limit=4, prefer_kind=None, project=None,
                            now=None, rerank=None):
     """按分数选，并保证**意外类至少 1 条**（防茧房闸 2）。
@@ -1216,6 +1267,8 @@ def select_push_candidates(conn, cands, *, limit=4, prefer_kind=None, project=No
             conn, cands,
             top_k=_cfg_any(conn, "push.rerank_top_k", RERANK_TOP_K_DEFAULT),
             now=now or now_utc(), project=project)
+    # ⑤ 推送门槛（2026-10-28，BUG-2 收口）：宁空勿错——错推一次，模型学会忽略整个通道。
+    cands = _apply_push_gates(conn, cands)
     cands = [c for c in cands if c["score"] > 0]
     picked, seen_kinds = [], {}
     quota = int(limit)

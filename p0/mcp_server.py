@@ -846,8 +846,8 @@ class FishServer:
                 # 于是"自动行"和"签到行"变成同公民的两行（看板上多一行幽灵）。
                 fish.board_auto_presence(self.conn, ident.citizen_id, a.get("project"),
                                          session_key=(ident.session_key or ""))
-        except Exception:      # noqa: BLE001 —— 兜底是增强项，不许把 remember 打挂
-            pass
+        except Exception as exc:      # noqa: BLE001 —— 兜底失败要出声（静默清零）
+            fish.warn_derived(self.conn, "board_auto_presence", exc)
         tip = ""
         try:
             ok, msg = fish.board_checkin_or_remind(
@@ -1585,8 +1585,8 @@ class FishServer:
                 lines.append("- 看板已自动登记（自动行；补一句 doing 别人才能判断撞车）")
             elif checkin.get("refreshed"):
                 lines.append("- 看板已刷新你的在场时间")
-        except Exception:          # noqa: BLE001 —— 看板失败不影响签发
-            pass
+        except Exception as exc:          # noqa: BLE001 —— 看板失败不影响签发，但要出声
+            fish.warn_derived(self.conn, "board_auto_checkin", exc)
         if res.get("created"):
             lines.append("- 这是新建的公民：**下次务必带同一个 session_name**，"
                          "否则会再建一个（归属会分裂）。")
@@ -1728,8 +1728,8 @@ class FishServer:
             if ident.status == IDENTITY_VALID:
                 fish.mark_push_accepted_prefix(
                     self.conn, "board:%", session_key=ident.session_key)
-        except Exception:       # noqa: BLE001 —— 回填是度量增强项，不拖垮工具
-            pass
+        except Exception as exc:       # noqa: BLE001 —— 回填失败要出声（静默清零）
+            fish.warn_derived(self.conn, "mark_push_accepted_prefix(board)", exc)
         return fish._render_one(self.conn, info["board"], info["posts"]) + "\n"
 
     # ------------------------------------------------------------ 知识库（B3 · T05）
@@ -2058,8 +2058,8 @@ class FishServer:
             if ident.status == IDENTITY_VALID:
                 fish.mark_push_accepted(self.conn, [res["code"]],
                                         session_key=ident.session_key)
-        except Exception:       # noqa: BLE001 —— 回填是度量增强项
-            pass
+        except Exception as exc:       # noqa: BLE001 —— 回填失败要出声（静默清零）
+            fish.warn_derived(self.conn, "mark_push_accepted(kb)", exc)
         lines = self._corpus_header(
             f"role={res['role']} chars={res['chars']} truncated="
             f"{str(res['truncated']).lower()} shadowed={str(bool(res['shadowed'])).lower()}") + [
