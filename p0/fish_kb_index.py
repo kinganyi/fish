@@ -620,6 +620,9 @@ def search_kb(conn, *, query, project=None, limit=5, exclude=(), vault_id=None) 
     ready = _kb_index_ready(conn)
     meta = {"total_matched": 0, "returned": 0,
             "indexed": bool(ready and _kb_index_has_active(conn)),
+            # 评审 🟡-5：把"索引新不新鲜"一并给出——调用方（推送/CLI）能据此决定
+            # 要不要相信这次结果，而不是自己去猜（与 K7 断路器同源）。
+            "index_fresh": (kb_index_fresh(conn) if ready else {"fresh": False}),
             "query_tokens": tokens, "query_truncated": query_truncated,
             "as_of": iso_local(), "ranker": "bm25+field"}
     if not meta["indexed"]:

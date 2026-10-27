@@ -385,35 +385,71 @@ class PushModuleContractTest(unittest.TestCase):
                      "_kb_push_candidates", "_conv_push_candidates"):
             self.assertNotIn(name, top, f"{name} 仍在 fish.py 顶层定义（应只在 fish_push）")
 
-    def test_j8_function_bodies_semantically_identical(self):
-        """J8：拆分前后同名函数**函数体 AST 等价**（比行数更硬的"纯搬运"证据）。
+    def _git_blob(self, rev, path):
+        """取某次提交时的文件内容（None = 取不到）。"""
+        try:
+            out = subprocess.run(
+                ["git", "-C", str(P0.parent), "show", f"{rev}:{path}"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=120)
+            return out.stdout if out.returncode == 0 and out.stdout.strip() else None
+        except Exception:      # noqa: BLE001
+            return None
 
-        与拆分前备份（`历史版本/fish.py.20261027-t02-pre.bak`）对比；备份不存在则
-        **skip（判不到，不是通过）**。
+    def test_j8_function_bodies_semantically_identical(self):
+        """J8：T02 拆包前后**所有公共顶层定义** AST 等价（评审 🟠-4/5 的收口）。
+
+        **基准是 T02 提交那一刻**（`da8d24f` 及其父），不是"现在"——否则 T03/T04/T05/B
+        的后续改动会被误算成"搬运违例"。
+        优先本地备份；没有则从 git blob 取（发布树无 `历史版本/`，评审 🟠-4）。
+        比对**全交集**（实测 386 个定义），而不是只比 12 个搬走的函数（评审 🟠-5）。
         """
         pre = P0 / "历史版本" / "fish.py.20261027-t02-pre.bak"
-        if not pre.exists():
-            self.skipTest("拆分前备份不存在（判不到，不是通过）")
-        old = {n.name: n for n in ast.parse(_read(pre)).body
-               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-        new = {}
-        for path in (FISH, P0 / "fish_push.py", FISH_COMMON):
-            for n in ast.parse(_read(path)).body:
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    new[n.name] = n
-        moved = ("build_push_candidates", "select_push_candidates",
-                 "build_prompt_candidates", "build_push_block",
-                 "mark_push_accepted", "mark_push_accepted_prefix",
-                 "_kb_push_candidates", "_conv_push_candidates",
-                 "get_config", "parse_utc", "ensure_fts", "_cand")
-        for name in moved:
-            self.assertIn(name, new, f"{name} 拆分后不见了")
-            self.assertIn(name, old, f"{name} 不在拆分前备份里（判不到）")
-            a = ast.dump(ast.Module(body=old[name].body, type_ignores=[]),
+        if pre.exists():
+            old_src, origin = pre.read_text(encoding="utf-8", errors="replace"), "backup"
+        else:
+            old_src, origin = self._git_blob("da8d24f^", "p0/fish.py"), "git:da8d24f^"
+        if not old_src:
+            self.skipTest("T02 前版本不可达（备份与 git blob 都取不到）——判不到，不是通过")
+        new_srcs = [self._git_blob("da8d24f", p)
+                    for p in ("p0/fish.py", "p0/fish_push.py", "p0/fish_common.py")]
+        if not all(new_srcs):
+            self.skipTest("T02 提交快照取不到（git 不可用）——判不到，不是通过")
+        old_defs = {}
+        for node in ast.parse(old_src).body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                old_defs[node.name] = node
+        new_defs = {}
+        for src in new_srcs:
+            for node in ast.parse(src).body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    new_defs[node.name] = node
+        # 已登记差异（每条必须有原因；T02 报告 §2 的六类副作用，逐条对应）
+        known_diff = {
+            # 跨模块引用改写：`fish.X` → 直接 import 的 X（拆包必需）
+            "_kb_push_candidates": "跨模块引用改写（kb_vault_list/_kb_search_multi 改为直接 import）",
+            "_conv_push_candidates": "跨模块引用改写（fish_activity/fish_corpus 改为直接 import）",
+            "build_prompt_candidates": "跨模块引用改写（内部 helper 已搬出）",
+            "build_push_candidates": "跨模块引用改写（内部 helper 已搬出）",
+            "select_push_candidates": "跨模块引用改写（内部 helper 已搬出）",
+            "build_push_block": "跨模块引用改写（内部 helper 已搬出）",
+            "clean_prompt": "函数内 import fish_activity（跨模块调用，不 import fish）",
+        }
+        common = sorted(set(old_defs) & set(new_defs))
+        self.assertGreaterEqual(len(common), 380,
+                                f"只找到 {len(common)} 个公共定义（实测应 386）：{origin}")
+        changed = []
+        for name in common:
+            if name in known_diff:
+                continue
+            a = ast.dump(ast.Module(body=old_defs[name].body, type_ignores=[]),
                          annotate_fields=False)
-            b = ast.dump(ast.Module(body=new[name].body, type_ignores=[]),
+            b = ast.dump(ast.Module(body=new_defs[name].body, type_ignores=[]),
                          annotate_fields=False)
-            self.assertEqual(a, b, f"{name} 的函数体在拆分中变了（不是纯搬运）")
+            if a != b:
+                changed.append(name)
+        self.assertEqual(changed, [],
+                         f"这些定义在 T02 拆分中变了（且未登记原因）：{changed[:10]}（来源 {origin}）")
 
 
 if __name__ == "__main__":

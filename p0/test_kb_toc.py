@@ -64,7 +64,11 @@ class KbTocTest(unittest.TestCase):
 
     # ------------------------------------------------------------- T2
     def test_T2_token_economy_vs_tree(self):
-        """同 depth 下 toc 的 tokens ≤ tree 的 40%（保守下限；真实库差距更大）。"""
+        """同 depth 下 toc 的 tokens ≤ tree 的 40%（保守下限）。
+
+        实测：夹具 21.9%、**真库 37.9%**（评审 🟡-1 纠正——原文写"真实库差距更大"是反的：
+        真库目录多，前 3 标题的信息量占比更高，压缩率反而更低）。
+        """
         tree = fish.kb_tree(self.conn, self.vault, depth=2)
         toc = self._toc(depth=2)
         self.assertGreater(tree["tokens"], 0)

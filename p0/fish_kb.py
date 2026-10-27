@@ -1760,7 +1760,11 @@ def kb_toc(conn, vault_row, *, rel="", depth=2, limit=None, offset=0,
     # 会被 `offset` 越界分支说成"没有更多内容"（真库 634 条目录实测过）。
     real_total = len(tree["children"]) + int(tree["more"] or 0)
     total = len(items)
-    off = max(0, int(offset or 0))
+    try:
+        off = max(0, int(offset or 0))
+    except (TypeError, ValueError) as exc:
+        # 评审 🟡-2：`offset="abc"` 原来直接抛 ValueError（裸 ValueError 不是 KBError）
+        raise KBError("bad_usage", f"offset 必须是整数，收到 {offset!r}", detail=exc)
     lim = None if limit in (None, 0) else max(1, int(limit))
     page = items[off: off + lim] if lim else items[off:]
     lines = [f"# 知识库目录快照 · {vault_row['name']}", ""]
