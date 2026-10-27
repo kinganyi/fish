@@ -310,6 +310,10 @@ KB_DEFAULT_IGNORE_GLOBS = KB_MANDATORY_DENY
 # 扩展名族（`*.pem` / `*.key` / `.env*` / `id_rsa*`）不变：它们是高置信度形态。
 KB_SENSITIVE_PATTERNS = (
     "*凭证*", "*credential*", "*secret*", "*密码*",
+    # 安全审计 🟡-7（2026-10-27）：英文口令类文件名此前完全漏网
+    # （`passwords.md` / `api_keys.md` 会入索引并被搜出片段）。只加低误伤四条：
+    # `*token*` 刻意不加——它会打到 `tokenize` / `tokens 统计` 这类正常笔记。
+    "*password*", "*passwd*", "*apikey*", "*api-key*",
     "*.pem", "*.key", "id_rsa*", ".env*",
 )
 # 上表里唯一需要"负向断言"的那条：`*密码*` 由 `_KB_PASSWORD_RE` 单独处理
@@ -512,6 +516,10 @@ def kb_vault_add(conn, *, name, path, mode="ro", ignore=(), is_default=False,
                       hint="先确认盘符/目录名；本命令只登记，不创建目录")
     if not p.is_dir():
         raise KBError("not_found", f"不是目录：{raw_path}")
+    # 安全审计 🟡-4（2026-10-27）：落库存 **realpath**。否则 `…/v/../v` 这样的注册会让
+    # 索引写出 `rel_path='../v/a.md'`——破坏"rel 是库内相对路径"这条下游不变量
+    # （`kb open` 会拒绝 `..`，于是索引产出的键读接口不认）。
+    real = os.path.realpath(str(p))
 
     key = os.path.normcase(os.path.realpath(str(p)))
     globs = _kb_validate_globs(list(KB_DEFAULT_IGNORE_GLOBS) + list(ignore or ()))
@@ -538,7 +546,7 @@ def kb_vault_add(conn, *, name, path, mode="ro", ignore=(), is_default=False,
             "UPDATE kb_vault SET name=?, path=?, mode=?, ignore_globs=?, "
             "max_open_bytes=?, note=COALESCE(?, note), status='active', updated_at=? "
             "WHERE vault_id=?",
-            (clean_name, str(p), mode, json.dumps(globs, ensure_ascii=False),
+            (clean_name, real, mode, json.dumps(globs, ensure_ascii=False),
              max_open, note, now, vault["vault_id"]))
         vault_id = vault["vault_id"]
     else:
@@ -552,7 +560,7 @@ def kb_vault_add(conn, *, name, path, mode="ro", ignore=(), is_default=False,
             "INSERT INTO kb_vault (vault_id,name,path,path_key,mode,ignore_globs,"
             "max_open_bytes,is_default,note,status,created_at,updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-            (vault_id, clean_name, str(p), key, mode,
+            (vault_id, clean_name, real, key, mode,
              json.dumps(globs, ensure_ascii=False), max_open, 0, note, "active",
              now, now))
     if is_default:

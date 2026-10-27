@@ -49,10 +49,13 @@ corpus 两项是**双层闸门**
 间隔判断永远往后滚（任务静默饿死）。只有 `ok` / `error` 才更新运行时刻。
 """
 import datetime
+import json
+import os
 import sqlite3
 import time
 from pathlib import Path
 
+import fish_common
 import fish_kb_index
 
 # ---------------------------------------------------------------- 常量（口径）
@@ -361,21 +364,36 @@ def _as_int(value, default=0):
         return default
 
 
+_COUNT_TABLES = ("code_index", "memory_fts")
+
+
 def _count(conn, table):
+    """表名白名单（安全审计 ⚪-13：表名走 f-string，当前无外部可达，但不给后来人留口子）。"""
+    if table not in _COUNT_TABLES:
+        raise ValueError(f"_count 只允许 {', '.join(_COUNT_TABLES)}：{table!r}")
     row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
     return int(row[0] if row else 0)
 
 
 def _read_body(root, file_path):
-    """读正文文件（供补建边用）。**读不到返回空串**：边是派生数据，不该因此报错。"""
+    """读正文文件（供补建边用）。**读不到返回空串**：边是派生数据，不该因此报错。
+
+    安全审计 🟡-5：加 containment——`file_path` 只允许落在 root 之内
+    （realpath + commonpath）；越界按"读不到"处理（不报错，但也不读）。
+    今天三个写入方都只写相对归档路径，这是一层几乎免费的纵深。
+    """
     if not file_path or root is None:
         return ""
     path = Path(file_path)
     if not path.is_absolute():
         path = Path(root) / file_path
     try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        real = Path(os.path.realpath(str(path)))
+        root_real = Path(os.path.realpath(str(root)))
+        if os.path.commonpath([str(real), str(root_real)]) != str(root_real):
+            return ""
+        return real.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, ValueError):
         return ""
 
 
@@ -487,6 +505,19 @@ def _task_push_log_prune(conn, root, deps, now_dt):
             (activity_cutoff,)).rowcount
         detail["activity_cutoff"] = activity_cutoff
     detail["activity_rows"] = int(activity or 0)
+    # 安全审计 🟡-9（2026-10-27）：破坏性动作留痕（与 citizens_archive 同标准，
+    # 也满足"抵赖"威胁面）。本模块按 J2 不 import fish，所以按 events 表的最小结构
+    # 直接写；event_id 用已下沉的 `fish_common.ulid()`。
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO events (event_id, ts, type, actor, subject, payload, "
+            "cause, refs, schema) VALUES (?,?,?,?,?,?,?,?,?)",
+            (fish_common.ulid(), _iso_utc(now_dt), "maintenance.pruned",
+             json.dumps({"system": "maintenance"}, ensure_ascii=False), "push_log",
+             json.dumps(detail, ensure_ascii=False, sort_keys=True),
+             None, None, "evt@1"))
+    except sqlite3.Error:
+        pass
     conn.commit()
     return int(judged or 0) + int(activity or 0), detail
 

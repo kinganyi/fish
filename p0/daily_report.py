@@ -490,7 +490,11 @@ def corpus_ingest_step(root=None, *, enabled=None, reason=None):
 #   ② `--no-corpus` 会被维护任务绕过（那是用户明确说"这次别采"）。
 # 其余六个任务归维护管道：间隔由台账判，不会与既有步骤重复。
 MAINTENANCE_DAILY_ONLY = ("kb_reindex", "links_rebuild", "push_log_prune",
-                          "citizens_archive", "fts_verify", "corpus_retag")
+                          "fts_verify", "corpus_retag")
+# 安全审计 🟡-11：`citizens_archive` **不在此列**——日报已有唯一 owner
+# （`archive_citizens_step`，读同一个配置键、调同一个函数）。放进维护管道会让
+# 同一晚搬行动作跑两遍（第二遍空转却把台账 last_affected 写成 0，误导排查）。
+# 这正好与上面 `corpus_ingest` 的排除理由同构：**一个动作只能有一个 owner**。
 
 
 def maintenance_step(data_dir=None):
