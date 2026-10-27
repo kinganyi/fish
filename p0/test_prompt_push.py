@@ -140,19 +140,23 @@ class FreshnessTest(PromptBase):
         self.assertLess(info["factor"], 0.1,
                         f"展示行为不该让老事实变新鲜：{info}")
         # 变异：改回用 last_accessed_at
-        original = fish.compute_decay
+        # T02 拆包：`memory_freshness` / `compute_decay` 已搬进 fish_push / fish_common——
+        # patch 必须打在**使用方模块**（fish_push）上；patch `fish.compute_decay` 只是改
+        # fish.py 的导入副本（from-import 快照），生效不了。
+        import fish_push
+        original = fish_push.compute_decay
 
         def leaked(mem_type, last_accessed_at, recorded_at, cfg=None):
             return original(mem_type, fish.now_utc() if last_accessed_at is None
                             else last_accessed_at, recorded_at, cfg)
 
         try:
-            fish.compute_decay = leaked
+            fish_push.compute_decay = leaked
             mutated = fish.memory_freshness(self.conn, code)
             self.assertGreater(mutated["factor"], 0.5,
                                "变异后老事实变新鲜——说明判据确实在测参考时间")
         finally:
-            fish.compute_decay = original
+            fish_push.compute_decay = original
         self.assertLess(fish.memory_freshness(self.conn, code)["factor"], 0.1)
 
     def test_superseded_is_hard_filtered(self):

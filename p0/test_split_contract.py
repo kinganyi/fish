@@ -59,9 +59,18 @@ COMMON_NAMES = ("ulid", "now_utc", "iso_local", "count_tokens", "_exc_text")
 # 设计的估算与它自己给的 15,779 也互相矛盾（2,629+70 ≠ 18,357−15,779）。
 # 窗口按实测收紧：判据目的不变（少搬/多搬一整个段都要红），数字以实测为准。
 # 【偏差已上报，见交付报告"与设计的偏差"第 1 条】
-FISH_LINES_MIN = 15300
+#
+# 2026-10-27（T02 拆包 fish_push）：fish.py 15,464 → 13,980（push 闭包 33 名/1,048 行搬走，
+# 30 名基础层下沉 fish_common）。窗口随拆包**迁移**：下界按新基线留余量，**上界不变**；
+# 防"多搬/漏搬"的硬判据由 J1/J1b/J7（名字集合 + 对象同一）与 J8（函数体 AST 等价）承担，
+# 行数窗口只守"文件规模"。同时给新模块各自加窗口，防未来又长回去。
+FISH_LINES_MIN = 13500
 FISH_LINES_MAX = 15500
-EXPECTED_LINE_ACTUAL = 15380      # 只用于把话说明白（断言仍用窗口，不用这个数）
+EXPECTED_LINE_ACTUAL = 13980      # 只用于把话说明白（断言仍用窗口，不用这个数）
+FISH_PUSH_LINES_MIN = 900
+FISH_PUSH_LINES_MAX = 1500
+FISH_COMMON_LINES_MIN = 450
+FISH_COMMON_LINES_MAX = 900
 
 
 def _read(path: Path) -> str:
@@ -84,6 +93,26 @@ def _module_level_names(tree: ast.Module) -> set[str]:
             names.update((a.asname or a.name).split(".")[0] for a in node.names)
         elif isinstance(node, ast.ImportFrom):
             names.update(a.asname or a.name for a in node.names)
+    return names
+
+
+def _defined_names(tree: ast.Module) -> set[str]:
+    """模块顶层**定义**的名字（def/class/赋值；**不含 import 别名**）。
+
+    为什么需要它：J7/J4 要判"某函数已搬走（fish.py 顶层不再定义）"，而
+    `from fish_push import (...)` 的 re-export 会让 `_module_level_names` 里出现同名——
+    那是导入面，不是定义面。混用会把合法的 re-export 判成"没搬干净"。
+    """
+    names = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
     return names
 
 
@@ -279,24 +308,100 @@ class SplitSizeTest(unittest.TestCase):
                                 f"fish.py 只有 {lines} 行：可能多搬走了东西")
         self.assertLessEqual(lines, FISH_LINES_MAX,
                              f"fish.py 有 {lines} 行：可能漏搬了东西")
+        push_lines = len(_read(P0 / "fish_push.py").split("\n"))
+        self.assertGreaterEqual(push_lines, FISH_PUSH_LINES_MIN,
+                                f"fish_push.py 只有 {push_lines} 行：搬漏了")
+        self.assertLessEqual(push_lines, FISH_PUSH_LINES_MAX,
+                             f"fish_push.py 有 {push_lines} 行：长回去了")
+        common_lines = len(_read(FISH_COMMON).split("\n"))
+        self.assertGreaterEqual(common_lines, FISH_COMMON_LINES_MIN,
+                                f"fish_common.py 只有 {common_lines} 行：下沉漏了")
+        self.assertLessEqual(common_lines, FISH_COMMON_LINES_MAX,
+                             f"fish_common.py 有 {common_lines} 行：长回去了")
         self.assertGreater(len(fish_kb.__all__), 100,
                            "fish_kb 的导出面太小，明显漏名")
         self.assertGreaterEqual(len(_read(FISH_KB).split("\n")), 2500,
                                 "fish_kb 太小：看起来没搬全")
 
-    def test_j4_push_candidates_stays_in_fish(self):
-        """J4：`_kb_push_candidates` 必须留在 `fish.py`，且不在 `fish_kb`。
+    def test_j4_push_candidates_lives_in_fish_push(self):
+        """J4：`_kb_push_candidates` 现在**属于 fish_push**（T02 拆包），fish 侧靠 re-export 可用。
 
-        它是"知识库命中 → 推送候选"的桥，依赖推送管线的局部函数（`extract_terms`
-        等）。这一轮**刻意不迁**（设计裁决 5），第二轮随 `fish_push` 改名再一起动。
-        判据放在这里，是为了让"下一轮顺手把它挪走"必须先改这条断言。
+        历史（第一轮拆包）：它当时刻意留在 fish.py（设计裁决 5：第二轮随 `fish_push` 改名
+        再一起动）。T02 就是那一轮——所以判据随之迁移：
+        · `fish_push._kb_push_candidates` 必须存在；
+        · `fish_kb` 里必须没有；
+        · `fish.py` 的**顶层定义**里不能再有它（只在 fish.py 顶部 re-export）。
         """
-        self.assertTrue(hasattr(fish, "_kb_push_candidates"),
-                        "_kb_push_candidates 不在 fish 里了（推送管线会断）")
+        import fish_push
+        self.assertTrue(hasattr(fish_push, "_kb_push_candidates"),
+                        "_kb_push_candidates 不在 fish_push 里（推送管线会断）")
         self.assertFalse(hasattr(fish_kb, "_kb_push_candidates"),
-                         "_kb_push_candidates 被搬进 fish_kb 了（本轮不迁）")
-        names = _module_level_names(ast.parse(_read(FISH_KB)))
-        self.assertNotIn("_kb_push_candidates", names)
+                         "_kb_push_candidates 被搬进 fish_kb 了（不该）")
+        top = _defined_names(ast.parse(_read(FISH)))
+        self.assertNotIn("_kb_push_candidates", top,
+                         "fish.py 顶层仍定义 _kb_push_candidates（应只在 fish_push）")
+
+
+class PushModuleContractTest(unittest.TestCase):
+    """J6/J7/J8：`fish_push` 的拆分契约（T02，2026-10-27）。"""
+
+    def test_j6_push_module_does_not_import_fish(self):
+        """J6：`fish_push` 不许 import fish（干净子进程验证，防循环依赖）。"""
+        code = (
+            "import sys\n"
+            f"sys.path.insert(0, r'{P0}')\n"
+            "import fish_push\n"
+            "assert 'fish' not in sys.modules, 'fish_push 把 fish 带进来了'\n"
+            "print('ok')\n"
+        )
+        proc = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                              text=True, cwd=str(P0), timeout=120)
+        self.assertEqual(proc.returncode, 0, f"J6 失败：{proc.stderr[-800:]}")
+
+    def test_j7_reexport_surface(self):
+        """J7：`fish_push.__all__` 每个名字在 fish 侧都在且是同一对象；fish.py 顶层不再定义。"""
+        import fish_push
+        self.assertGreater(len(fish_push.__all__), 25, "fish_push.__all__ 太小（漏名）")
+        for name in fish_push.__all__:
+            self.assertTrue(hasattr(fish, name), f"fish 缺 re-export：{name}")
+            self.assertIs(getattr(fish, name), getattr(fish_push, name),
+                          f"{name} 不是同一个对象（re-export 断了）")
+        top = _defined_names(ast.parse(_read(FISH)))
+        for name in ("build_push_candidates", "select_push_candidates",
+                     "build_prompt_candidates", "build_push_block",
+                     "mark_push_accepted", "mark_push_accepted_prefix",
+                     "_kb_push_candidates", "_conv_push_candidates"):
+            self.assertNotIn(name, top, f"{name} 仍在 fish.py 顶层定义（应只在 fish_push）")
+
+    def test_j8_function_bodies_semantically_identical(self):
+        """J8：拆分前后同名函数**函数体 AST 等价**（比行数更硬的"纯搬运"证据）。
+
+        与拆分前备份（`历史版本/fish.py.20261027-t02-pre.bak`）对比；备份不存在则
+        **skip（判不到，不是通过）**。
+        """
+        pre = P0 / "历史版本" / "fish.py.20261027-t02-pre.bak"
+        if not pre.exists():
+            self.skipTest("拆分前备份不存在（判不到，不是通过）")
+        old = {n.name: n for n in ast.parse(_read(pre)).body
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        new = {}
+        for path in (FISH, P0 / "fish_push.py", FISH_COMMON):
+            for n in ast.parse(_read(path)).body:
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    new[n.name] = n
+        moved = ("build_push_candidates", "select_push_candidates",
+                 "build_prompt_candidates", "build_push_block",
+                 "mark_push_accepted", "mark_push_accepted_prefix",
+                 "_kb_push_candidates", "_conv_push_candidates",
+                 "get_config", "parse_utc", "ensure_fts", "_cand")
+        for name in moved:
+            self.assertIn(name, new, f"{name} 拆分后不见了")
+            self.assertIn(name, old, f"{name} 不在拆分前备份里（判不到）")
+            a = ast.dump(ast.Module(body=old[name].body, type_ignores=[]),
+                         annotate_fields=False)
+            b = ast.dump(ast.Module(body=new[name].body, type_ignores=[]),
+                         annotate_fields=False)
+            self.assertEqual(a, b, f"{name} 的函数体在拆分中变了（不是纯搬运）")
 
 
 if __name__ == "__main__":

@@ -181,13 +181,16 @@ class PushCandidateTest(unittest.TestCase):
         self._link(a1, cold, weight=0.9)
         for _ in range(10):
             self._push(cold, reaction="ignored")
-        orig = fish._silence_weight
+        import fish_push
+        orig = fish_push._silence_weight
         try:
-            fish._silence_weight = lambda conn, code, **kw: 0.0   # 归零
+            # T02 拆包：`_silence_weight` 已搬进 `fish_push`——patch 必须打在**使用方模块**上，
+            # 打 `fish._silence_weight` 只是改了 fish.py 的导入副本（from-import 快照），生效不了。
+            fish_push._silence_weight = lambda conn, code, **kw: 0.0   # 归零
             cands = fish.build_push_candidates(
                 self.conn, self.data, citizen_id=self.cid, project="TESTA")
         finally:
-            fish._silence_weight = orig
+            fish_push._silence_weight = orig
         self.assertNotIn(cold, {c["code"] for c in cands},
                          "变异后 cold 应被剔除（若仍出现，说明 C4 没在测防静默）")
 

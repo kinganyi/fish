@@ -202,26 +202,27 @@ class KbMultiSearchTest(unittest.TestCase):
 
     # ── M4 _kb_push_candidates 仍然工作 ──────────────────────────
     def test_M4_push_candidates_uses_multi(self):
-        """`_kb_push_candidates` 必须走 multi（不再逐个调 kb_search）。"""
-        calls = {"kb_search": 0, "multi": 0}
-        real_search, real_multi = fish.kb_search, fish._kb_search_multi
+        """`_kb_push_candidates` 必须走 multi（不再逐个调 kb_search）。
 
-        def cs(*a, **k):
-            calls["kb_search"] += 1
-            return real_search(*a, **k)
+        T02 拆包：`_kb_push_candidates` 已搬进 `fish_push`——它调 `_kb_search_multi`
+        走的是 **fish_push 模块全局**（`from fish_kb import _kb_search_multi` 的绑定）；
+        patch `fish.*` 只是改导入副本（from-import 快照），生效不了。
+        注意：`fish_push` **没有** `kb_search` 名字（旧回退已删），所以只 spy multi。
+        """
+        import fish_push
+        calls = {"multi": 0}
+        real_multi = fish_push._kb_search_multi
 
         def cm(*a, **k):
             calls["multi"] += 1
             return real_multi(*a, **k)
 
-        fish.kb_search, fish._kb_search_multi = cs, cm
+        fish_push._kb_search_multi = cm
         try:
-            out = fish._kb_push_candidates(self.conn, self.root,
-                                           query="漫剧剧本怎么写", limit=2)
+            out = fish_push._kb_push_candidates(self.conn, self.root,
+                                                query="漫剧剧本怎么写", limit=2)
         finally:
-            fish.kb_search, fish._kb_search_multi = real_search, real_multi
-        self.assertEqual(calls["kb_search"], 0,
-                         "`_kb_push_candidates` 不该再逐个调 kb_search")
+            fish_push._kb_search_multi = real_multi
         self.assertGreaterEqual(calls["multi"], 1, "应至少调一次 multi")
         self.assertIsInstance(out, list)
 
