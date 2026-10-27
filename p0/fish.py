@@ -48,7 +48,7 @@ from fish_surface import normalize_surface, surface_hit  # noqa: F401 —— 对
 import fish_common  # noqa: F401 —— 模块本身也要在（判据 J1d 查对象同一性）
 from fish_common import (  # noqa: F401
     _exc_text, count_tokens, fts_match_expr, fts_text, index_tokens, iso_local,
-    now_utc, ulid)
+    now_utc, ulid, warn_derived)
 
 # 原始对话语料层（2026-10-27 · 语料层 T01/T02）：独立库 `corpus.sqlite`，与主库零耦合。
 # 项目/公民解析器以回调注入（这里不把 fish 的解析逻辑搬进语料模块，避免循环导入）。
@@ -1101,8 +1101,8 @@ def _ensure_board_seen_session(conn, *, data_root=None) -> dict:
             if not committed:
                 try:
                     conn.execute("ROLLBACK")
-                except sqlite3.Error:
-                    pass
+                except sqlite3.Error as exc:      # 事务状态不确定 → 出声（静默清零）
+                    warn_derived(conn, "rollback", exc)
             raise
         finally:
             conn.execute("PRAGMA foreign_keys=ON")
@@ -1276,8 +1276,8 @@ def _ensure_presence_session(conn, *, data_root=None) -> dict:
             if not committed:
                 try:
                     conn.execute("ROLLBACK")
-                except sqlite3.Error:
-                    pass                               # 事务已不在（例如校验后已 COMMIT）
+                except sqlite3.Error as exc:      # 事务状态不确定 → 出声（静默清零）
+                    warn_derived(conn, "rollback", exc)                               # 事务已不在（例如校验后已 COMMIT）
             raise
         finally:
             conn.execute("PRAGMA foreign_keys=ON")
@@ -1366,8 +1366,8 @@ def presence_session_rollback(conn, *, data_root=None, dry_run=False) -> dict:
         if not committed:
             try:
                 conn.execute("ROLLBACK")
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:      # 事务状态不确定 → 出声（静默清零）
+                warn_derived(conn, "rollback", exc)
         raise
     finally:
         conn.execute("PRAGMA foreign_keys=ON")
@@ -2170,8 +2170,8 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
     # 建边是派生数据，绝不能让 remember 失败——写入才是主流程。
     try:
         build_links_on_write(conn, code, title=title, body=body or "", cause=cause)
-    except Exception:
-        pass
+    except Exception as exc:      # noqa: BLE001 —— 派生数据失败不阻塞主流程
+        warn_derived(conn, "build_links_on_write", exc)
 
     # ---- 写前查重（2026-10-25 · 阶段 C）----
     # 名字叫"写前"，位置在写入**之后**，两者不矛盾：对照的是**下一次**写。
@@ -9427,8 +9427,9 @@ def cmd_prompt_push(args):
                             session_key=session_key, project=project,
                             candidate_id=codes[0] if codes else None,
                             budget_tokens=budget)
-        except (sqlite3.Error, ValueError):
-            pass                     # 记账失败不影响这次递送
+        except (sqlite3.Error, ValueError) as exc:
+            # 记账失败不影响这次递送——但**必须出声**（采纳率缺数会让人得出错误结论）
+            warn_derived(conn, "append_push_log", exc)
     except (sqlite3.Error, ValueError):
         return
     finally:

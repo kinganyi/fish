@@ -667,8 +667,8 @@ class FishServer:
                    "duration_ms": int((time.time() - started) * 1000) if started else None}
             with open(d / "tool-calls.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
+        except Exception as exc:      # noqa: BLE001 —— 审计缺数会让复盘得出错误结论
+            fish.warn_derived(self.conn, "tool-calls.jsonl", exc)
 
     def _resolve_identity(self, token):
         """把本次调用带的 token 解析成 Identity（**纯函数：不写任何进程状态**）。
@@ -1420,8 +1420,8 @@ class FishServer:
                 self.conn, codes, channel=channel,
                 citizen_id=ident.citizen_id, session_key=ident.session_key,
                 budget_tokens=budget_tokens)
-        except Exception:
-            pass
+        except Exception as exc:      # 采纳率缺数 → 出声（静默清零）
+            fish.warn_derived(self.conn, "append_push_log(mcp)", exc)
 
     def _accept_push(self, code, ident):
         """回填「用户接受了这次推送」（16 §5.6）：读了正文 / 校验了编码 = 被接受。
@@ -1434,8 +1434,8 @@ class FishServer:
         """
         try:
             fish.mark_push_accepted(self.conn, code, session_key=ident.session_key)
-        except Exception:
-            pass
+        except Exception as exc:      # 采纳记录失败 → 出声（静默清零）
+            fish.warn_derived(self.conn, "mark_push_accepted(mcp)", exc)
 
     def _touch(self, codes, ident, source="inject"):
         """注入包展示过的记忆 = 被看见 → 刷新 last_accessed_at（不增 access_count）。
@@ -1451,8 +1451,8 @@ class FishServer:
         try:
             fish.record_access(self.conn, codes, source, counted=False,
                                actor=ident.citizen_id)
-        except Exception:
-            pass
+        except Exception as exc:      # 访问热度缺数 → 出声（静默清零）
+            fish.warn_derived(self.conn, "record_access(mcp)", exc)
         via = self._TOUCH_VIA.get(source)
         if via:
             self._log_access(codes, via, ident)
