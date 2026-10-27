@@ -8,6 +8,10 @@ __pycache__/
 .pytest_cache
 
 # ── 数据库与备份（二进制 / 高频变动 / 已有备份机制）──────────
+# 2026-10-27（Wave 0 基线）：整个 `p0/data/` 都是**运行时产物**（库/正文/审计/附件/看板），
+# 永不进 git。逐项列白名单的写法漏了 `data/blobs/` 与 `data/projects/`，导致一次
+# `git add -A` 把 506 个 data 文件误提交进基线（已 amend 移除）。
+p0/data/
 p0/data/index.sqlite
 p0/data/index.sqlite-wal
 p0/data/index.sqlite-shm

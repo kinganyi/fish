@@ -1022,12 +1022,22 @@ class S9MiscFixesTest(_Round2Case):
         self.assertEqual(self.last_meta()["reason_code"], "bad_usage")
 
     def test_write_id_suffix_is_case_insensitive(self):
-        res = self.write("10-项目/大小写.md", "create", content="# x\n")
+        # 2026-10-27：write_id 后缀是 8 位十六进制，**纯数字概率 ≈2.3%**——抽到纯数字时
+        # `upper == write_id`，本判据会假红（实测 worktree 基线首跑就抽到一次）。
+        # 修法：重抽到含字母的样本；判据本身不放宽（仍要求大写形态可 rollback）。
+        name = None
+        for i in range(10):
+            name = f"10-项目/大小写-{i}.md"
+            res = self.write(name, "create", content="# x\n")
+            if str(res["write_id"]).upper() != str(res["write_id"]):
+                break
+        else:
+            self.fail("10 次都没抽到含字母的 write_id——生成器或断言都坏了")
         upper = str(res["write_id"]).upper()
         self.assertNotEqual(upper, res["write_id"])
         back = fish.kb_rollback(self.conn, self.root, upper)
         self.assertTrue(back["removed"], "大写形态的合法 write_id 被误杀")
-        self.assertFalse((self.vault_dir / "10-项目" / "大小写.md").exists())
+        self.assertFalse((self.vault_dir / name).exists())
         # 大小写不敏感 ≠ 内容不校验：错后缀仍然 not_found 且文件仍在
         res2 = self.write("10-项目/大小写2.md", "create", content="# y\n")
         access_id = str(res2["write_id"]).split("-", 1)[0]
