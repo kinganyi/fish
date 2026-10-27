@@ -196,6 +196,10 @@ DECLARED_NEW_FUNCS = {
                 # 从那时起一直红着。它只做 GROUP BY 检测、不改上面 25 条基线里的任何一条，
                 # 所以按同一纪律补声明（不是放宽判据）。
                 "find_duplicate_display_names",
+                # 2026-10-28（⑥ 身份合并）：`citizen_merge` 是新增的**写点**
+                # （把 src 的归属改指向 dst），按同一纪律声明；上面的基线一字未改，
+                # 且它有自己的一组判据（test_citizen_merge：dry-run/迁移/标记/幂等）。
+                "citizen_merge",
                 # 2026-10-25（`EVAL-261025-16`）：`board_presence_rows` 加了
                 # `LEFT JOIN citizens` 拿 display_name（看板原来只显示 ULID，
                 # 人每次要拿它去 whoami 对照才知道是谁）。

@@ -8498,6 +8498,70 @@ def cmd_owner(args):
     conn.close()
 
 
+def citizen_merge(conn, *, src, dst, apply=False) -> dict:
+    """把 src 公民的全部归属改指向 dst（⑥ 身份合并，2026-10-28）。
+
+    默认 **dry-run**（只数行数）；`apply=True` 才写。只做 from→to：不反向、不删行
+    （审计要"谁什么时候被合并"），src 标 `status='merged_into:<dst>'`。
+    收口的是"173 个公民 / 323 条记忆"这类身份分裂（07 号报告 P0-2）。
+    """
+    src_id = _citizen_id_of(conn, src)
+    dst_id = _citizen_id_of(conn, dst)
+    if not src_id or not dst_id:
+        raise ValueError(f"身份不存在：src={src!r} dst={dst!r}")
+    if src_id == dst_id:
+        raise ValueError("src 与 dst 是同一个公民")
+    tables = (("code_index", "owner"), ("session_tokens", "citizen_id"),
+              ("presence", "citizen_id"), ("board_posts", "citizen_id"),
+              ("push_log", "citizen_id"))
+    plan = {}
+    for table, col in tables:
+        try:
+            n = conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {col}=?", (src_id,)).fetchone()[0]
+        except sqlite3.Error:
+            n = 0
+        plan[f"{table}.{col}"] = int(n or 0)
+    out = {"src": src_id, "dst": dst_id, "apply": bool(apply), "plan": plan}
+    if not apply:
+        return out
+    moved = {}
+    for table, col in tables:
+        try:
+            cur = conn.execute(
+                f"UPDATE {table} SET {col}=? WHERE {col}=?", (dst_id, src_id))
+            moved[f"{table}.{col}"] = int(cur.rowcount or 0)
+        except sqlite3.Error:
+            moved[f"{table}.{col}"] = -1
+    conn.execute("UPDATE citizens SET status=? WHERE citizen_id=?",
+                 (f"merged_into:{dst_id}", src_id))
+    conn.commit()
+    out["moved"] = moved
+    return out
+
+
+def cmd_citizen_merge(args):
+    """`fish citizen-merge <src> <dst> [--apply]`（默认 dry-run）。"""
+    conn = connect(Path(args.root))
+    conn.executescript(SCHEMA)
+    migrate(conn)
+    try:
+        res = citizen_merge(conn, src=args.src, dst=args.dst,
+                            apply=bool(getattr(args, "apply", False)))
+    except ValueError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        conn.close()
+        raise SystemExit(1)
+    print(f"{'应用' if res['apply'] else '预演'}：{res['src']} → {res['dst']}")
+    for key, n in res["plan"].items():
+        print(f"  {key}: {n} 行")
+    if res["apply"]:
+        print("已迁移：" + ", ".join(f"{k}={v}" for k, v in res.get("moved", {}).items()))
+    else:
+        print("（预演模式：加 --apply 才真的改）")
+    conn.close()
+
+
 def cmd_citizen_retire(args):
     """退役一个公民。若有记忆，必须显式 --migrate-to 或 --force，避免静默丢归属。"""
     conn = connect(Path(args.root))
@@ -13841,6 +13905,12 @@ def main():
     p = sub.add_parser("citizen-list")
     p.set_defaults(func=cmd_citizen_list)
 
+    p = sub.add_parser("citizen-merge",
+                       help="把 src 的归属合并到 dst（默认 dry-run，加 --apply 才写）")
+    p.add_argument("src")
+    p.add_argument("dst")
+    p.add_argument("--apply", action="store_true")
+    p.set_defaults(func=cmd_citizen_merge)
     p = sub.add_parser("citizen-retire")
     p.add_argument("citizen_id")
     p.add_argument("--reason", default=None)
