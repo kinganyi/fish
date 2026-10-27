@@ -6342,14 +6342,24 @@ def cmd_recall(args):
         conn.close()
         return
     ensure_fts(conn, Path(args.root))
-    rows, _ = search_memories(
+    rows, src_of = search_memories(
         conn, query=q, code=code, project=project, tags=tags,
         scope=getattr(args, "scope", "all"), limit=limit)
+    # ⑥ 统计行（BUG-5 的收口，2026-10-28）：区分"没有"与"没搜到"——按匹配来源计数。
+    total_scanned = count_memories(conn, project=project, tags=tags)
+    hit_counts = {"编码": 0, "标题": 0, "正文": 0}
+    for src in (src_of or {}).values():
+        key = "编码" if "编码" in str(src) else (
+            "标题" if "标题" in str(src) else "正文")
+        hit_counts[key] += 1
+    stats_line = (f"> 扫描 {total_scanned} 条 ｜ 编码 {hit_counts['编码']} ｜ "
+                  f"标题 {hit_counts['标题']} ｜ 正文 {hit_counts['正文']} ｜ 返回 {len(rows)}")
     if not rows:
         cand = recent_fallback(conn, project=project, tags=tags)
         print(f"未找到「{q}」。最近的条目：")
         for c, t in cand:
             print(f"  {c}\t{t}")
+        print(stats_line)
         conn.close()
         return
     # 记录访问：刷新衰减，被想起即唤醒（并写 memory.accessed 事件，见 07 D-12）
@@ -6361,6 +6371,7 @@ def cmd_recall(args):
     for code, title, proj, mtype, status, fp, dormant, src in rows:
         print(f"{code}\t{format_status_tag(mtype, status, dormant)}"
               f"\t{title}\t{fp}\t匹配:{src}")
+    print(stats_line)
     conn.close()
 
 
