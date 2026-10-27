@@ -11,11 +11,22 @@ import datetime
 import os
 import re
 import sqlite3
+import time
 
 import fish_activity
 import fish_corpus
 import fish_naming
 import fish_surface
+
+from fish_push_rerank import (       # T03b-R2：阶段二（重排）整段搬走的模块
+    CTX_PROJECT,
+    RERANK_TOP_K_DEFAULT,
+    _breaker,
+    _cfg_any,
+    _rerank_enabled,
+    _tag_kind_class,
+    rerank_candidates,
+)
 
 from fish_kb import (  # T02：拆包后的跨模块引用
     _kb_search_multi,
@@ -405,15 +416,20 @@ def _kb_push_candidates(conn, root, *, query, project=None, exclude=(), limit=2,
       · **只在你问到时才产**：`query` 为空（tool_after 没 prompt、没项目）→ 返回 []；
       · **vault 未登记 → 不产**（不噪音）；
       · **24h 内推过的同一个文件不重复推**（按 `push_log.code` 去重）。
+
+    断路器（T03b）：整段计时交给 `_breaker`——超过 `push.breaker_seconds` 就
+    **本次不推**（返回 []）并落一行诊断：慢到 3s 的检索进注入包时已落后上下文。
     """
+    started = time.monotonic()
     q = (query or "").strip()
     if not q:
         return []
     # T04 接线（评审 🔴-1，2026-10-27）：`FISH_KB_USE_INDEX=1` 才走索引路径；
     # 默认 legacy（零回归——生产库还没有 kb_index 表）。
     if _kb_use_index():
-        return _kb_push_candidates_index(conn, q, project=project, exclude=exclude,
-                                         limit=limit, now=now)
+        out = _kb_push_candidates_index(conn, q, project=project, exclude=exclude,
+                                        limit=limit, now=now)
+        return _breaker(conn, root, "kb", started, query, out)
     try:
         vaults = kb_vault_list(conn)
     except Exception:       # noqa: BLE001 —— 知识库是增强项，坏了不拖垮候选
@@ -474,7 +490,7 @@ def _kb_push_candidates(conn, root, *, query, project=None, exclude=(), limit=2,
                        "snippet": snippet},
             })
             exclude.add(code)
-    return out[:max(int(limit), 1)]
+    return _breaker(conn, root, "kb", started, query, out[:max(int(limit), 1)])
 
 def _conv_push_candidates(conn, root, *, query, project=None, session_key=None,
                           exclude=(), limit=1, now=None):
@@ -482,14 +498,17 @@ def _conv_push_candidates(conn, root, *, query, project=None, session_key=None,
 
     这里只交付两处主库依赖：`push_log` 里的"最近推过"与打分公式 `_cand`
     ——后者必须留在 `fish.py`（公式只有一份，见 `_cand` 的三条纪律）。
+    断路器同 `_kb_push_candidates`（T03b）：慢到阈值以上就本次不推。
     """
-    return fish_corpus.conv_push_for_session(
+    started = time.monotonic()
+    out = fish_corpus.conv_push_for_session(
         root=root, query=query, project=project, exclude=exclude, limit=limit, now=now,
         recent_of=lambda hours, when: _recent_pushed_codes(conn, session_key, hours=hours,
                                                           now=when),
         scorer=lambda item: _cand(conn, item["code"], "conv_related", title=item["title"],
                                   reason=item["reason"], current_project=project, now=now,
                                   relevance=item["relevance"], freshness=None, interrupt=0.4))
+    return _breaker(conn, root, "conv", started, query, out)
 
 def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
                           project=None, exclude=(), limit=12, now=None,
@@ -519,7 +538,7 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
                                       session_key=session_key, project=project,
                                       now=now_dt, limit=limit)
         out.sort(key=lambda c: (-c["score"], c["code"]))
-        return out[:int(limit)]
+        return _with_ctx_project(conn, out[:int(limit)], project)
 
     # 锚点：当前项目最近 3 条 active。候选从它们的 links 邻居长出来，
     # 而不是"全库最近更新"——后者会让别的项目的更新把候选带偏。
@@ -695,7 +714,7 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
             out = same + other[:3 - len(same)]
 
     out.sort(key=lambda c: (-c["score"], c["code"]))
-    return out[:int(limit)]
+    return _with_ctx_project(conn, out[:int(limit)], project)
 
 def _recent_pushed_codes(conn, session_key, *, hours=24, now=None) -> set:
     """本会话最近 N 小时**已经推过**的编码（去重用；prompt 与 tool_after 共用一份）。"""
@@ -1084,10 +1103,10 @@ def build_prompt_candidates(conn, root, *, prompt, citizen_id=None, session_key=
     except Exception:       # noqa: BLE001 —— 语料候选是增强项
         conv_cands = []
     if not terms:
-        return kb_cands + conv_cands
+        return _with_ctx_project(conn, kb_cands + conv_cands, project)
     rows = search_memories_any(conn, terms, project=None, limit=max(int(limit) * 4, 12))
     if not rows:
-        return kb_cands + conv_cands
+        return _with_ctx_project(conn, kb_cands + conv_cands, project)
     pushed = _recent_pushed_codes(
         conn, session_key, hours=int(get_config(conn, "push.prompt_exclude_hours")),
         now=now_dt)
@@ -1134,19 +1153,57 @@ def build_prompt_candidates(conn, root, *, prompt, citizen_id=None, session_key=
     out.extend(kb_cands)
     out.extend(conv_cands)          # T04：原话候选同批（同一份预算，不另开一格）
     out.sort(key=lambda c: (-c["score"], c["code"]))
-    return out[:max(int(limit), 1)]
+    return _with_ctx_project(conn, out[:max(int(limit), 1)], project)
 
-def select_push_candidates(conn, cands, *, limit=4, prefer_kind=None):
+# ---------------------------------------------------------------- 六特征重排（T03b）
+#
+# T03b-R2（2026-10-28）把重排**整段**搬进 `fish_push_rerank`（评审 S4：本文件当时贴着
+# J4 的 1,500 行上限，只剩 1 行余量）。这里只留三样"生成侧才有的知识"：
+#   · `_with_ctx_project`：当前项目由本模块知道，贴给候选（`_infer_project` 不必猜）；
+#   · `select_push_candidates`：开关 / top-K / now 的唯一入口；
+#   · `_kb_push_candidates` / `_conv_push_candidates` 的断路器调用点。
+# 依赖方向不变（J2/J6）：fish_push → fish_push_rerank → fish_common / fish_corpus_rank。
+
+def _with_ctx_project(conn, cands, project):
+    """重排开启时给候选贴 `_ctx_project`（当前项目）；关着时原样返回（off 逐字节等价）。
+
+    为什么要贴在候选上：prompt 池是**跨项目**的（`search_memories_any` 传的是
+    `project=None`），"当前项目"只有生成侧知道。R3 收口（2026-10-28）：`_infer_project` 已
+    收窄成"**只认唯一值**"（混合多项目 → None → 全池 0.5 中性），所以不贴标签**不会再造出
+    假 1.0**；但"没标签"也意味着 prompt 路径丢掉 `project_match` 与 24h 去重窗口这两条真
+    信号。根因是 `fish.py:9405` 没把 `project`/`now` 传下来——**那是 A 的必做项**（不在本
+    批写作用域），不是"不补也能正确"。
+    """
+    if not _rerank_enabled(conn):
+        return cands
+    name = str(project or "").strip()
+    if not name:
+        return cands
+    for cand in cands or ():
+        if isinstance(cand, dict):
+            cand[CTX_PROJECT] = name
+    return cands
+
+
+def select_push_candidates(conn, cands, *, limit=4, prefer_kind=None, project=None,
+                           now=None, rerank=None):
     """按分数选，并保证**意外类至少 1 条**（防茧房闸 2）。
 
-    只选 score > 0 的——`16` §5.1 的判据就是"收益要大于成本"。
-    但注意：**这不等于"沉默最安全"**，因为 score 里已经含了静默降权项
-    （被忽略多的候选分低，但不会归零，所以仍有被选中的机会）。
-
-    `prefer_kind`（2026-10-26）：给某一类留**第一格**（如 prompt 时机只递
-    `prompt_related`）。为什么不直接过滤掉别的类：候选池的分档逻辑属于
-    `build_push_candidates`，选择器只做"排序 + 配额"，两处各管一件事。
+    只选 score > 0 的（`16` §5.1：收益 > 成本）；开启重排后作用于六特征加权和
+    （值域 −0.30..0.95，四项中等也可能落到 0 以下；跨类只保序不保距）。
+    `prefer_kind` 给某类留第一格（分档属于 build_push_candidates，这里只排序+配额）。
+    T03b：`rerank=None` 读 `push.rerank_enabled`（默认 False，关闭时逐字节等价）；
+    True/False 显式覆盖；开启时先给全池贴 `kind_class`，再对 top-K 重排；project/now
+    只在重排时用（now 当场取当前 UTC，不采信候选里的旧值）。
+    `cands` 先 list()：`_tag_kind_class` 会遍历池子，生成器会被吃光（QA F-1）。
     """
+    cands = list(cands)
+    if _rerank_enabled(conn, rerank):
+        cands = _tag_kind_class(cands)
+        cands = rerank_candidates(
+            conn, cands,
+            top_k=_cfg_any(conn, "push.rerank_top_k", RERANK_TOP_K_DEFAULT),
+            now=now or now_utc(), project=project)
     cands = [c for c in cands if c["score"] > 0]
     picked, seen_kinds = [], {}
     quota = int(limit)
@@ -1177,7 +1234,10 @@ def build_push_block(conn, root, *, budget_tokens=None, **kw):
         return {"text": "", "codes": [], "trimmed": [], "candidates": [], "omitted": 0}
     budget = int(budget_tokens or get_config(conn, "push.open_budget_tokens"))
     cands = build_push_candidates(conn, root, **kw)
-    picked = select_push_candidates(conn, cands)
+    # T03b：`project` / `now` 从 `kw` 透传给选择器——重排要用它们做 project_match 与
+    # 24h 去重窗口。重排关着时这两个参数无人使用（默认关的等价性由 R-兼容判据钉住）。
+    picked = select_push_candidates(conn, cands, project=kw.get("project"),
+                                    now=kw.get("now"))
     line_budget = budget
     lines = []
     for c in picked:

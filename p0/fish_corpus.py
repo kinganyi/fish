@@ -107,6 +107,15 @@ PUSH_MIN_CHARS = 80                    # 短句没有结论价值（"好嘞""继
 PUSH_INCLUDE_SUBAGENT = False          # D11：子代理默认不推（可开）
 PUSH_TITLE_MAX_CHARS = 34              # 34 + 40 + 门牌 29 + 装饰 ≈ 108 ≤ 120 token 预算
 PUSH_REASON_MAX_CHARS = 40
+# 语义层类别（T03a）：`kind` 保持 `conv_related`（`test_corpus_push` 锁死），合流侧
+# 认的是 `kind_class`——两份字段各有各的读者，不用一个字段同时承担两种含义。
+# 常量本体只有一份（`fish_corpus_rank.KIND_CLASS_CORPUS`），这里只是别名：两处各写
+# 一个 "corpus" 字面量，改词表时必漏一处。
+PUSH_KIND_CLASS = rank_mod.KIND_CLASS_CORPUS
+# 重复度的窗口（24h）。与去重**共用同一个数**（有意为之，不再声称"可独立调"——
+# 首轮 🟡 Y3 的修法）：去重问"本会话还挡不挡"，重复度问"全局还有多新"，两件不同
+# 的事，但用的是同一段历史；分成两个数只会让"被挡住"和"被降权"说的不是一段时间。
+PUSH_DUP_WINDOW_HOURS = rank_mod.DUP_WINDOW_HOURS
 
 # CLI 里由 `run_cli` 承担的动作（ingest/stats/retag 是 T02 的既有分支，留在薄壳里）
 CLI_ACTIONS = ("search", "read", "forget", "rebuild", "doctor")
@@ -892,11 +901,16 @@ def _log_access(conn, *, root=None, action, via, query=None, result_count=None,
 def search(q, terms=None, filters=None, limit=SEARCH_DEFAULT_LIMIT, budget_tokens=None,
            ranker="default", *, root=None, conn=None, citizen_id=None, session_key=None,
            via="api", record=True, time_from=None, time_to=None,
-           include_shadowed=False) -> dict:
+           include_shadowed=False, count=True) -> dict:
     """检索原话（设计 §6）：一次 SQL 把 `MATCH` 与全部过滤下推，排序交给 Ranker。
 
     返回 `{"hits": [...], "meta": {total_matched, returned, ranker, filters_echo,
-    degraded, as_of, truncated}}`。
+    degraded, as_of, truncated, limit, budget_tokens}}`。
+
+    `count=False`（T03a）：**不统计全库命中总数**，`meta.total_matched` 回 `None`。
+    为什么要有这个口子：推送候选只要 top-K，"总共命中多少"是给人看的读数、不是
+    候选的输入；而在 5 万段库上这一次 `COUNT` 约 26ms——候选生成发生在用户消息
+    边界上，26ms 是白付的。为什么回 `None` 而不是 0：0 会被读成"一条都没命中"。
     """
     rank_impl = rank_mod.get_ranker(ranker)    # 未知 ranker → ValueError（不静默回落）
     filters = dict(filters or {})
@@ -908,7 +922,7 @@ def search(q, terms=None, filters=None, limit=SEARCH_DEFAULT_LIMIT, budget_token
     now = rank_mod.utc_now()
     degraded = []
     hits = []
-    total = 0
+    total = 0 if count else None
     truncated = False
     conn_obj, created = _connect_read(root, conn)
     try:
@@ -926,7 +940,7 @@ def search(q, terms=None, filters=None, limit=SEARCH_DEFAULT_LIMIT, budget_token
                     time_to=time_to, limit=pool)
                 total = store.count_matching(
                     conn_obj, expr, filters=filters, include_shadowed=include_shadowed,
-                    time_from=time_from, time_to=time_to)
+                    time_from=time_from, time_to=time_to) if count else None
                 for cand in cands:
                     cand["pointer"] = store.canonical_pointer(
                         cand["host"], cand["session_id"], cand["loc"], cand["part"])
@@ -950,7 +964,9 @@ def search(q, terms=None, filters=None, limit=SEARCH_DEFAULT_LIMIT, budget_token
                     used += cost
                     if len(hits) >= limit_val:
                         break
-                truncated = truncated or total > len(cands) or len(hits) < len(ranked)
+                # `total is None` = 本次没统计（`count=False`）：不能用它判"被截断"
+                truncated = (truncated or (total is not None and total > len(cands))
+                             or len(hits) < len(ranked))
     finally:
         if conn_obj is not None and record:
             _log_access(conn_obj, root=root, action="search", via=via, query=q,
@@ -1064,11 +1080,72 @@ def _push_reason(hit) -> str:
     return _clip("原话里%s说过（%s）" % (who, day), PUSH_REASON_MAX_CHARS)
 
 
+def _dup_count_map(dup_counts, now, skip):
+    """`dup_counts(hours, now)` → `{code: 全局次数}`；**取不到就记 `dup_unknown`**。
+
+    ## 语义：**全局重复度**（首轮 🟠 S3 的收口）
+
+    回调回答的是"这条内容还新吗"——同一段原话在 24h 内被**任意会话/公民**推送过
+    几次。它**不是**本会话的 exclude 集合：本会话要不要再看同一条，由 `recent_of`
+    负责（挡，不产）；这里问的是"它在池子里已经出现过很多次没有"（罚）。两件事分开，
+    否则被 `exclude` 掉的 code 恰好就是会被数到的 code → 活下来的候选 count 恒 0
+    （首轮的结构性恒 0 就是这样来的）。
+
+    与 `fish.py._silence_weight` 的分工（两者都会进 `_cand` 的分数，所以必须说清）：
+
+      · 本回调 → **重复度 / 新颖性**：24h 内被推过几次（跨会话）；
+      · `_silence_weight` → **历史忽略率**：推过而没人理的比例（最多降到 0.15）。
+
+    这是两个不同现象，不是同一现象罚两次：重复且每次都被采纳（用户在用）→ dup 高、
+    silence = 1.0；推过一次就没人理 → dup = 0.2、silence 低。同时进两个读数的只有
+    "又重复又被忽略"的那一小撮，方向本就不同（前者压"再推一次的新增价值"，后者压
+    "这条内容的可信度"），且各有上限/下限，谁都不能单独把一条压死。
+    若调用方只想量"**别的会话**推过没有"（把本会话的去重完全留给 `recent_of`），
+    在回调里排除本会话即可（`exclude_session=session_key`）——这条口径由
+    `test_c1_dup_penalty_counts_other_sessions_only` 判据覆盖。
+
+    ## 缺省与失败
+
+    缺省（`None`）**也记账**：按 0.0 继续出候选，但计一次 `dup_unknown`。为什么不静默
+    按 0：`dup_penalty` 是六特征里唯一的负向项，缺数会让重复推送变多，而这种"变多"
+    在推送日志里看不出来（每条都长得一样）。也不让整批失败：候选生成发生在用户消息
+    边界上，一个**可选特征**读不到不该拖垮这条链路（与 `_kb_push_candidates` 的兜底
+    同一条纪律）。`dup_unknown` 的值是"**几次取数没拿到**"，不是条数。
+
+    两种回包都接受：`{code: count}`（新写的调用方）与 `{code, ...}` 集合（既有
+    `recent_of` 的形态就是集合，按"推过 1 次"算）——取数层不该为了形状再包一层。
+    """
+    if dup_counts is None:
+        skip("dup_unknown")                    # 缺省 = 没有读数（可选特征，不编造 0）
+        return None
+    try:
+        raw = dup_counts(PUSH_DUP_WINDOW_HOURS, now)
+    except Exception:                          # noqa: BLE001 —— 见 docstring
+        skip("dup_unknown")
+        return None
+    if raw is None:
+        skip("dup_unknown")
+        return None
+    if isinstance(raw, (str, bytes)):
+        # 字符串会被 `for code in raw` 拆成单字，最后得到一份"每个字推过一次"的假读数
+        # ——比没有读数更坏（它看起来有值）。
+        skip("dup_unknown")
+        return None
+    try:
+        if hasattr(raw, "items"):
+            return {str(code): int(count) for code, count in raw.items()}
+        return {str(code): 1 for code in raw}
+    except (TypeError, ValueError):
+        # 回包形态不对（比如给了字符串）——当作没有读数，但要让调用方看得见。
+        skip("dup_unknown")
+        return None
+
+
 def conv_push_candidates(*, query, project=None, root=None, conn=None, exclude=(),
                          limit=PUSH_MAX_ITEMS, now=None,
                          min_relevance=PUSH_MIN_RELEVANCE, min_chars=PUSH_MIN_CHARS,
                          include_subagent=PUSH_INCLUDE_SUBAGENT, via="push",
-                         scorer=None) -> dict:
+                         scorer=None, dup_counts=None) -> dict:
     """语料命中 → 推送候选（C-P0-6 · 设计 §7）。
 
     **只产条目，不在这里发明打分**：给 `scorer`（`fish.py` 传它的 `_cand`）时，
@@ -1078,6 +1155,35 @@ def conv_push_candidates(*, query, project=None, root=None, conn=None, exclude=(
 
     返回 `{"items": [...], "skipped": {原因: 条数}, "ranker": 名字}`。
     `skipped` 不是装饰：**不推也要能回答"为什么不推"**，否则门槛松动时无人察觉。
+    其中 `dup_unknown` 是"**取数没拿到**"的次数（缺省/回调失败各计一次），不是条数。
+
+    ## 候选结构（T03a R2：与合流侧对齐，口径见 52 号 §4）
+
+    每个 item 除既有字段外带五件东西：
+
+      · `kind_class="corpus"` —— **语义层**类别。`kind` 仍是 `conv_related`
+        （`test_corpus_push` 锁死，改它会动既有判据），合流侧认 `kind_class`；
+        归一入口是 `fish_corpus_rank.semantic_kind`（三类映射只写一份）。
+      · `score` + `score_stage="first_phase"` —— **首阶段分**：有 `scorer` 时它就是
+        `fish.py._cand` 的 `(benefit − cost) × weight`；没有 `scorer` 时是检索分
+        （占位但不编造）。它**不是** `score_breakdown` 四项的加权和——两者是两个
+        阶段的数（34 §3.5 的 R3 只在重排之后成立），**禁止互相验算**。
+      · `rerank=None` —— 重排器名字的占位。T03a 没有第二阶段，`None` 就是"还没重排"
+        （不写 `""`：空串会被读成"重排器叫空名"）。T03b 重排后必须**原子替换**
+        `score`/`score_breakdown` 并把 `score_stage` 置 `SCORE_STAGE_RERANK`。
+      · `freshness` —— **与 `_cand` 完全同键**的 dict `{factor, band, age_days}`。
+        为什么不是 float（首轮 🟠 S4）：合流池里 mem/kb 候选本来就是 dict，同名字段
+        两种类型会让下游一半 `TypeError`、一半静默算错，而且只在两类同池时才现形。
+      · `score_breakdown` —— 四项（`relevance` / `freshness` / `project_match` /
+        `dup_penalty`）；`freshness` 在这一格里仍是**数值 factor**（明细要能复算），
+        与上面那个 dict 出自**同一次**计算。`access_ratio` / `link_strength` 要摸库，
+        留给 T03b 补。
+
+    给了 `scorer` 时这些字段用 `setdefault` 补齐：**`score` 一个字都不改**（打分公式
+    只有 `fish.py._cand` 那一份，这里补的是"解释"，不是"分数"）。
+    `dup_counts` 是可选回调（`hours, now -> {code: 全局次数}`，见 `_dup_count_map`）：
+    本模块**不查主库**（J1：语料层不认识 `push_log`），缺省即 `dup_penalty=0.0` 并
+    计 `dup_unknown`。
     """
     skipped = {}
 
@@ -1091,8 +1197,11 @@ def conv_push_candidates(*, query, project=None, root=None, conn=None, exclude=(
         _skip("no_project")
         return {"items": [], "skipped": skipped, "ranker": None}
     banned = {str(code) for code in (exclude or ())}
+    dup_count_map = _dup_count_map(dup_counts, now, _skip)
     res = search(query, filters={"project": [project], "role": [store.ROLE_ASSISTANT]},
-                 limit=PUSH_SEARCH_LIMIT, root=root, conn=conn, via=via, record=False)
+                 limit=PUSH_SEARCH_LIMIT, root=root, conn=conn, via=via, record=False,
+                 # 只要 top-K：不统计全库总数（5 万段库上那一次 COUNT ≈ 26ms，白付）
+                 count=False)
     items, seen = [], set()
     for hit in res["hits"]:
         parsed = store.parse_pointer(hit["pointer"])
@@ -1117,12 +1226,28 @@ def conv_push_candidates(*, query, project=None, root=None, conn=None, exclude=(
         if relevance < float(min_relevance):
             _skip("low_relevance")
             continue
+        # 分项与解释用**同一次**计算：`freshness` 的 dict（给候选字段）与数值 factor
+        # （给明细）从这里一起出，各算一遍就会在四舍五入后对不上。
+        freshness = rank_mod.freshness_reading(hit.get("occurred_at"), now=now)
+        dup_count = int(dup_count_map.get(code, 0)) if dup_count_map else 0
+        breakdown = {
+            "relevance": round(relevance, 6),
+            "freshness": freshness["factor"],
+            # 检索侧已按项目下推：这里用**回包里的项目**算，不拿入参冒充命中。
+            "project_match": rank_mod.project_match(hit.get("project"), project),
+            "dup_penalty": round(rank_mod.dup_penalty(dup_count), 6),
+        }
         seen.add(code)
         items.append({"code": code, "pointer": hit["pointer"], "title": _push_title(hit),
-                      "reason": _push_reason(hit), "relevance": round(relevance, 6),
+                      "reason": _push_reason(hit), "relevance": breakdown["relevance"],
                       "chars": int(hit.get("chars") or 0),
                       "occurred_at": hit.get("occurred_at"), "host": hit.get("host"),
-                      "session_id": hit.get("session_id"), "ranker": hit.get("ranker")})
+                      "session_id": hit.get("session_id"), "ranker": hit.get("ranker"),
+                      # ---- T03a R2：类别 + 阶段 + 分数 + 明细 + 同型新鲜度 ----
+                      "kind_class": PUSH_KIND_CLASS, "score": breakdown["relevance"],
+                      "score_stage": rank_mod.SCORE_STAGE_FIRST, "rerank": None,
+                      "freshness": dict(freshness),
+                      "score_breakdown": dict(breakdown)})
         if len(items) >= max(int(limit), 1):
             break
     items.sort(key=lambda item: (-item["relevance"], item["code"]))
@@ -1143,21 +1268,36 @@ def conv_push_candidates(*, query, project=None, root=None, conn=None, exclude=(
         # `_cand` 回查 `code_index` 对 `conv:` 一定查不到，不补这一格就会被判成"跨项目"。
         if not cand.get("project"):
             cand["project"] = project
+        # 解释性字段只补不改：`score` 由 `_cand` 定，这里**不覆盖**（见 docstring）。
+        cand.setdefault("kind_class", PUSH_KIND_CLASS)
+        cand.setdefault("freshness", dict(item["freshness"]))
+        cand.setdefault("score_stage", rank_mod.SCORE_STAGE_FIRST)
+        cand.setdefault("rerank", None)
+        cand.setdefault("score_breakdown", dict(item["score_breakdown"]))
         out.append(cand)
     out.sort(key=lambda cand: (-cand["score"], cand["code"]))
     return {"items": out, "skipped": skipped, "ranker": res["meta"]["ranker"]}
 
 
 def conv_push_for_session(*, root, query, project=None, exclude=(), limit=PUSH_MAX_ITEMS,
-                          now=None, recent_of=None, scorer=None) -> list:
+                          now=None, recent_of=None, dup_counts_of=None,
+                          scorer=None) -> list:
     """`fish.py` 的**薄壳口**（M8）：把两处主库依赖做成回调，这里只做门槛与去重。
 
-    - `recent_of(hours, now)` → 本会话最近推过的 code 集合（`push_log` 在主库）；
-    - `scorer(item)`          → 候选 dict（打分公式只有 `fish.py._cand` 那一份）。
+    - `recent_of(hours, now)`     → **本会话**最近推过的 code 集合（挡：24h 内推过就不产）；
+    - `dup_counts_of(hours, now)` → **全局**（任意会话/公民）这些 code 的推送次数
+      （罚：`dup_penalty`；想只量"别的会话推过没有"，在回调里排除本会话即可）；
+    - `scorer(item)`              → 候选 dict（打分公式只有 `fish.py._cand` 那一份）。
+
+    两个回调分开是有意的（首轮 🟠 S3）：`recent_of` 决定"**挡不挡**"（会话维度），
+    `dup_counts_of` 决定"**降几分**"（全局维度）。首轮把两者做成同一回调、同一窗口、
+    同一会话键，结果是"被挡掉的 code 恰好就是会被数到的 code"，活下来的候选恒为 0
+    ——负向特征永不生效，R4 也就无从判别。口径写进两个名字（`recent_*` / `dup_*`），
+    接线的人一眼能看出哪个是本会话、哪个是全局。
 
     为什么搬到这里：`fish.py` 的行数窗口只剩十几行（`test_split_contract` J4 锁 15,300–
     15,500），而这段逻辑与"语料检索 + 门槛"是一体的——留在门面里既挤预算，也让
-    推送侧与语料侧的口径各写一遍。**J1 不变**：本模块不认识主库，两个依赖都是注入的。
+    推送侧与语料侧的口径各写一遍。**J1 不变**：本模块不认识主库，三个依赖都是注入的。
     缺 `scorer` 就返回空列表：没有打分公式时不发明分数（不猜）。
     """
     if not str(query or "").strip() or not str(project or "").strip() or scorer is None:
@@ -1165,12 +1305,12 @@ def conv_push_for_session(*, root, query, project=None, exclude=(), limit=PUSH_M
     pushed = set()
     if recent_of is not None:
         try:
-            pushed = {str(code) for code in (recent_of(24, now) or ())}
+            pushed = {str(code) for code in (recent_of(PUSH_DUP_WINDOW_HOURS, now) or ())}
         except Exception:                      # noqa: BLE001 —— 主库读失败不拖垮推送
             pushed = set()
     res = conv_push_candidates(root=root, query=query, project=project,
                                exclude=set(exclude or ()) | pushed, limit=limit,
-                               now=now, scorer=scorer)
+                               now=now, dup_counts=dup_counts_of, scorer=scorer)
     return res["items"]
 
 
