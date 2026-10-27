@@ -74,14 +74,22 @@ class BoardFeedback2Test(unittest.TestCase):
                                     "status": status}, ident)
 
     def _age(self, ident, project, minutes):
-        """把某人的 last_seen_at 往前拨 N 分钟（模拟"很久没动"）。"""
+        """把某人的活跃时间往前拨 N 分钟（模拟"很久没动"）。
+
+        2026-10-26（T03）两处修正：
+          · **两列一起拨**：行的"有效最后活跃"是 `max(last_seen_at, auto_seen_at)`
+            （自动行算登记），只拨 last_seen_at 时那一行仍算"刚刚活跃"；
+          · **该公民的所有板一起拨**：`tool_session_start` 现在会自动在**根板**建一行，
+            而软门是"今天任一板上有活跃行就算已签到"——只拨 AA 板模拟不出"这个人闲置了"。
+        `project` 参数保留（调用处都在表达"这个人在这块板上"），但不再用于过滤。
+        """
         import datetime
-        board = fish.board_ensure(self.conn, "project", project)
+        _ = project
         t = (datetime.datetime.now(datetime.timezone.utc)
              - datetime.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.conn.execute(
-            "UPDATE presence SET last_seen_at=? WHERE board_id=? AND citizen_id=?",
-            (t, board["id"], ident.citizen_id))
+            "UPDATE presence SET last_seen_at=?, auto_seen_at=? WHERE citizen_id=?",
+            (t, t, ident.citizen_id))
         self.conn.commit()
 
     # ------------------------------------------------------------------ N1
@@ -149,9 +157,14 @@ class BoardFeedback2Test(unittest.TestCase):
         self._checkin(a, "真在干活 A", "p0/other.py")
         self._checkin(b, "真在干活 B", "p0/other.py")
         block = fish.board_block(self.conn, "AA")
-        # 两个活跃工必须都在注入包里（旧实现会被 3 个残留行挤出前 5）
-        self.assertIn(a.citizen_id, block, f"活跃工 A 被挤出去了：{block[:500]}")
-        self.assertIn(b.citizen_id, block, f"活跃工 B 被挤出去了：{block[:500]}")
+        # 两个活跃工必须都在注入包里（旧实现会被 3 个残留行挤出前 5）。
+        # 2026-10-26（T03）：注入包改用**可读名**（用户拍板不要 ULID），
+        # 所以判据按会话别名断言——那正是人在这句里要看到的东西。
+        self.assertIn("live-A", block, f"活跃工 A 被挤出去了：{block[:500]}")
+        self.assertIn("live-B", block, f"活跃工 B 被挤出去了：{block[:500]}")
+        # 反向守护：注入包里不许出现 26 位公民 ID（人类可读面）
+        for cid in list(stale_ids) + [a.citizen_id, b.citizen_id]:
+            self.assertNotIn(cid, block, "注入包不许出现公民 ULID")
 
     # ------------------------------------------------------------------ S1
     def test_S1_soft_gate_no_cross_project_false_alarm(self):

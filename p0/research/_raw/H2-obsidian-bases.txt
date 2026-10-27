@@ -1,0 +1,181 @@
+# H2-obsidian-bases
+# URL: https://obsidian.md/help/bases
+# 说明: Obsidian Bases 简介
+# 抓取: 2026-10-27 10:35:21（bsk 浏览器）
+======================================================================
+
+@vom 1
+@view 942x970
+@layers 1 focus=L1
+L1 page
+  RootWebArea "Introduction to Bases - Obsidian Help"
+    link "Obsidian Help logo"
+    button "English [has-submenu]"
+    textbox "Search page or heading..." [empty] placeholder="Search page or heading..."
+    group
+      button "Getting started"
+      button "Getting started"
+    group
+      button "Import notes"
+      button "Import notes"
+    group
+      button "User interface"
+      button "User interface"
+    group
+      button "Editing and formatting"
+      button "Editing and formatting"
+    group
+      button "Linking notes and files"
+      button "Linking notes and files"
+    group
+      button "Files and folders"
+      button "Files and folders"
+    group
+      button "Plugins"
+      button "Plugins"
+    group
+      button "Bases"
+      button "Bases"
+    link "Introduction to Bases"
+    link "Create a base" [ctx: Linking notes and files]
+    link "Views" [ctx: Linking notes and files]
+    link "Bases syntax" [ctx: Linking notes and files]
+    link "Functions" [ctx: Linking notes and files]
+    link "Formulas" [ctx: Linking notes and files]
+    group
+      button "Layouts"
+      button "Layouts"
+    group
+      button "Obsidian Publish"
+      button "Obsidian Publish"
+    group
+      button "Obsidian Sync"
+      button "Obsidian Sync"
+    group
+      button "Obsidian Web Clipper"
+      button "Obsidian Web Clipper"
+    group
+      button "Extending Obsidian"
+      button "Extending Obsidian"
+    group
+      button "Contributing to Obsidian"
+      button "Contributing to Obsidian"
+    group
+      button "Licenses and payment"
+      button "Licenses and payment"
+    group
+      button "Teams"
+      button "Teams"
+    group
+      button "Obsidian"
+      button "Obsidian"
+    link "Help and support"
+    link "Home"
+    heading "Introduction to Bases"
+      StaticText "Introduction to Bases"
+    paragraph "Bases is a that lets you create database-like views of your notes. Using a base you can view, edit, sort, and filter files and their . Bases can help you organize everything from projects to travel plans, reading lists, and more."
+      link "Core plugins" [ctx: Introduction to Bases]
+      link "Properties" [ctx: Introduction to Bases]
+      StaticText "Bases is a"
+      StaticText "that lets you create database-like views of your notes. Using a base you can view, edit, sort, and filter files and their"
+      StaticText ". Bases can help you organize everything from projects to travel plans, reading lists, and more."
+    paragraph "Each base can have several with different layouts such as tables and cards. Below is an example of table view where each row is a file, and each column is a property of that file."
+      link "Views" [ctx: Introduction to Bases]
+      StaticText "Each base can have several"
+      StaticText "with different layouts such as tables and cards. Below is an example of table view where each row is a file, and each column is a property of that file."
+    image "Example of a base showing a table view with a list of books"
+    paragraph "All the data in Obsidian Bases is stored in your local files and their . The views are described by the , which can be saved as a .base file or in code blocks within your Markdown files."
+      link "Basic formatting syntax"
+      link "properties" [ctx: Each base can have several with different layouts such as tables and cards. Below is an example of table view where each row is a file, and each column is a property of that file.]
+      link "Bases syntax" [ctx: Each base can have several with different layouts such as tables and cards. Below is an example of table view where each row is a file, and each column is a property of that file.]
+      code ".base"
+        StaticText ".base"
+      link "Create a base > Embed a base"
+      StaticText "All the data in Obsidian Bases is stored in your local"
+      StaticText "files and their"
+      StaticText ". The views are described by the"
+      StaticText ", which can be saved as a"
+      StaticText "file or"
+      StaticText "in code blocks within your Markdown files."
+    heading "How to use bases"
+      StaticText "How to use bases"
+    list "Learn how to create and embed a base. Explore layouts, filter, sort, and group properties. Create calculations using data from other properties. Functions you can use in formulas and filters. How base files are formatted."
+      listitem "Learn how to create and embed a base."
+        link "Create a base"
+        list "Learn how to create and embed a base."
+          listitem "Learn how to create and embed a base."
+            StaticText "Learn how to create and embed a base."
+      listitem "Explore layouts, filter, sort, and group properties."
+        list "Explore layouts, filter, sort, and group properties."
+          listitem "Explore layouts, filter, sort, and group properties."
+            StaticText "Explore layouts, filter, sort, and group properties."
+      listitem "Create calculations using data from other properties."
+        link "Formulas"
+        list "Create calculations using data from other properties."
+          listitem "Create calculations using data from other properties."
+            StaticText "Create calculations using data from other properties."
+      listitem "Functions you can use in formulas and filters."
+        link "Functions"
+        list "Functions you can use in formulas and filters."
+          listitem "Functions you can use in formulas and filters."
+            StaticText "Functions you can use in formulas and filters."
+      listitem "How base files are formatted."
+        link "Bases syntax"
+        list "How base files are formatted."
+          listitem "How base files are formatted."
+            StaticText "How base files are formatted."
+    heading "View types"
+      StaticText "View types"
+    paragraph "View can be displayed with different layouts. Additional layouts can be added by ."
+      link "Community plugins"
+      StaticText "View can be displayed with different layouts. Additional layouts can be added by"
+      StaticText "."
+    list "Display files as rows with columns that show properties of those files. Display files as a list with bulleted or numbered markers. Display files as a grid. Lets you create gallery-like views with images. Display files as cards organized int"
+      listitem "Display files as rows with columns that show properties of those files."
+        link "Table view"
+        list "Display files as rows with columns that show properties of those files."
+          listitem "Display files as rows with columns that show properties of those files."
+            StaticText "Display files as rows with columns that show properties of those files."
+      listitem "Display files as a list with bulleted or numbered markers."
+        link "List view"
+        list "Display files as a list with bulleted or numbered markers."
+          listitem "Display files as a list with bulleted or numbered markers."
+            StaticText "Display files as a list with bulleted or numbered markers."
+      listitem "Display files as a grid. Lets you create gallery-like views with images."
+        link "Cards view"
+        list "Display files as a grid. Lets you create gallery-like views with images."
+          listitem "Display files as a grid. Lets you create gallery-like views with images."
+            StaticText "Display files as a grid. Lets you create gallery-like views with images."
+      listitem "Display files as cards organized into columns based on a grouped property."
+        link "Kanban view"
+        list "Display files as cards organized into columns based on a grouped property."
+          listitem "Display files as cards organized into columns based on a grouped property."
+            StaticText "Display files as cards organized into columns based on a grouped property."
+      listitem "Display files as pins on an interactive map."
+        link "Map view"
+        list "Display files as pins on an interactive map."
+          listitem "Display files as pins on an interactive map."
+            StaticText "Display files as pins on an interactive map."
+    StaticText "LINKS TO THIS PAGE"
+    group
+      link "Bases syntax"
+      link "Canvas"
+      link "Cards view"
+      link "Core plugins"
+      link "Create a base"
+      link "File explorer"
+      link "Formulas"
+      link "Functions"
+      link "Import CSV files"
+      link "Import from Airtable"
+      link "Import from Notion"
+      link "Kanban view"
+      link "List view"
+      link "Map view"
+      link "Obsidian CLI"
+      link "Table view"
+      link "Tags"
+      link "Views"
+    button "Close page"
+    StaticText "Introduction to Bases"
+    link "Powered by Obsidian Publish" [→ publish.obsidian.md]

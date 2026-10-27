@@ -6,23 +6,29 @@
   python mutation_injection_status.py
 
 本驱动只改 `fish.py` 的四处 SQL，每次改完立即还原（sha256 校验）。
+
+2026-10-26（F1）：读写统一走 `mutation_source.SourceText`——工作树是 CRLF，
+旧实现 `read_text/write_text` 虽能读，但靶点里的 `'\\n'` 在别的脚本上会 0 命中；
+这里一并换成"LF 归一匹配 + 原字节还原"。
+2026-10-26（F2）：C 的判据名已随 L2 改版迁移（原「今日编码」段已删除），
+用例名同步成 `test_C_index_lists_only_projects_with_active_memories`。
 """
 import hashlib
-import re
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
+
+from mutation_source import SourceText
 
 FISH = Path("fish.py")
 BAK = FISH.with_suffix(".py.mutation-bak")
 
 MUTATIONS = [
     (
-        "M-A", "去掉 proj 查询的 status 过滤（活跃数虚高）",
-        'WHERE dormant=0 AND status=\'active\' GROUP BY project',
-        'WHERE dormant=0 GROUP BY project',
+        "M-A", "去掉 _project_activity 的 status 过滤（活跃数虚高）",
+        'f"WHERE project IN ({ph}) AND dormant=0 AND status=\'active\'", pnames).fetchone()',
+        'f"WHERE project IN ({ph}) AND dormant=0", pnames).fetchone()',
         "test_A_active_count_excludes_non_active",
     ),
     (
@@ -32,10 +38,10 @@ MUTATIONS = [
         "test_B_recent_excludes_non_active",
     ),
     (
-        "M-C", "去掉 today_codes 的 status 过滤（可能列已作废编码）",
-        'WHERE code LIKE ? AND status=\'active\'',
-        'WHERE code LIKE ?',
-        "test_C_today_codes_excludes_non_active",
+        "M-C", "「可查项目」的 JOIN 不筛 status（非 active 也被算进计数）",
+        '        "JOIN code_index c ON c.project = r.prefix AND c.status = \'active\' "',
+        '        "JOIN code_index c ON c.project = r.prefix "',
+        "test_C_index_lists_only_projects_with_active_memories",
     ),
     (
         "M-D", "去掉 dormant_n 的 status 过滤（休眠数虚高）",
@@ -80,14 +86,14 @@ def main() -> int:
 
     results = []
     for mid, desc, old, new, test in MUTATIONS:
-        src = FISH.read_text(encoding="utf-8")
-        if old not in src:
-            print(f"\n{mid}: 找不到待替换片段，跳过（片段可能已变）")
+        src = SourceText(FISH)
+        hits = src.count(old)
+        if hits != 1:
+            print(f"\n{mid}: 靶点命中 {hits} 次（要求恰好 1 次），跳过（片段可能已变）")
             print(f"  想找: {old[:80]}")
             results.append((mid, desc, test, "SKIP"))
             continue
-        mutated = src.replace(old, new, 1)
-        FISH.write_text(mutated, encoding="utf-8")
+        src.write(src.replaced(old, new))
         try:
             rc = run_test(test)
             status = "红（符合预期）" if rc != 0 else "绿（变异没生效！）"
@@ -95,7 +101,7 @@ def main() -> int:
             print(f"  目标判据: {test}")
             results.append((mid, desc, test, status))
         finally:
-            shutil.copy2(BAK, FISH)
+            src.restore()            # 原始字节（BAK 只是崩溃兜底）
             restored = sha(FISH) == base
             print(f"  还原: sha256 {'一致 ✓' if restored else '不一致 ✗'}")
             if not restored:

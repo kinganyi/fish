@@ -73,6 +73,63 @@ def _emit(text: str) -> None:
     hook_io.emit("SessionStart", text)
 
 
+def _citizen_exists(citizen_id: str) -> bool:
+    """该公民是否存在于**当前库**（`_data_root()/index.sqlite`，只读）。
+
+    为什么必须判：锚是**工作区级**文件，但 hook 也会在**测试/临时库**里跑
+    （`FISH_ROOT` 指向临时 data）。临时库里没有锚里的公民 → 若仍传
+    `--citizen`，`session start` 会报「公民不存在」，会话启动注入失败
+    （2026-10-26 合并前基线实测 5 条红，就是这条）。所以「锚存在」还必须
+    「公民在当前库存在」才生效；否则回退到按 `host_session_key` 归属的旧行为。
+    """
+    db = _data_root() / "index.sqlite"
+    if not db.exists():
+        return False
+    try:
+        import sqlite3
+        con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        try:
+            row = con.execute(
+                "SELECT 1 FROM citizens_all WHERE citizen_id=? LIMIT 1",
+                (citizen_id,)).fetchone()
+            return bool(row)
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001 —— 见 docstring
+        return False
+
+
+def _identity_anchor(session_id: str = "") -> dict:
+    """工作区级身份锚：`p0/fish_identity.json`（可选文件，不存在=旧行为）。
+
+    结构：`{"citizen": "<citizen_id>", "sessions": ["dsh:session-…"]}`。
+    `sessions` 是**会话白名单**：只有列出的会话才用这个公民；没列/不匹配 →
+    回退按 `host_session_key` 归属。**这是必须的**：锚是工作区级文件，而一个
+    工作区里通常有多个会话（开发/评估/插件测试…），没有白名单就会把**所有**
+    会话都签给同一个公民（2026-10-26 实测：三个会话被绑到 fish-主AI-3，
+    撞车检测因此「自己撞自己」）。
+    坏 JSON / 读失败一律当作"没有锚"——身份解析失败不该拖垮会话启动。
+    """
+    try:
+        p = HERE / "fish_identity.json"
+        if not p.exists():
+            return {}
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return {}
+        sessions = data.get("sessions")
+        if isinstance(sessions, list) and sessions:
+            key = ("dsh:" + session_id) if session_id else ""
+            if not any(key == str(s).strip() for s in sessions):
+                return {}
+        cid = str(data.get("citizen") or "").strip()
+        if cid and not _citizen_exists(cid):
+            return {}
+        return data
+    except Exception:  # noqa: BLE001 —— 见 docstring
+        return {}
+
+
 def _debug_note(session_id: str, status: str, detail: str = "") -> None:
     """可选诊断留痕：只在 `FISH_HOOK_DEBUG=1` 时写一行（BUG-04 的解法）。
 
@@ -251,6 +308,17 @@ def main() -> int:
     if fish_root:  # 测试用：把数据目录指到临时位置（生产不设此变量）
         cmd += ["--root", fish_root]
     cmd += ["session", "start"]
+    # 2026-10-26（身份锚，EVAL-261025-19 同族）：hook 必须能签给「工作区指定的身份」。
+    # 没有锚时它会按 host_session_key 找到/新建一个 `dsh-session-<id>` 公民——而用户
+    # 指定的身份可能是 `fish-主AI-3`，于是每次重启就分裂成两个公民（看板/归属各看各的）。
+    # 锚文件：p0/fish_identity.json（{"citizen": "<id>"} 或 {"alias": "<名字>"}，可选）。
+    # 为什么是文件而不是环境变量：WorkBuddy/DSH 两宿主的 hook 命令都没有 env 字段，
+    # 而工作区级文件是两宿主都能读到、且改动即时生效（hook 每次执行现读）的落点。
+    anchor = _identity_anchor(session_id)
+    if anchor.get("citizen"):
+        cmd += ["--citizen", str(anchor["citizen"])]
+    elif anchor.get("alias"):
+        cmd += ["--alias", str(anchor["alias"])]
     # 2026-10-24 加：把 payload 里的 cwd 交给 CLI，由 workspace_map 解析出项目。
     # 为什么在这里传而不是在 hook 里查：多一次进程启动、多一处可能忘传；
     # CLI 里已经有 workspace_map 的读路径，直接复用（`cmd_session_start` 的 --cwd）。

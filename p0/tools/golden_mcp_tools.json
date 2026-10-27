@@ -1,0 +1,641 @@
+{
+ "add_project": {
+  "description": "注册新的项目前缀（namespace）。注册后才能用该前缀 remember。前缀不能含 '-'，长度 ≤20。",
+  "inputSchema": {
+   "properties": {
+    "namespace": {
+     "description": "可读名称，缺省同前缀",
+     "type": "string"
+    },
+    "prefix": {
+     "description": "前缀，如 ANYI / 企业智能",
+     "type": "string"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "required": [
+    "prefix"
+   ],
+   "type": "object"
+  }
+ },
+ "board": {
+  "description": "看板回答的是「**此刻谁在动哪块**」——不是发生了什么（那是记忆）。\n\n三个动作：\n　· action=show（默认）：这个项目今天有谁在、在做什么、占了哪些面、**谁跟你撞了**（占用面重叠会单独警告）\n　· action=checkin：登记你自己（doing 必填，surface 强烈建议：它是防撞车的唯一依据）\n　· action=post：往今日动态写一条（kind=progress/done/note）——**做完用 done 标掉**，否则看板只剩在场表，丢掉\"动到哪了\"那一半\n\n**未登记 = 未发生**：看板上没有你的行，别人就无法判断会不会跟你撞车。开工前先 checkin，是这个系统的协作协议，不是礼貌。",
+  "inputSchema": {
+   "properties": {
+    "action": {
+     "description": "show 看板 / checkin 登记自己 / post 写动态（默认 show）",
+     "enum": [
+      "show",
+      "checkin",
+      "post",
+      "simulate"
+     ],
+     "type": "string"
+    },
+    "assume_surface": {
+     "description": "simulate 用：**假设**另一个人占着这些面（逗号分隔）。不给就只对比真实在场者，单人时可能对比 0 人",
+     "type": "string"
+    },
+    "doing": {
+     "description": "checkin 必填：一句话说明你在做什么（≤80 字）",
+     "type": "string"
+    },
+    "kind": {
+     "description": "post 用：进度 / 做完了 / 备注",
+     "enum": [
+      "progress",
+      "done",
+      "note"
+     ],
+     "type": "string"
+    },
+    "project": {
+     "description": "看哪个项目的板（不传则用根看板）",
+     "type": "string"
+    },
+    "status": {
+     "description": "checkin 用：active=在场（默认）/ left=收工下板（之后不再计入重叠检测）",
+     "enum": [
+      "active",
+      "left"
+     ],
+     "type": "string"
+    },
+    "surface": {
+     "description": "你占用的面（文件/目录前缀，逗号分隔）。支持目录前缀：写 `backend/routes` 也算占用其下所有文件。simulate 时用它做假设（不写库）",
+     "type": "string"
+    },
+    "text": {
+     "description": "post 必填：动态内容（≤200 字）",
+     "type": "string"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  }
+ },
+ "close_project": {
+  "description": "把一个项目标记为**已完成**（closed）。不删任何东西、不动记忆归属，只是不再接收新记忆；随时可用 reopen_project 回来继续写。闭合 ≠ 删除（决策 16）。",
+  "inputSchema": {
+   "properties": {
+    "prefix": {
+     "description": "项目前缀",
+     "type": "string"
+    },
+    "reason": {
+     "description": "为什么闭合（写进事件）",
+     "type": "string"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "required": [
+    "prefix"
+   ],
+   "type": "object"
+  }
+ },
+ "healthcheck": {
+  "description": "断链、休眠、事件数。",
+  "inputSchema": {
+   "properties": {
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  }
+ },
+ "inject": {
+  "description": "生成注入包（L0 身份 + L1 状态 + L2 索引，硬预算裁剪）。L1「当前项目」按 显式 project → 会话档期 → 最近更新兜底 解析；走兜底时会在输出里标注“据最近更新推断”，不会把猜测说成事实。\n包尾两行自解释：`本次截断…/本次无截断`（砍了几条）+ `as-of …`（数据截至时刻）——不必再猜这份包完不完整、是几点的事实。",
+  "inputSchema": {
+   "properties": {
+    "budget": {
+     "description": "token 预算",
+     "type": "integer"
+    },
+    "include_board": {
+     "description": "`sections` 的便捷写法：false = 去掉看板段（等价于 sections 里不含 board）；缺省 true。与 sections 同时给时以 false 为准（不叠加）。",
+     "type": "boolean"
+    },
+    "project": {
+     "description": "当前项目前缀（不传则按会话档期推断，无则标注为推断）",
+     "type": "string"
+    },
+    "sections": {
+     "description": "只构建这些段（缺省=全段）。可取值：status（当前项目坐标）/ board（看板）/ rules（规矩）/ attention（该注意什么）/ lessons（错题本）/ push（候选）/ index（L2 索引）/ recent（最近三件事）。**L0 身份段永远保留**（不可关闭，设计如此）。",
+     "items": {
+      "enum": [
+       "status",
+       "board",
+       "rules",
+       "attention",
+       "lessons",
+       "push",
+       "index",
+       "recent"
+      ],
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  }
+ },
+ "kb": {
+  "description": "只读访问已登记的知识库（Obsidian vault）：看目录、读单文件、在知识库范围内检索。返回内容来自「知识库」，不是 fish 记忆，也不进 recall / 全文索引；知识库默认整库跳过检索，只有你显式调用才会读到。找 fish 记忆请用 recall，找编码请用 resolve_code。",
+  "inputSchema": {
+   "properties": {
+    "action": {
+     "enum": [
+      "vaults",
+      "tree",
+      "open",
+      "search"
+     ],
+     "type": "string"
+    },
+    "allow_sensitive": {
+     "default": false,
+     "description": "open 时允许读敏感文件正文（凭证/密钥/.env 命中名单时；需同时带有效 token=…）。只认明确的 true/false（1/0 亦可，字符串 'true'/'false' 等价）；其它写法按 bad_usage 拒绝",
+     "type": "boolean"
+    },
+    "depth": {
+     "default": 2,
+     "maximum": 4,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "limit": {
+     "default": 10,
+     "maximum": 30,
+     "minimum": 1,
+     "type": "integer"
+    },
+    "max_chars": {
+     "default": 8000,
+     "type": "integer"
+    },
+    "path": {
+     "description": "vault 内相对路径，用 / 分隔；open 必填；tree 可选起点",
+     "type": "string"
+    },
+    "query": {
+     "description": "search 必填；字面匹配（非语义），大小写不敏感",
+     "type": "string"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    },
+    "vault": {
+     "description": "vault 名字或 id；缺省=默认 vault",
+     "type": "string"
+    }
+   },
+   "required": [
+    "action"
+   ],
+   "type": "object"
+  }
+ },
+ "kb_write": {
+  "description": "在已登记的知识库里新建/追加/显式更新一篇 Markdown（Obsidian 兼容：UTF-8 无 BOM、frontmatter 只增改给定键、[[双链]] 不改写）。每次写入前自动备份，可用 fish kb rollback <write_id> 撤回。不允许删除/移动/重命名；update 必须带 base_sha256（先 kb open 拿到）；vault 必须是 mode=rw；同名笔记先报冲突，不自动改写别人的文件。",
+  "inputSchema": {
+   "properties": {
+    "action": {
+     "enum": [
+      "create",
+      "append",
+      "update"
+     ],
+     "type": "string"
+    },
+    "allow_sensitive": {
+     "default": false,
+     "description": "允许改写敏感名单命中的文件（默认拒绝：凭证交 Obsidian/人工；需有效 token）。只认明确的 true/false（1/0 亦可）；其它写法按 bad_usage 拒绝",
+     "type": "boolean"
+    },
+    "base_sha256": {
+     "description": "update 必填：你读到的文件 sha256（乐观锁）",
+     "type": "string"
+    },
+    "content": {
+     "description": "Markdown 正文（UTF-8，不含 frontmatter）；create/update 必填",
+     "type": "string"
+    },
+    "frontmatter": {
+     "description": "只增/改这些键（值必须是标量）；已有未知键保留",
+     "type": "object"
+    },
+    "path": {
+     "description": "vault 内相对路径，用 / 分隔（必填）",
+     "type": "string"
+    },
+    "reason": {
+     "description": "为什么写（进 kb_access.meta.reason，≤200 字）",
+     "type": "string"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    },
+    "vault": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "action",
+    "path"
+   ],
+   "type": "object"
+  }
+ },
+ "neighbors": {
+  "description": "给定编码，返回上下文相邻的记忆。策略：code/time/tag/type/mixed。",
+  "inputSchema": {
+   "properties": {
+    "code": {
+     "type": "string"
+    },
+    "n": {
+     "default": 3,
+     "type": "integer"
+    },
+    "strategy": {
+     "enum": [
+      "code",
+      "time",
+      "tag",
+      "type",
+      "mixed"
+     ],
+     "type": "string"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "required": [
+    "code"
+   ],
+   "type": "object"
+  }
+ },
+ "read_body": {
+  "description": "按编码读取一条记忆的完整正文（含附件清单）。resolve_code 只回元数据；要看内容用这个。",
+  "inputSchema": {
+   "properties": {
+    "code": {
+     "description": "记忆编码，如 ANYI-261022-10",
+     "type": "string"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "required": [
+    "code"
+   ],
+   "type": "object"
+  }
+ },
+ "recall": {
+  "description": "按编码 / 标题 / 正文关键词检索（关键词匹配，非语义）。召回会刷新衰减（被想起即唤醒）。回包标注匹配来源。\n不给 query/code 而给 project 时走**列出模式**：按项目（含别名展开）+ tags 过滤、时间倒序，首行声明“按什么过滤、共几条”。\n只给 tags 不报错，会回一句引导（tags 只作附加过滤，需要 project 限定）。",
+  "inputSchema": {
+   "properties": {
+    "code": {
+     "description": "精确编码",
+     "type": "string"
+    },
+    "include_superseded": {
+     "default": false,
+     "description": "连已取代/已作废的条目一起给（默认只给 active）",
+     "type": "boolean"
+    },
+    "limit": {
+     "default": 10,
+     "description": "检索默认 10；列出模式默认 20（不传则用各自的默认）",
+     "type": "integer"
+    },
+    "project": {
+     "description": "只查该项目前缀；不给 query/code 时=列出该项目全部条目",
+     "type": "string"
+    },
+    "query": {
+     "description": "编码、编码片段、标题或正文关键词；支持中文子串",
+     "type": "string"
+    },
+    "scope": {
+     "default": "all",
+     "description": "检索范围，默认 all",
+     "enum": [
+      "all",
+      "title",
+      "body"
+     ],
+     "type": "string"
+    },
+    "tags": {
+     "description": "标签过滤（需同时满足）；**只作附加过滤**，单独用会回引导（它没有范围可列）",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "required": [],
+   "type": "object"
+  }
+ },
+ "register": {
+  "description": "登记你在这个系统里的身份（成为公民）。同名则复用（幂等）。登记后你的记忆会归属到这个身份。",
+  "inputSchema": {
+   "properties": {
+    "display_name": {
+     "description": "你的名字，如 workbuddy-main",
+     "type": "string"
+    },
+    "host": {
+     "description": "来源宿主，如 workbuddy",
+     "type": "string"
+    },
+    "kind": {
+     "description": "居留形态：visitor 会话级 / role 项目级 / resident 永久",
+     "enum": [
+      "visitor",
+      "role",
+      "resident"
+     ],
+     "type": "string"
+    },
+    "role": {
+     "description": "角色描述，如 reviewer",
+     "type": "string"
+    },
+    "session_name": {
+     "description": "可选：会话级身份名（如 anyi-dev / anyi-review）。同一宿主下多个会话用它可以区分彼此的记录。",
+     "type": "string"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "required": [
+    "display_name"
+   ],
+   "type": "object"
+  }
+ },
+ "remember": {
+  "description": "记录一条记忆。编码由系统分配，不要自己编。",
+  "inputSchema": {
+   "properties": {
+    "attachments": {
+     "description": "附件（图片/文档等）的本地绝对路径；系统会复制进 blobs/ 并按 SHA256 去重",
+     "items": {
+      "properties": {
+       "caption": {
+        "description": "说明文字",
+        "type": "string"
+       },
+       "path": {
+        "description": "本地绝对路径",
+        "type": "string"
+       }
+      },
+      "required": [
+       "path"
+      ],
+      "type": "object"
+     },
+     "type": "array"
+    },
+    "body": {
+     "description": "正文（Markdown）",
+     "type": "string"
+    },
+    "cause": {
+     "description": "为什么记这条",
+     "type": "string"
+    },
+    "mem_type": {
+     "description": "记忆类型；rule/identity 永不衰减",
+     "enum": [
+      "identity",
+      "rule",
+      "fact",
+      "episode",
+      "lesson",
+      "artifact"
+     ],
+     "type": "string"
+    },
+    "occurred_at": {
+     "description": "这件事什么时候发生（ISO8601 UTC，如 2026-10-22T04:00:00Z）；缺省=现在。用于补记过去的事，与记录时间区分",
+     "type": "string"
+    },
+    "project": {
+     "description": "项目前缀，如 ANYI",
+     "type": "string"
+    },
+    "supersedes": {
+     "description": "可选：这条新记忆替代哪些旧编码（旧条目会被标记 superseded）",
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "tags": {
+     "items": {
+      "type": "string"
+     },
+     "type": "array"
+    },
+    "title": {
+     "description": "一句话标题（≤80 字）",
+     "type": "string"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "required": [
+    "project",
+    "title"
+   ],
+   "type": "object"
+  }
+ },
+ "rename_citizen": {
+  "description": "把**你自己**的显示名改成指定名字。只改标签，不改身份：citizen_id、凭证、证据级别都不动，历史记忆的归属也不变。当用户明确说「你是 X」时用它把名字落到系统里——否则那个名字在系统里无处安放，只能变成一条孤儿公民。",
+  "inputSchema": {
+   "properties": {
+    "name": {
+     "description": "新名字，如 fish-主AI-2",
+     "type": "string"
+    },
+    "reason": {
+     "description": "可选：为什么改名（写进事件，便于追溯）",
+     "type": "string"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "required": [
+    "name"
+   ],
+   "type": "object"
+  }
+ },
+ "reopen_project": {
+  "description": "把 closed 的项目改回 active，之后可继续写入。闭合是可逆的状态，不是锁死（用户 2026-10-25 拍板）。",
+  "inputSchema": {
+   "properties": {
+    "prefix": {
+     "description": "项目前缀",
+     "type": "string"
+    },
+    "reason": {
+     "description": "为什么重开（写进事件）",
+     "type": "string"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "required": [
+    "prefix"
+   ],
+   "type": "object"
+  }
+ },
+ "resolve_code": {
+  "description": "校验并解释一个编码：存在吗、是什么、衰减到哪一步。",
+  "inputSchema": {
+   "properties": {
+    "code": {
+     "type": "string"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "required": [
+    "code"
+   ],
+   "type": "object"
+  }
+ },
+ "session_start": {
+  "description": "在 MCP 面直接签发一条会话凭证（token），**明文只返回这一次**。\n\n为什么需要它（2026-10-25 加，外部评估 `EVAL-261025-05`）：在此之前 MCP 面**没有任何口子能产出 token**——AI 只能离开 MCP 去跑 CLI，而 CLI 那侧的会话键与 MCP 不同，会建成**另一个公民**，两条通道的归属从此对不上且无法合并。\n\n两种用法：\n　· 已登记过 → 传 citizen（你在 register 回执里拿到的 citizen_id）\n　· 还没登记 → 传 display_name，本工具会建公民并直接签发\n**session_name 强烈建议传**：它是幂等锚，不传每次都建新公民。",
+  "inputSchema": {
+   "properties": {
+    "citizen": {
+     "description": "绑到**已存在**的公民（register 回执里的 citizen_id）",
+     "type": "string"
+    },
+    "display_name": {
+     "description": "新公民的名字（与 citizen 二选一）",
+     "type": "string"
+    },
+    "kind": {
+     "description": "居留形态（默认 visitor）",
+     "enum": [
+      "visitor",
+      "role",
+      "resident"
+     ],
+     "type": "string"
+    },
+    "project": {
+     "description": "可选：顺带开一个项目档期",
+     "type": "string"
+    },
+    "session_name": {
+     "description": "会话标识（幂等锚：同一 AI 重复调用应传同一个值）",
+     "type": "string"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "required": [
+    "session_name"
+   ],
+   "type": "object"
+  }
+ },
+ "supersede": {
+  "description": "把旧记忆标记为被新记忆替代。之后 recall 默认不再返回旧条目，resolve_code 会提示去看新的。用于同主题两条并存的场景。",
+  "inputSchema": {
+   "properties": {
+    "by": {
+     "description": "新的（替代它的）编码",
+     "type": "string"
+    },
+    "code": {
+     "description": "旧的（要被替代的）编码",
+     "type": "string"
+    },
+    "reason": {
+     "description": "为什么替代",
+     "type": "string"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "required": [
+    "code",
+    "by"
+   ],
+   "type": "object"
+  }
+ },
+ "whoami": {
+  "description": "返回**你**的身份（系统签发的行动者身份）与系统主人。注意：返回的是当前行动者，不是主人；不要自称主人。\n回执固定带一行「身份来源」：token（session_tokens）/ register 登记（不参与归属）/ 未归属——它回答的是“这条回执凭什么算身份”，不是“你登记过没有”。\n`all=true` 时另列**相关公民**（同会话键 / 同名 / 同账号，三者去重），用于排查“同一个 AI 在库里有两套身份”——那不是全库清单。",
+  "inputSchema": {
+   "properties": {
+    "all": {
+     "description": "true = 附带相关公民清单（会话/同名/账号三种关联，按 id 去重；需要一个有效 token 才有锚）",
+     "type": "boolean"
+    },
+    "token": {
+     "description": "可选：会话凭证（由 `fish session start` 签发）。带上它，本次调用的归属才确定；不带则归属记为 'unattributed'（未归属），系统不会猜你的身份。",
+     "type": "string"
+    }
+   },
+   "type": "object"
+  }
+ }
+}

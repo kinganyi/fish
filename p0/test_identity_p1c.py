@@ -64,7 +64,11 @@ BASELINE_TOOL_PROPS = {
     "read_body": {"code"},
     "add_project": {"prefix", "namespace"},
     "supersede": {"code", "by", "reason"},
-    "whoami": set(),
+    # 2026-10-26（反馈批 C · FB-03）：whoami 新增可选 `all`（true = 附带相关公民
+    # 清单：同会话键 / 同名 / 同账号）。这是**声明过的契约变更**——外部评估
+    # `EVAL-261026-06` 要求"双视图"能够被看见（register 说 A、token 说 B 时不报错）。
+    # 只加一个可选字段：不传 = 旧回执一个字都不多（判据 C1/C4 分别钉住两档）。
+    "whoami": {"all"},
     "register": {"display_name", "kind", "role", "host", "session_name"},
     # 2026-10-25（阶段 B）：新增 rename_citizen（名字认领）。同样是**声明过的**基线
     # 变更——用户裁定"开场指定名字却无法绑定"是 BUG，必须给它一条工具路径。
@@ -73,7 +77,10 @@ BASELINE_TOOL_PROPS = {
     # 同样是声明过的基线变更——决策 16 要求"AI 显式调用 close_project + 写 artifact 依据"。
     "close_project": {"prefix", "reason"},
     "reopen_project": {"prefix", "reason"},
-    "inject": {"budget", "project"},
+    # 2026-10-26（反馈批 B · FB-02）：inject 新增可选 `sections` + `include_board`
+    # （段选择 / "别看板"的便捷写法）。这是**声明过的**基线变更——B 批落地时漏登记，
+    # 导致本条判据自那以后一直是红的（C 批收尾时同步基线，不是放宽判据）。
+    "inject": {"budget", "project", "sections", "include_board"},
     "healthcheck": set(),
     # 2026-10-25 加（用户批准的工具数变更）：MCP 面唯一的签发口。
     # 入参刻意**不含 token**（它本身就是拿 token 的地方），只有 `_attach_token`
@@ -87,6 +94,18 @@ BASELINE_TOOL_PROPS = {
     # 验证不了撞车检测；这个参数让 AI 假设一个占用者，走同一套 surface_hit。
     "board": {"action", "project", "doing", "surface", "kind", "text",
               "status", "assume_surface"},
+    # 2026-10-26（T05 / B3）：知识库读 / 写两个工具。字段与架构设计 §3.3 逐字一致，
+    # **都不含 token**（`_attach_token` 统一补），所以这里列的是业务字段。
+    # 第二轮（R15）：`kb` 增了可选 `allow_sensitive`（敏感文件正文的二次授权）。
+    # 第四轮（S6）：`kb_write` 也增了可选 `allow_sensitive`（凭证/.env 默认拒写）。
+    "kb": {"action", "vault", "path", "query", "depth", "limit", "max_chars",
+           "allow_sensitive"},
+    "kb_write": {"action", "vault", "path", "content", "frontmatter",
+                 "base_sha256", "reason", "allow_sensitive"},
+    # 2026-10-27（语料层 T03）：18 → 19，新增 `corpus`（search/read/stats 三读动作）。
+    # 与其它工具同一口径：token 由 `_attach_token` 统一补，这里只列业务字段。
+    "corpus": {"action", "host", "limit", "max_chars", "pointer", "project",
+               "query", "ranker", "role"},
 }
 
 # 进程态身份的名字——判据 H 的扫描目标（出现即红，注释不算：只看语法树里的属性访问）。
@@ -546,7 +565,10 @@ class FishIdentityP1cTest(unittest.TestCase):
         # 2026-10-25（阶段 B/D）：11 → 12（rename_citizen）→ 14（close/reopen）
         # → 15（session_start，用户批准：MCP 面缺签发口导致通道归属分裂）
         # → 16（board，用户批准：看板"看得见、动不了"，签到闭环断在 MCP 面没有签到工具）。
-        self.assertEqual(len(names), 16,
+        # 2026-10-26（T05 / B3）：16 → 18（kb 读 + kb_write 写；读/写是两个权限位，裁决 C2）。
+        # 2026-10-27（语料层 T03）：18 → 19（新增 `corpus`：search/read/stats 三读动作；
+        # 主理人已批准的设计契约变更；18 个旧工具的描述/schema 由 golden 逐字锁住）。
+        self.assertEqual(len(names), 19,
                          f"{where}：工具数量变了（{len(names)} 个：{names}）")
         self.assertEqual(sorted(names), sorted(BASELINE_TOOL_PROPS),
                          f"{where}：工具集合变了：{names}")

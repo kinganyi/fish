@@ -474,7 +474,15 @@ class InjectionBlocksTest(unittest.TestCase):
         full = fish.build_short_rules_block(self.conn, project="PROJA",
                                             max_tokens=10 ** 6)
         self.assertEqual(len(full["codes"]), 3, "夹具前提：不受限时三条都该在")
-        cap = fish.count_tokens(full["text"]) // 2   # 砍到一半：必然要少列条目
+        # 2026-10-26（FB-02 连带）：`cap` 原来是"整段的一半"，而段里现在多了一行
+        # **固定开销**（段头声明「规矩段：显示 N/M 条…」）。固定开销不随条目增减，
+        # 于是"一半"可能连开销都装不下 → 一条都不剩 → 本判据证不出"少列而非截断"
+        # （它测的就变成了"整段消失"）。
+        # 现在按**可推导**的方式取上限：full 减去最后一条条目的长度。
+        # 这样必然要少列一条（刚超上限），又必定留得下"段头 + 至少一条"。
+        # 断言强度一点没松：仍是"少列条目 / 标题完整 / 落在上限内"三条。
+        cap = fish.count_tokens(full["text"]) - fish.count_tokens(
+            f"- PROJA-261024-03 {title}3")
         block = fish.build_short_rules_block(self.conn, project="PROJA", max_tokens=cap)
         self.assertIn("规矩截断", block["trimmed"], "超段上限必须留裁剪标记")
         self.assertLessEqual(fish.count_tokens(block["text"]), cap,

@@ -13,12 +13,17 @@
 
 ## 判据
 
-  U1  `who_label` 可读名：有名字 → `名字（短 id）`；无名字 → 只给短 id，**不编造**
+  U1  `who_label` 可读名：有名字 → 名字（**不含 ID**）；无名字 → `未命名·<host>`；
+     重名 → `名字·host` / `名字·host#2`（永不用 ULID 消歧）
   U2  `simulate` 单人可验证：`assume_surface` 走**同一套** `surface_hit`，且**不写库**
   U3  自动兜底 presence 的三条红线：
-        · **只在无行时写**（绝不覆盖真实 doing）
+        · **不覆盖真实 doing**
         · doing **标注来源**（能看出这不是谁声明的）
         · **不编造 surface**（编造的会制造假重叠）
+
+> 2026-10-26（T03 契约变更）：U1 三条在用户拍板「不要 ULID」之后**有意改写**——
+> 旧行为（`名字（短 id）`、无名字只给短 id）现在是错的，所以判据跟着改；
+> 变异自证见 `test_board_readable.py`（把 who_label 改回短 id → 那里必须红）。
 """
 import importlib.util
 import os
@@ -33,6 +38,7 @@ fish = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fish)
 
 import mcp_server  # noqa: E402
+import fish_naming  # noqa: E402
 
 
 class BoardFeedback3Test(unittest.TestCase):
@@ -67,32 +73,66 @@ class BoardFeedback3Test(unittest.TestCase):
 
     # ------------------------------------------------------------------ U1
     def test_U1_who_label_prefers_readable_name(self):
-        """有名字 → `名字（短 id）`；**保留短 id** 因为同名时还要能区分。"""
+        """有名字 → **只用名字**（2026-10-26 契约变更：用户拍板不要 ULID）。"""
         row = {"citizen_id": "17929164334384A67C1B1F95C4",
                "display_name": "codebuddy-8a83d218-8b2"}
         label = fish.who_label(row)
+        self.assertEqual(label, "codebuddy-8a83d218-8b2")
+        self.assertNotIn("1792916", label, "人类可读面不许出现短 id（用户拍板）")
+
+    def test_U1_who_label_with_id_is_opt_in(self):
+        """机器视图要 ID 时**显式**传 `with_id=True`——默认永远不出 ID。"""
+        row = {"citizen_id": "17929164334384A67C1B1F95C4",
+               "display_name": "codebuddy-8a83d218-8b2"}
+        label = fish.who_label(row, with_id=True)
         self.assertIn("codebuddy-8a83d218-8b2", label)
-        self.assertIn("1792916", label, "短 id 必须保留（重名时靠它区分）")
+        self.assertIn("1792916", label, "显式要 ID 时才给短 id")
 
     def test_U1_who_label_no_name_no_invention(self):
-        """没名字（老数据/匿名）→ **只给短 id，不编造**。"""
-        # 短 id 是**前 8 位**（与 who_label 的实现一致）
-        self.assertEqual(fish.who_label({"citizen_id": "ABCDEFGH1234", "display_name": ""}),
-                         "ABCDEFGH")
+        """没名字（老数据/匿名）→ `未命名·<host>`，**绝不编造、也不吐 ID**。"""
+        self.assertEqual(
+            fish.who_label({"citizen_id": "ABCDEFGH1234", "display_name": "", "host": "dsh"}),
+            "未命名·dsh")
+        self.assertEqual(
+            fish.who_label({"citizen_id": "ABCDEFGH1234", "display_name": ""}),
+            "未命名")
 
     def test_U1_assumed_label(self):
         """`simulate` 的虚拟占用者有个明确标签，不冒充真实公民。"""
         self.assertEqual(fish.who_label({"citizen_id": "ASSUMED", "display_name": "x"}),
                          "（simulate 假设的人）")
 
+    def test_U1_duplicate_names_disambiguated_without_id(self):
+        """重名 → `名字·host` / `名字·host#2`；**永不用 ULID/短 id 消歧**。
+
+        生产库实测有 1 组重名（2 条），所以这条不是假想场景。
+        """
+        rows = [
+            {"citizen_id": "C1AAAAAAAAAAAAAAAAAAAAAAAA", "display_name": "同名",
+             "host": "dsh", "created_at": "2026-10-01T00:00:00Z"},
+            {"citizen_id": "C2BBBBBBBBBBBBBBBBBBBBBBBB", "display_name": "同名",
+             "host": "dsh", "created_at": "2026-10-02T00:00:00Z"},
+            {"citizen_id": "C3CCCCCCCCCCCCCCCCCCCCCCCC", "display_name": "同名",
+             "host": "workbuddy", "created_at": "2026-10-03T00:00:00Z"},
+        ]
+        labels = fish_naming.disambiguate(rows)
+        self.assertEqual(labels["C1AAAAAAAAAAAAAAAAAAAAAAAA"], "同名·dsh")
+        self.assertEqual(labels["C2BBBBBBBBBBBBBBBBBBBBBBBB"], "同名·dsh#2",
+                         "同 host 重名按 created_at 排序加序号")
+        self.assertEqual(labels["C3CCCCCCCCCCCCCCCCCCCCCCCC"], "同名·workbuddy")
+        for label in labels.values():
+            self.assertNotIn("C1A", label)
+            self.assertNotIn("C2B", label)
+
     def test_U1_board_shows_name(self):
-        """端到端：入场表里出现可读名，而不只是 ULID。"""
+        """端到端：入场表里出现可读名，而**不再出现** ULID。"""
         who = self._ident("readable-dev")
         self.srv.tool_board({"action": "checkin", "doing": "干活",
                              "surface": "p0/x.py", "project": "UU"}, who)
         out = self.srv.tool_board({"action": "show", "project": "UU"}, who)
         self.assertIn("readable-dev", out, f"入场表应显示可读名：{out[:500]}")
-        self.assertIn(who.citizen_id[:8], out, "短 id 也应在（区分同名）")
+        self.assertNotIn(who.citizen_id, out,
+                         "入场表不许出现 26 位公民 ID（用户拍板：不要机器码）")
 
     # ------------------------------------------------------------------ U2
     def test_U2_simulate_alone_can_verify(self):

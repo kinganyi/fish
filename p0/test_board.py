@@ -117,7 +117,7 @@ class BoardTest(unittest.TestCase):
         """渲染必须有两区：在场表 + 今日动态；空看板要**明写**而不是留白。"""
         board = fish.board_ensure(self.conn, "project", "P1")
         path, size, _ = fish.board_render(self.conn, self.root, board)
-        text = (self.root / path).read_text(encoding="utf-8")
+        text = fish.board_out_path(self.root, board).read_text(encoding="utf-8")
         self.assertIn("## 在场", text, "缺在场区")
         self.assertIn("## 今日动态", text, "缺动态区")
         self.assertIn("未登记 = 未发生", text, "空看板必须明写这句话，不能留白")
@@ -127,8 +127,11 @@ class BoardTest(unittest.TestCase):
                            scope="project", scope_key="P1")
         fish.board_post(self.conn, board, CID_A, "progress", "跑通了")
         fish.board_render(self.conn, self.root, board)
-        text2 = (self.root / path).read_text(encoding="utf-8")
-        self.assertIn(CID_A, text2)
+        text2 = fish.board_out_path(self.root, board).read_text(encoding="utf-8")
+        # 合并裁决：落点用 devA 的 `board_out_path`（唯一入口，boards.path 相对
+        # fish-home）；内容契约用主树 T03「可读名 + 不许出现 26 位公民 ID」。
+        self.assertIn("AI-A", text2, "在场行必须显示可读名")
+        self.assertNotIn(CID_A, text2, "人类可读面不许出现 26 位公民 ID")
         self.assertIn("做看板", text2)
         self.assertIn("跑通了", text2)
 
@@ -161,7 +164,7 @@ class BoardTest(unittest.TestCase):
                              f"渲染文件 {size} B 超过上限 {fish.BOARD_MAX_BYTES} B")
         self.assertTrue(split, "超限时必须切分（v1 就是死在只追加不切分上）")
         # 分片文件要真的存在
-        shards = list((self.root / Path(path).parent).glob("看板-*-*.md"))
+        shards = list(fish.board_out_path(self.root, board).parent.glob("看板-*-*.md"))
         self.assertTrue(shards, "应产出 -HH 分片文件")
 
     def test_B5_mutation_no_split_goes_red(self):
@@ -192,7 +195,7 @@ class BoardTest(unittest.TestCase):
         board = fish.board_ensure(self.conn, "project", "P1")
         fish.board_checkin(self.conn, CID_A, "干活", scope="project", scope_key="P1")
         path, _, _ = fish.board_render(self.conn, self.root, board)
-        p = self.root / path
+        p = fish.board_out_path(self.root, board)
         before = p.read_text(encoding="utf-8")
         os.remove(p)
         self.assertFalse(p.exists())
@@ -215,7 +218,7 @@ class BoardTest(unittest.TestCase):
             fish.board_checkin(self.conn, CID_B, "迟到", scope="project", scope_key="P1")
         n = self.conn.execute("SELECT COUNT(*) FROM presence").fetchone()[0]
         self.assertEqual(n, 1, "归档不该删在场行")
-        path = (self.root / board["path"]).read_text(encoding="utf-8")
+        path = fish.board_out_path(self.root, board).read_text(encoding="utf-8")
         self.assertIn("closed", path, "渲染头应标出已归档")
 
 
@@ -231,8 +234,13 @@ class BoardTest(unittest.TestCase):
         # ⚠️ 返回值是 `None`——这是**既有 CLI 契约**（`main()` 里 `args.func(args)`
         # 忽略返回值），不是缺陷。判据只看副作用，不锚定返回值形状。
         fish.cmd_project_add(args)
-        # 立刻能在项目目录里看到看板（不需要额外一步）
-        files = list((self.root / "projects" / "NEWP").glob("看板-*.md"))
+        # 立刻能在项目目录里看到看板（不需要额外一步）。
+        # 定位走 `board_out_path`（唯一落点入口），并顺带钉住新口径里的
+        # `10-项目库/<项目>/` 段——只断"文件存在"会让落点漂移假绿。
+        b = fish.board_ensure(self.conn, "project", "NEWP")
+        self.assertTrue(b["path"].startswith("10-项目库/NEWP/"),
+                        f"看板 path 应是相对 fish-home 的 10-项目库/<项目>/：{b['path']}")
+        files = list(fish.board_out_path(self.root, b).parent.glob("看板-*.md"))
         self.assertTrue(files, "开项目后应自动生成看板文件")
         self.assertIn("## 在场", files[0].read_text(encoding="utf-8"))
         # 表里也要有这块板

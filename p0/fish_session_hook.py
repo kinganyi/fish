@@ -84,11 +84,31 @@ def _session_citizen(req):
         return None, f"{type(exc).__name__}: {exc}"
 
 
-def build_pack(citizen_id):
+def session_key_from(req):
+    """payload → 会话键（`codebuddy:<session_id>`，与 `_session_citizen` 同口径）。
+
+    没有 `session_id` 时返回 `None`（**不编一个**：编出来的键会造出一行假在场）。
+    """
+    sid = ((req or {}).get("session_id") or "").strip()
+    return ("codebuddy:" + sid) if sid else None
+
+
+def build_pack(citizen_id, session_key=None):
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-    cmd = [PY, str(FISH), "--root", str(DATA), "inject", "--json"]
+    # 2026-10-26（T03）：`--auto-presence` 让会话开场**自动签到**（自动行算登记，
+    # 用户拍板）。它只在显式传时写，所以 MCP 的 `tool_inject` 不会因为"打开看板"
+    # 就刷新在场；这里传是因为 WorkBuddy 没有 `session start` 那条自动签到路径。
+    # ⚠️ stdout 是 `--json` 的契约面：自动签到**不得打印任何东西**（fish 侧已保证）。
+    # 2026-10-26（QA Round 1 · E2）：签到之后**顺带重渲染看板文件**——那一步在
+    # `fish.py::_auto_checkin_after_start` 里（同一个进程、同一个连接，能拿到刚签的
+    # 是哪块板）；这里**不再起第二个进程**，否则每次会话开始多付一次解释器启动。
+    cmd = [PY, str(FISH), "--root", str(DATA), "inject", "--json", "--auto-presence"]
     if citizen_id:
         cmd += ["--citizen", citizen_id]
+    # 2026-10-26（撞车自撞修复 T02）：WorkBuddy 没有 `session start` 那条自动签到路径，
+    # 所以会话键必须显式给——否则自动行永远落在 `''` 行，"一行/公民"的老问题原样保留。
+    if session_key:
+        cmd += ["--session-key", session_key]
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                        env=env, timeout=30)
     if p.returncode != 0:
@@ -132,7 +152,7 @@ def main():
         try:
             if not cid:
                 raise RuntimeError(f"该会话尚未登记（{why or '查不到会话公民'}）")
-            text = build_pack(cid)
+            text = build_pack(cid, session_key_from(req))
             audit(f"injected {len(text)} chars, citizen={cid}, "
                   f"session={req.get('session_id')}")
         except Exception as e:

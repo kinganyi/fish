@@ -223,7 +223,36 @@ DECLARED_NEW_FUNCS = {
                 # 2026-10-25（`EVAL-261025-21` 修复）：`fix_owner` 里新增 1 条 citizens_all
                 # 查询（校验新归属公民存在且活跃）。同样是**声明**出来的新引用，
                 # 上面 25 条基线一字未改；它的写入只碰 code_index.owner + 追加事件。
-                "fix_owner"},
+                "fix_owner",
+                # 2026-10-26（hooks 深度利用 T03 · 可读名）：`citizen_labels` 是**批量取名**
+                # 的唯一入口（看板渲染/动态行/重叠警告/残留行/根板/注入包 7 处共用），
+                # `_unnamed_hint` 是"当前会话缺可读名"那一行提示的唯一读点。
+                # 两者都是**声明**出来的新引用：上面 25 条基线一字未改。
+                # 为什么必须集中：7 个渲染点各查一次 citizens 就是 7 份会漂的 SQL。
+                "citizen_labels", "_unnamed_hint",
+                # 2026-10-26（反馈批 A2）：两个**声明**出来的新引用，上面 25 条基线一字未改。
+                #   · `find_same_name_citizens`（FB-08）：签发后查"同名在用公民"，只读
+                #     （`WHERE display_name=? AND status='active' AND citizen_id<>?`）；
+                #   · `archive_citizens`（FB-12）：闲置公民归档——读热表候选 + 搬行
+                #     （INSERT citizens_archive / DELETE citizens）。这是 30 天裁决的
+                #     执行面，此前只有配置项与冷表、没有任何调用点。
+                "find_same_name_citizens", "archive_citizens",
+                # 2026-10-26（反馈批 C · FB-03 `EVAL-261026-06`）：`related_citizens`
+                # 是"同一个 AI 在库里有两套身份"的唯一取证读点（`whoami all=true`）。
+                # 同样是**声明**出来的新引用：上面 25 条基线一字未改。
+                # 为什么必须集中在一处：会话键 / 同名 / 同账号三种锚要**一次**
+                # 去重合并（分开查三次，调用方就得自己合并，然后各写一版）；
+                # 列名走白名单常量，调用方只传值，不开 SQL 注入的口子。
+                "related_citizens",
+                # 2026-10-26（复审 🟠N2 / 工单 N6）：`resolve_actor_from_token`——
+                # `whoami`/写路径在"没有 actor_name"时回落到凭证归属公民的唯一读点。
+                # 与上面几个同性质：**声明**新引用，28 条基线一字未改。
+                "resolve_actor_from_token",
+                # 2026-10-26（撞车自撞修复 T02）：`_session_labels_for`——推送候选要按
+                # **会话**取可读名（`名字·dsh#88f9`），所以它查一次 citizens 拿
+                # display_name / host / created_at。同样是**声明**出来的新读点：
+                # 上面 28 条基线一字未改，判据也没有放宽（仍然逐条冻结）。
+                "_session_labels_for"},
     "mcp_server.py": set(),
     "daily_report.py": set(),
 }

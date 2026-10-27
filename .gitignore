@@ -15,6 +15,7 @@ p0/data/_backups/
 p0/data/_audit/
 p0/data/_reports/
 p0/data/看板-*.md
+p0/data/projects/**/看板-*.md
 p0/data/citizens/
 历史版本/
 
@@ -30,3 +31,15 @@ _research/
 .ai-memory/
 *.tmp
 *.log
+
+# ── 批次工作产物（评审 ⚪13 · 2026-10-26）─────────────────────
+# `p0/_audit/`：判据/探针跑出来的临时库与日志（每个批次都会重建，**不是**真相）。
+# 之前它一直以未跟踪文件的形式挂在 git status 里，等于每次提交都要人肉跳过它。
+p0/_audit/
+# 防御性忽略：探针脚本与运行产物（`_probe_*.py` / `_run_*.txt`）。
+# 为什么忽略而**不删规则**：这些名字是"临时"的约定，一次跑完就该消失；
+# 把规则写进 .gitignore 之后，忘了删也不会污染 `git status`。
+# 注意：`p0/_sample_inject.py` 是仓库原有文件（已跟踪），下面的通配**不会**影响它
+# ——git 的忽略规则对已跟踪文件无效（这是刻意的：老文件不动）。
+p0/_probe_*
+p0/_run_*

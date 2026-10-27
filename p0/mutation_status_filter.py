@@ -18,8 +18,9 @@
 **只读副本**那条判据，必须重新看到 `ANYI-261022-29`（status='withdrawn'）。
 
 纪律（与 mutation_identity_p1a/p1b/p1c.py 同一套）：
-  · 读写走字节（文件是 LF 结尾的，文本模式在 Windows 上会把 LF 改成 CRLF → 还原不干净）；
-  · 每改一次都比对 sha256，结束后**必须**逐字节还原并复核；
+  · **换行无关**：匹配在 LF 归一视图上做、写回保持文件原本风格（工作树是 CRLF，
+    见 `mutation_source.py`；2026-10-26 F1 前这里是 0 命中的假失败）；
+  · 每改一次都比对 sha256，结束后**必须**逐字节还原并复核（还原走原始字节）；
   · 任何异常（进程崩溃 / Ctrl-C）都走 finally 还原；
   · 还原失败 → 立刻非零退出并打印人工恢复步骤（备份在 历史版本\\）。
 
@@ -34,6 +35,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from mutation_source import SourceText
+
 HERE = Path(__file__).resolve().parent
 TEST_FILE = "test_status_filter.py"
 TEST_CLASS = "FishStatusFilterTest"
@@ -45,10 +48,12 @@ TARGETS = {
 
 SIM_CANDS_OLD = (
     '        "SELECT f.code FROM memory_fts f JOIN code_index ci ON ci.code = f.code "\n'
-    '        "WHERE memory_fts MATCH ? AND ci.status = \'active\' LIMIT 100", (expr,))]\n'
+    '        "WHERE memory_fts MATCH ? AND ci.status = \'active\' "\n'
+    '        "ORDER BY bm25(memory_fts) LIMIT 100", (expr,))]\n'
 )
 SIM_CANDS_NEW = (
-    '        "SELECT code FROM memory_fts WHERE memory_fts MATCH ? LIMIT 100", (expr,))]\n'
+    '        "SELECT code FROM memory_fts WHERE memory_fts MATCH ? "\n'
+    '        "ORDER BY bm25(memory_fts) LIMIT 100", (expr,))]\n'
 )
 MENTION_OLD = (
     '        + ",".join("?" * min(len(probes), _MENTION_MAX_PROBES)) '
@@ -58,6 +63,8 @@ MENTION_NEW = (
     '        + ",".join("?" * min(len(probes), _MENTION_MAX_PROBES)) + ")",\n'
 )
 FALLBACK_OLD = (
+    '    sql = "SELECT code,title FROM code_index"\n'
+    "    where, params = [], []\n"
     "    if not include_superseded:\n"
     '        where.append("status = \'active\'")\n'
 )
@@ -71,8 +78,8 @@ MUTATIONS = (
     ),
     (
         "M-B", "B", "fish.py", "test_B_similar_codes_keeps_active",
-        '        "WHERE memory_fts MATCH ? AND ci.status = \'active\' LIMIT 100", (expr,))]\n',
-        '        "WHERE memory_fts MATCH ? AND ci.status != \'active\' LIMIT 100", (expr,))]\n',
+        '        "WHERE memory_fts MATCH ? AND ci.status = \'active\' "\n',
+        '        "WHERE memory_fts MATCH ? AND ci.status != \'active\' "\n',
         "过滤写反（只留非 active）→ 活跃的相似条目被滤掉",
     ),
     (
@@ -89,6 +96,8 @@ MUTATIONS = (
     (
         "M-E", "E", "fish.py", "test_E_recent_fallback_excludes_inactive",
         FALLBACK_OLD,
+        '    sql = "SELECT code,title FROM code_index"\n'
+        "    where, params = [], []\n"
         "    if False:   # 变异：不筛状态\n"
         '        where.append("status = \'active\'")\n',
         "recent_fallback 不再筛 status → 未命中提示里冒出已作废条目",
@@ -101,6 +110,8 @@ MUTATIONS = (
     (
         "M-G", "G", "fish.py", "test_G_recent_fallback_include_superseded_opt_in",
         FALLBACK_OLD,
+        '    sql = "SELECT code,title FROM code_index"\n'
+        "    where, params = [], []\n"
         "    if True:   # 变异：忽略 include_superseded（状态过滤恒开）\n"
         '        where.append("status = \'active\'")\n',
         "include_superseded 参数成了摆设（显式要看退役条目也看不到）",
@@ -110,15 +121,6 @@ MUTATIONS = (
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def read_source(path: Path) -> str:
-    """按字节读、再解码：文件是 LF 结尾的，文本模式会把换行悄悄改写掉。"""
-    return path.read_bytes().decode("utf-8")
-
-
-def write_source(path: Path, text: str):
-    path.write_bytes(text.encode("utf-8"))
 
 
 def run_test(test_name: str) -> tuple:
@@ -139,14 +141,14 @@ def run_test(test_name: str) -> tuple:
     return proc.returncode == 0, tail[:160]
 
 
-def apply_mutation(path: Path, old: str, new: str) -> str:
-    """就地改源码，返回改之前的原文（用于还原）。找不到/多处命中就报错，绝不静默跳过。"""
-    text = read_source(path)
-    hits = text.count(old)
-    if hits != 1:
-        raise AssertionError(f"{path.name} 里变异片段命中 {hits} 次（要求恰好 1 次）：{old[:60]!r}")
-    write_source(path, text.replace(old, new))
-    return text
+def apply_mutation(path: Path, old: str, new: str) -> SourceText:
+    """就地改源码，返回**改之前的字节句柄**（还原走 `restore()`，逐字节一致）。
+
+    找不到片段/多处命中就抛错，绝不静默跳过。
+    """
+    src = SourceText(path)
+    src.write(src.replaced(old, new))
+    return src
 
 
 def main(argv=None) -> int:
@@ -192,7 +194,7 @@ def main(argv=None) -> int:
             failures.append(f"{mut_id} 执行异常：{exc}")
         finally:
             if original is not None:
-                write_source(path, original)
+                original.restore()
             restored_ok = sha256(path) == baseline[fname]
             if not restored_ok:
                 failures.append(

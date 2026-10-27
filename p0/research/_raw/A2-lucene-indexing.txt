@@ -1,0 +1,1169 @@
+# A2-lucene-indexing
+# URL: https://lucene.apache.org/core/9_10_0/core/org/apache/lucene/index/package-summary.html
+# 说明: Lucene 索引结构（segment / 不可变 / 合并）
+# 抓取: 2026-10-27 03:01:27
+======================================================================
+
+org.apache.lucene.index (Lucene 9.10.0 core API) 
+
+ Skip navigation links 
+
+ Overview 
+
+ Package
+
+ Class
+
+ Use 
+
+ Tree 
+
+ Deprecated 
+
+ Index 
+
+ Help 
+
+ All Classes 
+
+ SEARCH: 
+
+ Package org.apache.lucene.index
+
+ Code to maintain and access indices.
+
+ Table Of Contents
+
+ Index APIs 
+
+ IndexWriter 
+ IndexReader 
+ Segments and docids 
+
+ Field types 
+
+ Postings 
+ Stored Fields 
+ DocValues 
+ Points 
+
+ Postings APIs 
+
+ Fields 
+ Terms 
+ Documents 
+ Positions 
+
+ Index Statistics 
+
+ Term-level 
+ Field-level 
+ Segment-level 
+ Document-level 
+
+ Index APIs
+
+ IndexWriter
+
+ IndexWriter is used to create an index, and to add, update and
+ delete documents. The IndexWriter class is thread safe, and enforces a single instance per index.
+ Creating an IndexWriter creates a new index or opens an existing index for writing, in a Directory , depending on the configuration in IndexWriterConfig . A Directory is an abstraction that typically
+ represents a local file-system directory (see various implementations of FSDirectory ), but it may also stand for some other storage, such as RAM.
+
+ IndexReader
+
+ IndexReader is used to read data from the index, and supports
+ searching. Many thread-safe readers may be DirectoryReader.open(org.apache.lucene.store.Directory) 
+ concurrently with a single (or no) writer. Each reader maintains a consistent "point in time"
+ view of an index and must be explicitly refreshed (see DirectoryReader.openIfChanged(org.apache.lucene.index.DirectoryReader) ) in order to incorporate writes that may
+ occur after it is opened. 
+
+ Segments and docids
+
+ Lucene's index is composed of segments, each of which contains a subset of all the documents
+ in the index, and is a complete searchable index in itself, over that subset. As documents are
+ written to the index, new segments are created and flushed to directory storage. Segments are
+ immutable; updates and deletions may only create new segments and do not modify existing ones.
+ Over time, the writer merges groups of smaller segments into single larger ones in order to
+ maintain an index that is efficient to search, and to reclaim dead space left behind by deleted
+ (and updated) documents.
+
+ Each document is identified by a 32-bit number, its "docid," and is composed of a collection
+ of Field values of diverse types (postings, stored fields, doc values, and points). Docids come
+ in two flavors: global and per-segment. A document's global docid is just the sum of its
+ per-segment docid and that segment's base docid offset. External, high-level APIs only handle
+ global docids, but internal APIs that reference a LeafReader ,
+ which is a reader for a single segment, deal in per-segment docids.
+
+ Docids are assigned sequentially within each segment (starting at 0). Thus the number of
+ documents in a segment is the same as its maximum docid; some may be deleted, but their docids
+ are retained until the segment is merged. When segments merge, their documents are assigned new
+ sequential docids. Accordingly, docid values must always be treated as internal implementation,
+ not exposed as part of an application, nor stored or referenced outside of Lucene's internal
+ APIs. 
+
+ Field Types
+
+ Lucene supports a variety of different document field data structures. Lucene's core, the
+ inverted index, is comprised of "postings." The postings, with their term dictionary, can be
+ thought of as a map that provides efficient lookup given a Term 
+ (roughly, a word or token), to (the ordered list of) Document s
+ containing that Term. Codecs may additionally record impacts alongside postings in order to be able to
+ skip over low-scoring documents at search time. Postings do not provide any way of retrieving
+ terms given a document, short of scanning the entire index. 
+
+ Stored fields are essentially the opposite of postings, providing efficient retrieval of field
+ values given a docid. All stored field values for a document are stored together in a block.
+ Different types of stored field provide high-level datatypes such as strings and numbers on top
+ of the underlying bytes. Stored field values are usually retrieved by the searcher using an
+ implementation of StoredFieldVisitor . 
+
+ DocValues fields are what are sometimes referred to as
+ columnar, or column-stride fields, by analogy to relational database terminology, in which
+ documents are considered as rows, and fields, columns. DocValues fields store values per-field: a
+ value for every document is held in a single data structure, providing for rapid, sequential
+ lookup of a field-value given a docid. These fields are used for efficient value-based sorting,
+ and for faceting, but they are not useful for filtering. 
+
+ PointValues represent numeric values using a kd-tree data
+ structure. Efficient 1- and higher dimensional implementations make these the choice for numeric
+ range and interval queries, and geo-spatial queries. 
+
+ Postings APIs
+
+ Fields 
+
+ Fields is the initial entry point into the postings APIs, this
+ can be obtained in several ways:
+
+ // access indexed fields for an index segment
+ Fields fields = reader.fields();
+ // access term vector fields for a specified document
+ TermVectors vectors = reader.termVectors();
+ Fields fields = vectors.get(docid);
+
+ Fields implements Java's Iterable interface, so it's easy to enumerate the list of fields:
+
+ // enumerate list of fields
+ for (String field : fields) {
+ // access the terms for this field
+ Terms terms = fields.terms(field);
+ }
+
+ Terms 
+
+ Terms represents the collection of terms within a field,
+ exposes some metadata and statistics , and an API for enumeration.
+
+ // metadata about the field
+ System.out.println("positions? " + terms.hasPositions());
+ System.out.println("offsets? " + terms.hasOffsets());
+ System.out.println("payloads? " + terms.hasPayloads());
+ // iterate through terms
+ TermsEnum termsEnum = terms.iterator(null);
+ BytesRef term = null;
+ while ((term = termsEnum.next()) != null) {
+ doSomethingWith(termsEnum.term());
+ }
+
+ TermsEnum provides an iterator over the list of terms within a
+ field, some statistics about the term, and methods to access the term's
+ documents and positions .
+
+ // seek to a specific term
+ boolean found = termsEnum.seekExact(new BytesRef("foobar"));
+ if (found) {
+ // get the document frequency
+ System.out.println(termsEnum.docFreq());
+ // enumerate through documents
+ PostingsEnum docs = termsEnum.postings(null, null);
+ // enumerate through documents and positions
+ PostingsEnum docsAndPositions = termsEnum.postings(null, null, PostingsEnum.FLAG_POSITIONS);
+ }
+
+ Documents 
+
+ PostingsEnum is an extension of DocIdSetIterator that iterates over the list of documents for a term,
+ along with the term frequency within that document.
+
+ int docid;
+ while ((docid = docsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+ System.out.println(docid);
+ System.out.println(docsEnum.freq());
+ }
+
+ Positions 
+
+ PostingsEnum also allows iteration of the positions a term occurred within the document, and
+ any additional per-position information (offsets and payload). The information available is
+ controlled by flags passed to TermsEnum#postings
+
+ int docid;
+ PostingsEnum postings = termsEnum.postings(null, null, PostingsEnum.FLAG_PAYLOADS | PostingsEnum.FLAG_OFFSETS);
+ while ((docid = postings.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
+ System.out.println(docid);
+ int freq = postings.freq();
+ for (int i = 0; i < freq; i++) {
+ System.out.println(postings.nextPosition());
+ System.out.println(postings.startOffset());
+ System.out.println(postings.endOffset());
+ System.out.println(postings.getPayload());
+ }
+ }
+
+ Index Statistics
+
+ Term statistics 
+
+ TermsEnum.docFreq() : Returns the number of documents that
+ contain at least one occurrence of the term. This statistic is always available for an
+ indexed term. Note that it will also count deleted documents, when segments are merged the
+ statistic is updated as those deleted documents are merged away.
+ TermsEnum.totalTermFreq() : Returns the number of occurrences
+ of this term across all documents. Like docFreq(), it will also count occurrences that
+ appear in deleted documents.
+
+ Field statistics 
+
+ Terms.size() : Returns the number of unique terms in the
+ field. This statistic may be unavailable (returns -1 ) for some Terms
+ implementations such as MultiTerms , where it cannot be
+ efficiently computed. Note that this count also includes terms that appear only in deleted
+ documents: when segments are merged such terms are also merged away and the statistic is
+ then updated.
+ Terms.getDocCount() : Returns the number of documents that
+ contain at least one occurrence of any term for this field. This can be thought of as a
+ Field-level docFreq(). Like docFreq() it will also count deleted documents.
+ Terms.getSumDocFreq() : Returns the number of postings
+ (term-document mappings in the inverted index) for the field. This can be thought of as the
+ sum of TermsEnum.docFreq() across all terms in the field, and
+ like docFreq() it will also count postings that appear in deleted documents.
+ Terms.getSumTotalTermFreq() : Returns the number of tokens for
+ the field. This can be thought of as the sum of TermsEnum.totalTermFreq() across all terms in the field, and like
+ totalTermFreq() it will also count occurrences that appear in deleted documents.
+
+ Segment statistics 
+
+ IndexReader.maxDoc() : Returns the number of documents
+ (including deleted documents) in the index.
+ IndexReader.numDocs() : Returns the number of live documents
+ (excluding deleted documents) in the index.
+ IndexReader.numDeletedDocs() : Returns the number of deleted
+ documents in the index.
+ Fields.size() : Returns the number of indexed fields.
+
+ Document statistics 
+
+ Document statistics are available during the indexing process for an indexed field: typically
+ a Similarity implementation will store some of
+ these values (possibly in a lossy way), into the normalization value for the document in its
+ Similarity.computeNorm(org.apache.lucene.index.FieldInvertState) method.
+
+ FieldInvertState.getLength() : Returns the number of tokens
+ for this field in the document. Note that this is just the number of times that TokenStream.incrementToken() returned true, and is unrelated to
+ the values in PositionIncrementAttribute .
+ FieldInvertState.getNumOverlap() : Returns the number of
+ tokens for this field in the document that had a position increment of zero. This can be
+ used to compute a document length that discounts artificial tokens such as synonyms.
+ FieldInvertState.getPosition() : Returns the accumulated
+ position value for this field in the document: computed from the values of PositionIncrementAttribute and including Analyzer.getPositionIncrementGap(java.lang.String) s across multivalued fields.
+ FieldInvertState.getOffset() : Returns the total character
+ offset value for this field in the document: computed from the values of OffsetAttribute returned by TokenStream.end() , and including Analyzer.getOffsetGap(java.lang.String) s across multivalued fields.
+ FieldInvertState.getUniqueTermCount() : Returns the number of
+ unique terms encountered for this field in the document.
+ FieldInvertState.getMaxTermFrequency() : Returns the maximum
+ frequency across all unique terms encountered for this field in the document.
+
+ Additional user-supplied statistics can be added to the document as DocValues fields and
+ accessed via LeafReader.getNumericDocValues(java.lang.String) .
+
+ Interface Summary 
+
+ Interface 
+ Description 
+
+ ImpactsSource 
+
+ Source of Impacts .
+
+ IndexableField 
+
+ Represents a single field for indexing.
+
+ IndexableFieldType 
+
+ Describes the properties of a field.
+
+ IndexReader.CacheHelper 
+
+ A utility class that gives hooks in order to help build a cache based on the data that is
+ contained in this index.
+
+ IndexReader.ClosedListener 
+
+ A listener that is called when a resource gets closed.
+
+ IndexSorter 
+
+ Handles how documents should be sorted in an index, both within a segment and between segments.
+
+ IndexSorter.ComparableProvider 
+
+ Used for sorting documents across segments
+
+ IndexSorter.DocComparator 
+
+ A comparator of doc IDs, used for sorting documents within a segment
+
+ IndexSorter.NumericDocValuesProvider 
+
+ Provide a NumericDocValues instance for a LeafReader
+
+ IndexSorter.SortedDocValuesProvider 
+
+ Provide a SortedDocValues instance for a LeafReader
+
+ IndexWriter.IndexReaderWarmer 
+
+ If DirectoryReader.open(IndexWriter) has been called (ie, this writer is in near
+ real-time mode), then after a merge completes, this class can be invoked to warm the reader on
+ the newly merged segment, before the merge commits.
+
+ IndexWriterEventListener 
+
+ A callback event listener for recording key events happened inside IndexWriter
+
+ MergePolicy.MergeContext 
+
+ This interface represents the current context of the merge selection process.
+
+ MergeScheduler.MergeSource 
+
+ Provides access to new merges and executes the actual merge
+
+ MergeState.DocMap 
+
+ A map of doc IDs.
+
+ PointValues.IntersectVisitor 
+
+ We recurse the PointValues.PointTree , using a provided instance of this to guide the recursion.
+
+ PointValues.PointTree 
+
+ Basic operations to read the KD-tree.
+
+ QueryTimeout 
+
+ Query timeout abstraction that controls whether a query should continue or be stopped.
+
+ TwoPhaseCommit 
+
+ An interface for implementations that support 2-phase commit.
+
+ Class Summary 
+
+ Class 
+ Description 
+
+ AutomatonTermsEnum 
+
+ A FilteredTermsEnum that enumerates terms based upon what is accepted by a DFA.
+
+ BaseCompositeReader <R extends IndexReader > 
+
+ Base class for implementing CompositeReader s based on an array of sub-readers.
+
+ BaseTermsEnum 
+
+ A base TermsEnum that adds default implementations for
+
+ BaseTermsEnum.attributes() 
+ BaseTermsEnum.termState() 
+ BaseTermsEnum.seekExact(BytesRef) 
+ BaseTermsEnum.seekExact(BytesRef, TermState) 
+
+ In some cases, the default implementation may be slow and consume huge memory, so subclass SHOULD
+ have its own implementation if possible.
+
+ BinaryDocValues 
+
+ A per-document numeric value.
+
+ ByteVectorValues 
+
+ This class provides access to per-document floating point vector values indexed as KnnByteVectorField .
+
+ CheckIndex 
+
+ Basic tool and API to check the health of an index and write a new segments file that removes
+ reference to problematic segments.
+
+ CheckIndex.Options 
+
+ Run-time configuration options for CheckIndex commands.
+
+ CheckIndex.Status 
+
+ Returned from CheckIndex.checkIndex() detailing the health and status of the index.
+
+ CheckIndex.Status.DocValuesStatus 
+
+ Status from testing DocValues
+
+ CheckIndex.Status.FieldInfoStatus 
+
+ Status from testing field infos.
+
+ CheckIndex.Status.FieldNormStatus 
+
+ Status from testing field norms.
+
+ CheckIndex.Status.IndexSortStatus 
+
+ Status from testing index sort
+
+ CheckIndex.Status.LiveDocStatus 
+
+ Status from testing livedocs
+
+ CheckIndex.Status.PointsStatus 
+
+ Status from testing PointValues
+
+ CheckIndex.Status.SegmentInfoStatus 
+
+ Holds the status of each segment in the index.
+
+ CheckIndex.Status.SoftDeletsStatus 
+
+ Status from testing soft deletes
+
+ CheckIndex.Status.StoredFieldStatus 
+
+ Status from testing stored fields.
+
+ CheckIndex.Status.TermIndexStatus 
+
+ Status from testing term index.
+
+ CheckIndex.Status.TermVectorStatus 
+
+ Status from testing stored fields.
+
+ CheckIndex.Status.VectorValuesStatus 
+
+ Status from testing vector values
+
+ CheckIndex.VerifyPointsVisitor 
+
+ Walks the entire N-dimensional points space, verifying that all points fall within the last
+ cell's boundaries.
+
+ CodecReader 
+
+ LeafReader implemented by codec APIs.
+
+ CompositeReader 
+
+ Instances of this reader type can only be used to get stored fields from the underlying
+ LeafReaders, but it is not possible to directly retrieve postings.
+
+ CompositeReaderContext 
+
+ IndexReaderContext for CompositeReader instance.
+
+ ConcurrentMergeScheduler 
+
+ A MergeScheduler that runs each merge using a separate thread.
+
+ DirectoryReader 
+
+ DirectoryReader is an implementation of CompositeReader that can read indexes in a Directory .
+
+ DocIDMerger <T extends DocIDMerger.Sub > 
+
+ Utility class to help merging documents from sub-readers according to either simple concatenated
+ (unsorted) order, or by a specified index-time sort, skipping deleted documents and remapping
+ non-deleted documents.
+
+ DocIDMerger.Sub 
+
+ Represents one sub-reader being merged
+
+ DocsWithFieldSet 
+
+ Accumulator for documents that have a value for a field.
+
+ DocValues 
+
+ This class contains utility methods and constants for DocValues
+
+ EmptyDocValuesProducer 
+
+ Abstract base class implementing a DocValuesProducer that has no doc values.
+
+ ExitableDirectoryReader 
+
+ The ExitableDirectoryReader wraps a real index DirectoryReader and allows for a
+ QueryTimeout implementation object to be checked periodically to see if the thread should
+ exit or not.
+
+ ExitableDirectoryReader.ExitableFilterAtomicReader 
+
+ Wrapper class for another FilterAtomicReader.
+
+ ExitableDirectoryReader.ExitableSubReaderWrapper 
+
+ Wrapper class for a SubReaderWrapper that is used by the ExitableDirectoryReader.
+
+ ExitableDirectoryReader.ExitableTerms 
+
+ Wrapper class for another Terms implementation that is used by ExitableFields.
+
+ ExitableDirectoryReader.ExitableTermsEnum 
+
+ Wrapper class for TermsEnum that is used by ExitableTerms for implementing an exitable
+ enumeration of terms.
+
+ FieldInfo 
+
+ Access to the Field Info file that describes document fields and whether or not they are indexed.
+
+ FieldInfos 
+
+ Collection of FieldInfo s (accessible by number or by name).
+
+ FieldInvertState 
+
+ This class tracks the number and position / offset parameters of terms being added to the index.
+
+ Fields 
+
+ Provides a Terms index for fields that have it, and lists which fields do.
+
+ FilterBinaryDocValues 
+
+ Delegates all methods to a wrapped BinaryDocValues .
+
+ FilterCodecReader 
+
+ A FilterCodecReader contains another CodecReader, which it uses as its basic source
+ of data, possibly transforming the data along the way or providing additional functionality.
+
+ FilterDirectoryReader 
+
+ A FilterDirectoryReader wraps another DirectoryReader, allowing implementations to transform or
+ extend it.
+
+ FilterDirectoryReader.DelegatingCacheHelper 
+
+ A DelegatingCacheHelper is a CacheHelper specialization for implementing long-lived caching
+ behaviour for FilterDirectoryReader subclasses.
+
+ FilterDirectoryReader.SubReaderWrapper 
+
+ Factory class passed to FilterDirectoryReader constructor that allows subclasses to wrap the
+ filtered DirectoryReader's subreaders.
+
+ FilteredTermsEnum 
+
+ Abstract class for enumerating a subset of all terms.
+
+ FilterLeafReader 
+
+ A FilterLeafReader contains another LeafReader, which it uses as its basic source of
+ data, possibly transforming the data along the way or providing additional functionality.
+
+ FilterLeafReader.FilterFields 
+
+ Base class for filtering Fields implementations.
+
+ FilterLeafReader.FilterPostingsEnum 
+
+ Base class for filtering PostingsEnum implementations.
+
+ FilterLeafReader.FilterTerms 
+
+ Base class for filtering Terms implementations.
+
+ FilterLeafReader.FilterTermsEnum 
+
+ Base class for filtering TermsEnum implementations.
+
+ FilterMergePolicy 
+
+ A wrapper for MergePolicy instances.
+
+ FilterNumericDocValues 
+
+ Delegates all methods to a wrapped NumericDocValues .
+
+ FilterSortedDocValues 
+
+ Delegates all methods to a wrapped SortedDocValues .
+
+ FilterSortedNumericDocValues 
+
+ Delegates all methods to a wrapped SortedNumericDocValues .
+
+ FilterSortedSetDocValues 
+
+ Delegates all methods to a wrapped SortedSetDocValues .
+
+ FilterVectorValues 
+
+ Delegates all methods to a wrapped FloatVectorValues .
+
+ FloatVectorValues 
+
+ This class provides access to per-document floating point vector values indexed as KnnFloatVectorField .
+
+ Impact 
+
+ Per-document scoring factors.
+
+ Impacts 
+
+ Information about upcoming impacts, ie.
+
+ ImpactsEnum 
+
+ Extension of PostingsEnum which also provides information about upcoming impacts.
+
+ IndexCommit 
+
+ Expert: represents a single commit into an index as seen by the IndexDeletionPolicy or
+ IndexReader .
+
+ IndexDeletionPolicy 
+
+ Expert: policy for deletion of stale index commits .
+
+ IndexFileNames 
+
+ This class contains useful constants representing filenames and extensions used by lucene, as
+ well as convenience methods for querying whether a file name matches an extension ( matchesExtension ), as well as generating file names from a
+ segment name, generation and extension ( fileNameFromGeneration , segmentFileName ).
+
+ IndexReader 
+
+ IndexReader is an abstract class, providing an interface for accessing a point-in-time view of an
+ index.
+
+ IndexReader.CacheKey 
+
+ A cache key identifying a resource that is being cached on.
+
+ IndexReaderContext 
+
+ A struct like class that represents a hierarchical relationship between IndexReader 
+ instances.
+
+ IndexSorter.DoubleSorter 
+
+ Sorts documents based on double values from a NumericDocValues instance
+
+ IndexSorter.FloatSorter 
+
+ Sorts documents based on float values from a NumericDocValues instance
+
+ IndexSorter.IntSorter 
+
+ Sorts documents based on integer values from a NumericDocValues instance
+
+ IndexSorter.LongSorter 
+
+ Sorts documents based on long values from a NumericDocValues instance
+
+ IndexSorter.StringSorter 
+
+ Sorts documents based on terms from a SortedDocValues instance
+
+ IndexUpgrader 
+
+ This is an easy-to-use tool that upgrades all segments of an index from previous Lucene versions
+ to the current segment file format.
+
+ IndexWriter 
+
+ An IndexWriter creates and maintains an index.
+
+ IndexWriter.DocStats 
+
+ DocStats for this index
+
+ IndexWriterConfig 
+
+ Holds all the configuration that is used to create an IndexWriter .
+
+ KeepOnlyLastCommitDeletionPolicy 
+
+ This IndexDeletionPolicy implementation that keeps only the most recent commit and
+ immediately removes all prior commits after a new commit is done.
+
+ LeafMetaData 
+
+ Provides read-only metadata about a leaf.
+
+ LeafReader 
+
+ LeafReader is an abstract class, providing an interface for accessing an index.
+
+ LeafReaderContext 
+
+ IndexReaderContext for LeafReader instances.
+
+ LiveIndexWriterConfig 
+
+ Holds all the configuration used by IndexWriter with few setters for settings that can be
+ changed on an IndexWriter instance "live".
+
+ LogByteSizeMergePolicy 
+
+ This is a LogMergePolicy that measures size of a segment as the total byte size of the
+ segment's files.
+
+ LogDocMergePolicy 
+
+ This is a LogMergePolicy that measures size of a segment as the number of documents (not
+ taking deletions into account).
+
+ LogMergePolicy 
+
+ This class implements a MergePolicy that tries to merge segments into levels of
+ exponentially increasing size, where each level has fewer segments than the value of the merge
+ factor.
+
+ MappedMultiFields 
+
+ A Fields implementation that merges multiple Fields into one, and maps around deleted
+ documents.
+
+ MergePolicy 
+
+ Expert: a MergePolicy determines the sequence of primitive merge operations.
+
+ MergePolicy.MergeSpecification 
+
+ A MergeSpecification instance provides the information necessary to perform multiple merges.
+
+ MergePolicy.OneMerge 
+
+ OneMerge provides the information necessary to perform an individual primitive merge operation,
+ resulting in a single new segment.
+
+ MergePolicy.OneMergeProgress 
+
+ Progress and state for an executing merge.
+
+ MergeRateLimiter 
+
+ This is the RateLimiter that IndexWriter assigns to each running merge, to give
+ MergeScheduler s ionice like control.
+
+ MergeScheduler 
+
+ Expert: IndexWriter uses an instance implementing this interface to execute the merges
+ selected by a MergePolicy .
+
+ MergeState 
+
+ Holds common state used during segment merging.
+
+ MultiBits 
+
+ Concatenates multiple Bits together, on every lookup.
+
+ MultiDocValues 
+
+ A wrapper for CompositeIndexReader providing access to DocValues.
+
+ MultiDocValues.MultiSortedDocValues 
+
+ Implements SortedDocValues over n subs, using an OrdinalMap
+
+ MultiDocValues.MultiSortedSetDocValues 
+
+ Implements MultiSortedSetDocValues over n subs, using an OrdinalMap
+
+ MultiFields 
+
+ Provides a single Fields term index view over an IndexReader .
+
+ MultiLeafReader 
+
+ Utility methods for working with a IndexReader as if it were a LeafReader .
+
+ MultiPostingsEnum 
+
+ Exposes PostingsEnum , merged from PostingsEnum API of sub-segments.
+
+ MultiPostingsEnum.EnumWithSlice 
+
+ Holds a PostingsEnum along with the corresponding ReaderSlice .
+
+ MultiReader 
+
+ A CompositeReader which reads multiple indexes, appending their content.
+
+ MultiTerms 
+
+ Exposes flex API, merged from flex API of sub-segments.
+
+ MultiTermsEnum 
+
+ Exposes TermsEnum API, merged from TermsEnum API of sub-segments.
+
+ NoDeletionPolicy 
+
+ An IndexDeletionPolicy which keeps all index commits around, never deleting them.
+
+ NoMergePolicy 
+
+ A MergePolicy which never returns merges to execute.
+
+ NoMergeScheduler 
+
+ A MergeScheduler which never executes any merges.
+
+ NumericDocValues 
+
+ A per-document numeric value.
+
+ OneMergeWrappingMergePolicy 
+
+ A wrapping merge policy that wraps the MergePolicy.OneMerge 
+ objects returned by the wrapped merge policy.
+
+ OrdinalMap 
+
+ Maps per-segment ordinals to/from global ordinal space, using a compact packed-ints
+ representation.
+
+ OrdTermState 
+
+ An ordinal based TermState 
+
+ ParallelCompositeReader 
+
+ An CompositeReader which reads multiple, parallel indexes.
+
+ ParallelLeafReader 
+
+ An LeafReader which reads multiple, parallel indexes.
+
+ PersistentSnapshotDeletionPolicy 
+
+ A SnapshotDeletionPolicy which adds a persistence layer so that snapshots can be
+ maintained across the life of an application.
+
+ PointValues 
+
+ Access to indexed numeric values.
+
+ PostingsEnum 
+
+ Iterates through the postings.
+
+ PrefixCodedTerms 
+
+ Prefix codes term instances (prefixes are shared).
+
+ PrefixCodedTerms.Builder 
+
+ Builds a PrefixCodedTerms: call add repeatedly, then finish.
+
+ PrefixCodedTerms.TermIterator 
+
+ An iterator over the list of terms stored in a PrefixCodedTerms .
+
+ QueryTimeoutImpl 
+
+ An implementation of QueryTimeout that can be used by the ExitableDirectoryReader 
+ class to time out and exit out when a query takes a long time to rewrite.
+
+ ReaderManager 
+
+ Utility class to safely share DirectoryReader instances across multiple threads, while
+ periodically reopening.
+
+ ReaderSlice 
+
+ Subreader slice from a parent composite reader.
+
+ ReaderUtil 
+
+ Common util methods for dealing with IndexReader s and IndexReaderContext s.
+
+ SegmentCommitInfo 
+
+ Embeds a [read-only] SegmentInfo and adds per-commit fields.
+
+ SegmentInfo 
+
+ Information about a segment such as its name, directory, and files related to the segment.
+
+ SegmentInfos 
+
+ A collection of segmentInfo objects with methods for operating on those segments in relation to
+ the file system.
+
+ SegmentInfos.FindSegmentsFile <T> 
+
+ Utility class for executing code that needs to do something with the current segments file.
+
+ SegmentReader 
+
+ IndexReader implementation over a single segment.
+
+ SegmentReadState 
+
+ Holder class for common parameters used during read.
+
+ SegmentWriteState 
+
+ Holder class for common parameters used during write.
+
+ SerialMergeScheduler 
+
+ A MergeScheduler that simply does each merge sequentially, using the current thread.
+
+ SimpleMergedSegmentWarmer 
+
+ A very simple merged segment warmer that just ensures data structures are initialized.
+
+ SingleTermsEnum 
+
+ Subclass of FilteredTermsEnum for enumerating a single term.
+
+ SlowCodecReaderWrapper 
+
+ Wraps arbitrary readers for merging.
+
+ SlowImpactsEnum 
+
+ ImpactsEnum that doesn't index impacts but implements the API in a legal way.
+
+ SnapshotDeletionPolicy 
+
+ An IndexDeletionPolicy that wraps any other IndexDeletionPolicy and adds the
+ ability to hold and later release snapshots of an index.
+
+ SoftDeletesDirectoryReaderWrapper 
+
+ This reader filters out documents that have a doc values value in the given field and treat these
+ documents as soft deleted.
+
+ SoftDeletesRetentionMergePolicy 
+
+ This MergePolicy allows to carry over soft deleted documents across merges.
+
+ SortedDocValues 
+
+ A per-document byte[] with presorted values.
+
+ SortedNumericDocValues 
+
+ A list of per-document numeric values, sorted according to Long.compare(long, long) .
+
+ SortedSetDocValues 
+
+ A multi-valued version of SortedDocValues .
+
+ Sorter 
+
+ Sorts documents of a given index by returning a permutation on the document IDs.
+
+ Sorter.DocMap 
+
+ A permutation of doc IDs.
+
+ SortFieldProvider 
+
+ Reads/Writes a named SortField from a segment info file, used to record index sorts
+
+ SortingCodecReader 
+
+ An CodecReader which supports sorting documents by a given Sort .
+
+ StandardDirectoryReader 
+
+ Default implementation of DirectoryReader .
+
+ StoredFields 
+
+ API for reading stored fields.
+
+ StoredFieldVisitor 
+
+ Expert: provides a low-level means of accessing the stored field values in an index.
+
+ Term 
+
+ A Term represents a word from text.
+
+ Terms 
+
+ Access to the terms in a specific field.
+
+ TermsEnum 
+
+ Iterator to seek ( TermsEnum.seekCeil(BytesRef) , TermsEnum.seekExact(BytesRef) ) or step through
+ ( BytesRefIterator.next() terms to obtain frequency information ( TermsEnum.docFreq() ), PostingsEnum or
+ PostingsEnum for the current term ( TermsEnum.postings(org.apache.lucene.index.PostingsEnum) .
+
+ TermState 
+
+ Encapsulates all required internal state to position the associated TermsEnum without
+ re-seeking.
+
+ TermStates 
+
+ Maintains a IndexReader TermState view over IndexReader instances
+ containing a single term.
+
+ TermVectors 
+
+ API for reading term vectors.
+
+ TieredMergePolicy 
+
+ Merges segments of approximately equal size, subject to an allowed number of segments per tier.
+
+ TieredMergePolicy.MergeScore 
+
+ Holds score and explanation for a single candidate merge.
+
+ TwoPhaseCommitTool 
+
+ A utility for executing 2-phase commit on several objects.
+
+ UpgradeIndexMergePolicy 
+
+ This MergePolicy is used for upgrading all existing segments of an index when calling
+ IndexWriter.forceMerge(int) .
+
+ VectorValues 
+ Deprecated.
+ use FloatVectorValues instead
+
+ Enum Summary 
+
+ Enum 
+ Description 
+
+ DocValuesType 
+
+ DocValues types.
+
+ FilteredTermsEnum.AcceptStatus 
+
+ Return value, if term should be accepted or the iteration should END .
+
+ IndexOptions 
+
+ Controls how much information is stored in the postings lists.
+
+ IndexWriterConfig.OpenMode 
+
+ Specifies the open mode for IndexWriter .
+
+ MergePolicy.OneMergeProgress.PauseReason 
+
+ Reason for pausing the merge thread.
+
+ MergeTrigger 
+
+ MergeTrigger is passed to MergePolicy.findMerges(MergeTrigger, SegmentInfos,
+ MergePolicy.MergeContext) to indicate the event that triggered the merge.
+
+ PointValues.Relation 
+
+ Used by PointValues.intersect(org.apache.lucene.index.PointValues.IntersectVisitor) to check how each recursive cell corresponds to the query.
+
+ StoredFieldVisitor.Status 
+
+ Enumeration of possible return values for StoredFieldVisitor.needsField(org.apache.lucene.index.FieldInfo) .
+
+ TermsEnum.SeekStatus 
+
+ Represents returned result from TermsEnum.seekCeil(org.apache.lucene.util.BytesRef) .
+
+ VectorEncoding 
+
+ The numeric datatype of the vector values.
+
+ VectorSimilarityFunction 
+
+ Vector similarity function; used in search to return top K most similar vectors to a target
+ vector.
+
+ Exception Summary 
+
+ Exception 
+ Description 
+
+ CheckIndex.CheckIndexException 
+
+ The marker RuntimeException used by CheckIndex APIs when index integrity failure is detected.
+
+ CorruptIndexException 
+
+ This exception is thrown when Lucene detects an inconsistency in the index.
+
+ ExitableDirectoryReader.ExitingReaderException 
+
+ Exception that is thrown to prematurely terminate a term enumeration.
+
+ IndexFormatTooNewException 
+
+ This exception is thrown when Lucene detects an index that is newer than this Lucene version.
+
+ IndexFormatTooOldException 
+
+ This exception is thrown when Lucene detects an index that is too old for this Lucene version
+
+ IndexNotFoundException 
+
+ Signals that no index was found in the Directory.
+
+ MergePolicy.MergeAbortedException 
+
+ Thrown when a merge was explicitly aborted because IndexWriter.abortMerges() was called.
+
+ MergePolicy.MergeException 
+
+ Exception thrown if there are any problems while executing a merge.
+
+ TwoPhaseCommitTool.CommitFailException 
+
+ Thrown by TwoPhaseCommitTool.execute(TwoPhaseCommit...) when an object fails to
+ commit().
+
+ TwoPhaseCommitTool.PrepareCommitFailException 
+
+ Thrown by TwoPhaseCommitTool.execute(TwoPhaseCommit...) when an object fails to
+ prepareCommit().
+
+ Skip navigation links 
+
+ Overview 
+
+ Package
+
+ Class
+
+ Use 
+
+ Tree 
+
+ Deprecated 
+
+ Index 
+
+ Help 
+
+ All Classes 
+
+ Copyright © 2000-2024 Apache Software Foundation. All Rights Reserved.

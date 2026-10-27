@@ -110,6 +110,14 @@ SESSION_CITIZEN_SQL = {
         "WHERE citizen_id=?",
         "UPDATE citizens SET account_id=? WHERE citizen_id=?",
     ),
+    # 2026-10-26（撞车自撞修复 T02）：`_session_labels_for`——推送候选要按**会话**取
+    # 可读名（`名字·dsh#88f9`），所以它查一次 citizens 拿 display_name / host /
+    # created_at。这是**声明出来的新读点**（上面 5 个函数的语句一字未改），
+    # 而且从今往后它的 SQL 也被这条判据逐字冻结。
+    "_session_labels_for": (
+        "SELECT citizen_id, display_name, host, created_at FROM citizens "
+        "WHERE citizen_id IN (",
+    ),
 }
 
 # 派生的常量（改一处忘另一处就会在判据 I 里当场红）。
@@ -125,10 +133,19 @@ EXPECTED_STMT_COUNT = sum(len(v) for v in SESSION_CITIZEN_SQL.values())
 # **这是用户明确批准的工具数变更（14 → 15）**，理由：在此之前 MCP 面没有任何
 # 产出 token 的口子，AI 只能去跑 CLI，而 CLI 的会话键不同 → 建出第二个公民、
 # 归属分裂且无法合并。`session_start` 是那个缺口的唯一补齐方式。
+#
+# 2026-10-26（T05 / B3）：新增 `kb`（读：vaults/tree/open/search）与 `kb_write`
+# （写：create/append/update）。**读与写刻意分成两个工具**——它们是两个权限位
+# （裁决 C2）；合成一个后，"只想看目录"的调用也会拿到一份写权限的说明书。
+# 这两个工具的 schema 与 `docs/架构设计-B1B2B3-v0.1.md` §3.3 逐字一致，
+# 且**都不含 token**（由 `_attach_token` 统一补，手抄一份会在 import 期抛错）。
 MCP_TOOL_NAMES = ["remember", "recall", "neighbors", "resolve_code", "read_body",
                   "add_project", "supersede", "whoami", "register", "rename_citizen",
                   "close_project", "reopen_project", "inject", "healthcheck",
-                  "session_start", "board"]
+                  "session_start", "board", "kb", "kb_write",
+                  # 2026-10-27（语料层 T03）：18 → 19，新增 `corpus`
+                  # （search/read/stats 三读动作；主理人已批准的设计契约变更）。
+                  "corpus"]
 
 _SQL_START = re.compile(r"^(SELECT|INSERT|UPDATE|DELETE|PRAGMA|ALTER|CREATE|REPLACE)\b", re.I)
 
@@ -292,14 +309,32 @@ class FishIdentityP1bTest(unittest.TestCase):
                           f"{where}：end 之后校验必须失败")
 
     def _assert_no_token_on_disk(self, bases, token, where=""):
-        """判据 G 的断言：这些目录树下每一个文件都不含 token 明文。"""
+        """判据 G 的断言：这些目录树下每一个**可读**文件都不含 token 明文。
+
+        2026-10-27：`data/corpus.sqlite-shm` 这类运行时文件会被采集进程独占锁住
+        （Windows 上 PermissionError），旧实现直接崩成 ERROR——那不是"发现泄漏"，
+        是"判据不会处理判不到"。改成：跳过被锁文件并**记录**；被锁文件必须全部在
+        `data/`（运行时）下，否则说明判据有盲区，响亮失败。
+        """
         needle = token.encode("utf-8")
-        hits = []
+        hits, skipped = [], []
         for base in bases:
             for path in Path(base).rglob("*"):
-                if path.is_file() and needle in path.read_bytes():
+                if not path.is_file():
+                    continue
+                try:
+                    data = path.read_bytes()
+                except PermissionError:
+                    skipped.append(str(path))
+                    continue
+                except OSError:
+                    continue
+                if needle in data:
                     hits.append(str(path.relative_to(Path(base).parent)))
         self.assertEqual(hits, [], f"{where}：token 明文出现在这些文件里：{hits}")
+        outside_data = [s for s in skipped if "/data/" not in s.replace("\\", "/")]
+        self.assertEqual(outside_data, [],
+                         f"{where}：非运行时文件读不了，判据 G 不完整：{outside_data[:5]}")
 
     def _assert_tool_table_frozen(self, where=""):
         """判据 H 的断言：MCP 工具表一字未变，且没有 session 类入口。"""
@@ -827,10 +862,11 @@ class FishIdentityP1bTest(unittest.TestCase):
         """
         counts = {name: len(v) for name, v in SESSION_CITIZEN_SQL.items()}
         # 2026-10-25：4 → 5。多出来的是 `start_session`（`--citizen` 校验）。
-        # 这是**声明过的契约变更**（见 SESSION_CITIZEN_SQL 里的注释），
-        # 不是放宽判据——原来 4 个函数的语句一字未改，仍是逐条冻结的。
-        self.assertEqual(len(counts), 5, "基线自检：应为 5 个函数")
-        self.assertEqual(EXPECTED_STMT_COUNT, 7, "基线自检：应为 7 条语句")
+        # 2026-10-26：5 → 6（`_session_labels_for`，会话维度的可读名）。
+        # 两次都是**声明过的契约变更**（见 SESSION_CITIZEN_SQL 里的注释），
+        # 不是放宽判据——原来那些函数的语句一字未改，仍是逐条冻结的。
+        self.assertEqual(len(counts), 6, "基线自检：应为 6 个函数")
+        self.assertEqual(EXPECTED_STMT_COUNT, 8, "基线自检：应为 8 条语句")
         got = citizens_sql_by_function(FISH)
         for func, stmts in SESSION_CITIZEN_SQL.items():
             with self.subTest(func=func):

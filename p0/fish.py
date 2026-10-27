@@ -16,16 +16,81 @@ BEGIN IMMEDIATE 并发分配 + rebuild 逻辑。
 """
 import argparse
 import datetime
+import fnmatch
 import hashlib
 import json
+import math
+
+import ntpath
 import os
 import re
 import secrets
 import shutil
 import sqlite3
+import stat
+import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
+
+# 共享原语（2026-10-26 · hooks 深度利用 T01）：路径/占用面、可读名、动作采集。
+# 三者都是纯 stdlib 小模块，hook 侧也要 import 它们——**判定只许有一份实现**，
+# 所以 fish 从这里 import 并原样再导出（`fish.surface_hit` 等旧名字仍然可用）。
+import fish_activity
+import fish_naming
+import fish_surface
+from fish_surface import normalize_surface, surface_hit  # noqa: F401 —— 对外仍是 fish 的名字
+
+# 共享原语（2026-10-27 · 拆包 T02）：时间 / 摘要 / 文本计数只有一份实现，
+# 家在 `fish_common`。`fish.now_utc` 等旧名字继续可用，且与 `fish_common.now_utc`
+# 是**同一个对象**（`from … import` 再导出，不是复制一份）。
+import fish_common  # noqa: F401 —— 模块本身也要在（判据 J1d 查对象同一性）
+from fish_common import (  # noqa: F401
+    _exc_text, count_tokens, fts_match_expr, fts_text, index_tokens, iso_local,
+    now_utc, ulid)
+
+# 原始对话语料层（2026-10-27 · 语料层 T01/T02）：独立库 `corpus.sqlite`，与主库零耦合。
+# 项目/公民解析器以回调注入（这里不把 fish 的解析逻辑搬进语料模块，避免循环导入）。
+import fish_corpus  # noqa: F401
+from fish_corpus import CorpusError, CorpusNotReady  # noqa: F401
+
+# 知识库（B3）整体搬进 `fish_kb`（2026-10-27 · 拆包 T03 · 设计 §1.2/§1.4）。
+# 下面这些名字是**显式再导出**：`fish.kb_tree` / `fish.KBError` / `fish._strict_bool`
+# 全部继续可用，且与 `fish_kb.<name>` 是**同一个对象**。
+# 为什么不用 `import *`：漏名是静默的，而这里每个名字都被判据 J1 逐个查对象同一性。
+# 生成/校验：`python tools/gen_reexport.py --check`
+from fish_kb import (  # noqa: F401
+    KBError, KB_ACTIONS, KB_DEFAULT_IGNORE_GLOBS, KB_DEFAULT_MAX_OPEN_BYTES,
+    KB_ERROR_CODES, KB_MAGIC_SIGNATURES, KB_MANDATORY_DENY, KB_MAX_CONTENT_BYTES,
+    KB_MAX_ITEMS_PER_DIR, KB_MAX_LIMIT, KB_MEDIA_EXTS, KB_META_KEYS, KB_RESULTS,
+    KB_SAME_NAME_LIMIT, KB_SEARCH_MAX_FILE_BYTES, KB_SENSITIVE_PATTERNS,
+    KB_TREE_MAX_DEPTH, KB_UNATTRIBUTED, KB_VIAS, _KB_ACCESS_DDL, _KB_ACCESS_INDEXES,
+    _KB_DEVICE_NAMES, _KB_FIT_MARKER_RE, _KB_FM_KEY_RE, _KB_PASSWORD_PATTERN,
+    _KB_PASSWORD_RE, _KB_PATH_STATS_COLUMNS, _KB_PATH_STATS_VIEW, _KB_SCHEMA,
+    _KB_TREE_DEPTH_RULE, _KB_VAULT_COLS, _KB_VAULT_DDL, _KB_VAULT_INDEXES,
+    _KB_VAULT_SELECT, _STRICT_FALSE, _STRICT_TRUE, _kb_app_running,
+    _kb_backfill_mandatory_globs, _kb_backup_finalize, _kb_backup_meta,
+    _kb_backup_slug, _kb_backup_stats, _kb_cmd_backup, _kb_cmd_doctor, _kb_cmd_open,
+    _kb_cmd_rollback, _kb_cmd_search, _kb_cmd_stats, _kb_cmd_tree, _kb_cmd_vault,
+    _kb_cmd_write, _kb_commands_ready, _kb_dir_bytes, _kb_effective_globs,
+    _kb_exit_code, _kb_first_reparse, _kb_fit_text, _kb_fit_text_with_tail,
+    _kb_fmt_mtime, _kb_guard, _kb_ignored, _kb_is_device_name, _kb_is_reparse_entry,
+    _kb_is_sensitive_name, _kb_json_globs, _kb_judge_component, _kb_log_quiet,
+    _kb_merge_frontmatter, _kb_meta_json, _kb_obsidian_cli, _kb_open_impl,
+    _kb_parse_budget, _kb_parse_frontmatter_args, _kb_quote, _kb_read_content_file,
+    _kb_reject, _kb_rel_posix, _kb_render_document, _kb_same_name, _kb_scalar,
+    _kb_scan_counts, _kb_search_impl, _kb_search_multi, _kb_sensitive_notice,
+    _kb_split_frontmatter, _kb_tree_dir, _kb_tree_impl, _kb_tree_lines,
+    _kb_tree_tail_hint, _kb_validate_globs, _kb_vault_brief, _kb_vault_dict,
+    _kb_vault_line, _kb_vault_norm, _kb_walk, _kb_within_budget, _kb_write_impl,
+    _strict_bool, kb_atomic_write, kb_backup, kb_backup_prune, kb_detect_eol,
+    kb_detect_text, kb_doctor, kb_log_access, kb_open, kb_read_text, kb_resolve_target,
+    kb_rollback, kb_search, kb_sha256_bytes, kb_sha256_file, kb_stats, kb_tree,
+    kb_vault_add, kb_vault_get, kb_vault_list, kb_vault_remove, kb_vault_scan,
+    kb_vault_set_default, kb_vault_set_mode, kb_write,
+)
+
 
 DEFAULT_ROOT = Path(__file__).resolve().parent / "data"
 
@@ -37,6 +102,10 @@ CONFIG_DEFAULTS = {
     "neighbors.cross_project": (False, "bool", None),
     "neighbors.include_dormant": (False, "bool", None),
     "timezone": ("Asia/Shanghai", "string", None),
+    # B1 门面根（2026-10-26）：空 = 按标准布局推导（<项目根>/fish-home）；非空 = 显式覆盖。
+    # 为什么做成配置而不是只认常量：换布局（p0/fish-home）不必改代码；同时它是
+    # "故意指错"的变异入口——指到 data_root 里面必须启动即报错，见 resolve_home_root。
+    "layout.home_root": ("", "string", None),
     # 2026-10-25（用户要求 C）：看板按日切、**没有别的东西会关旧板**，
     # 所以 open 板会日复一日累积。sweep 把 N 天前的 open 板自动归档（不删）。
     # 为什么是 7 天：看板是"此刻"——一周前的板对"谁在动哪块"已经零价值，
@@ -59,6 +128,15 @@ CONFIG_DEFAULTS = {
     # 注入风格：gentle 温和（只标注这是状态）/ strong 强化（要求回答前先参考）
     # 用户反馈（2026-10-22）：呈现方式应可配，实际效果取决于宿主 AI 的服从度
     "inject.style": ("gentle", "enum", ["gentle", "strong"]),
+    # 2026-10-26（FB-02）：规矩段每栏最多列几条。原来是写死的常量
+    # （`RULES_PER_SOURCE_LIMIT = 3`）——写死意味着"想多看一条就得改代码"，
+    # 而它恰恰是**因人而异**的口味：本库 rule 已有 39 条，3 条是默认，不是上限的真理。
+    # 范围 1–10 在读取处夹紧（不新增校验分支：越界值应被纠正而不是让注入包报错）。
+    "inject.rules_per_source": (3, "int", None),
+    # 2026-10-26（FB-02）：看板段最多吃预算的多少比例。
+    # 旧实现里看板**没有自己的上限**：看板一长就整段膨胀，而预算裁剪只能整段丢，
+    # 于是"看板多了"会连带把别段挤掉。0.25 = 1/4，按 1600 预算约 400 token。
+    "inject.board_max_ratio": (0.25, "float", None),
     # ── 身份：必须区分「主人」与「当前行动者」────────────────────────────
     # 教训（2026-10-22 实测）：只用一个 default_citizen 时，AI 调 whoami 会拿到
     # 主人的档案，然后自称"我是安逸"。违反"助手 ≠ 安逸本人"。
@@ -124,6 +202,66 @@ CONFIG_DEFAULTS = {
     # Stop 是"这一轮生成结束"不是"会话结束"），所以"会话结束"没有事件可听，
     # 只能靠活跃度判据——那就更不能替用户拍一个数。
     "session.archive_after_days": (0, "int", None),
+
+    # ── 语料层（2026-10-27 复审 🟠-1）──────────────────────────────────────
+    # 日报里的语料采集**默认关闭**：全量采集是分钟级动作（实测 515 个 DSH 会话 +
+    # 4GB WorkBuddy），挂上日报就等于每个日报用例/每次定时任务都去扫真实日志。
+    # 开启：`fish config set corpus.daily_enabled 1`；临时关断：FISH_CORPUS_DISABLE=1。
+    "corpus.daily_enabled": (False, "bool", None),
+    # 单帧解压上限（A①）：首采里 10+ 个帧超过旧的 8 MiB 被降级，实测最大帧 152 KB。
+    "corpus.max_frame_bytes": (64 << 20, "int", None),
+
+    # ── 动作采集（2026-10-26 · hooks 深度利用 T02）───────────────────────────
+    # 事实表 `tool_activity` 的开关与保留策略。**只记写类**（读不改变任何东西，
+    # 落库只会撑爆表与看板），且只记路径/目录/摘要（内容不落盘，见 §10.3 隐私纪律）。
+    "activity.enabled": (True, "bool", None),
+    # 14 天而不是 7：要能回答"一周分布"并留一天余量；表很小（单行 ~200B）。
+    # 实测 >30MB 时优先降这个值，而不是砍字段。
+    "activity.retention_days": (14, "int", None),
+    # 同一 session+目录在窗口内合并成「N 次写」的聚合窗（也是"正在写"的窗口）。
+    "activity.aggregate_window_min": (30, "int", None),
+    # 快照写入节流：每次工具调用都写一个文件 + os.replace 会明显加重 IO。
+    "activity.snapshot_min_interval_sec": (20, "int", None),
+    # 快照的最大年龄：超过就当作"没有快照"（PreToolUse 最坏漏报 = 放行）。
+    "activity.snapshot_max_age_sec": (3600, "int", None),
+    # presence.auto_* 缓存的刷新节流（写它要 UPDATE 一行，不必每次写动作都刷）。
+    "activity.presence_cache_min_interval_sec": (20, "int", None),
+
+    # ── 自动在场 + 撞车（2026-10-26 · T03/T05）─────────────────────────────
+    # 自动行算登记（用户 2026-10-26 拍板）：SessionStart 就建/刷自动行。
+    "board.auto_presence": (True, "bool", None),
+    # 会话维度**读侧**降级开关（2026-10-26 · 撞车自撞修复 §6.3）：
+    #   true  = 会话行展开（看板 / board show 一行/会话，默认）；
+    #   false = 读侧按公民折叠回「一行/公民」（事故止血，秒级可回，库里一条不删）。
+    # 为什么**写侧**不跟着降级：`ON CONFLICT` 的冲突目标必须与某个唯一约束逐列一致，
+    # 三列主键下写两列目标会直接报 `ON CONFLICT clause does not match`；写侧的回退手段
+    # 是 `rollback_presence_session.py`（重建两列主键），不是"换一个冲突目标"。
+    "board.presence_session_rows": (True, "bool", None),
+    # 5 分钟 = active：比 idle（30 分钟）窄，因为"在动"要比"在不在"更严格。
+    "board.active_window_sec": (300, "int", None),
+    # 自动面的"正在写"窗口：与 aggregate_window_min 同量级（此刻谁在这块）。
+    "board.collision_window_min": (30, "int", None),
+    # **三态**（用户 2026-10-26 拍板 + 主理人决策）：off / warn（默认）/ ask。
+    # 为什么默认 warn 而不是 True/ask：当前宿主 approvals disabled 时 `ask` 会被
+    # **自动拒绝**——那会把"撞车提示"变成"撞车拒写"，正好违背它的目的。
+    # warn = 不阻塞，靠 activity_overlap 推送 + 看板重叠提示提醒；ask 才真的弹批准。
+    "board.collision_ask": ("warn", "enum", ["off", "warn", "ask"]),
+    # 同 (session, target) 的冷却：只防"同一次调用重复弹窗"，不当作"用户已批准"。
+    "board.collision_ask_cooldown_sec": (60, "int", None),
+    # 路径判定的最小段数：1 段的面（`p0`/`src`/`docs`）到处同名，用它判撞车必然误报。
+    "board.collision_min_segments": (2, "int", None),
+
+    # ── 提示词递记忆（2026-10-26 · T04）────────────────────────────────────
+    "push.prompt_enabled": (True, "bool", None),
+    "push.prompt_budget_tokens": (120, "int", None),
+    "push.prompt_max_items": (2, "int", None),
+    # 90s：连续两条消息之间塞两次记忆，读者只会跳过。
+    "push.prompt_min_interval_sec": (90, "int", None),
+    "push.prompt_min_relevance": (0.6, "float", None),
+    # 陈旧性硬门槛：与 band 的 stale 阈值同值但**可独立调**（见 §6.5）。
+    "push.prompt_stale_floor": (0.35, "float", None),
+    # 同会话 24h 内不重复推同一编码（与 _recent_pushed_codes 同一口径）。
+    "push.prompt_exclude_hours": (24, "int", None),
 }
 
 _DEFAULT_DECAY = {k: v[0] for k, v in CONFIG_DEFAULTS.items() if k.startswith("decay.")}
@@ -131,16 +269,54 @@ _DEFAULT_DECAY = {k: v[0] for k, v in CONFIG_DEFAULTS.items() if k.startswith("d
 KINDS = ("resident", "visitor", "role", "system")
 
 
+# ══════════════════════════════════════════════ B1/B2/B3 共享常量（2026-10-26）
+# 依据：`docs/架构设计-B1B2B3-v0.1.md` §1.4 / §1.5 / §2.2 / §2.3 / §3.2 / §5.7。
+# 为什么集中在这里：门面渲染、看板落点、知识库三块共用同一批取值；散在各自段里，
+# "改一处忘一处"是这类常量最常见的漂移方式（代码地图里 17 vs 16 的幽灵工具就是这么来的）。
+
+HOME_DIRNAME = "fish-home"            # 门面根目录名（与 p0/ 同级；裁决 Q3）
+LAYOUT_TOP = ("00-首页", "10-项目库", "20-记忆库", "30-知识库", "90-系统")
+LAYOUT_MAX_DEPTH = 3                  # HOME-1：任何文件相对 home_root 深度 ≤3
+LAYOUT_MEMORY_DIR = "20-记忆库"
+LAYOUT_SYSTEM_DIR = "90-系统"
+LAYOUT_STATUS_TABLE = "10-项目库/项目状态表.md"
+
+# R1（主理人裁决 · 2026-10-26）：`20-记忆库/索引-YYYY-MM.md` 的文件预算。
+# PRD §6.3 的 "32 KB" 来自看板文件撑到 396 KB 而死的那个实证，但**索引不是看板**：
+# 它不进注入上下文、按月份分片、是人逐行读的清单——32 KB 会把一个正常月份（246 行/65 KB）
+# 误判成"超预算"。裁决：硬上限 128 KB；超限时按行截断并在页内脚注明示（不静默丢行）。
+LAYOUT_INDEX_MAX_BYTES = 128 * 1024
+# 标题列上限（R1）：完整标题会把整行宽度吃掉，人读时"归属/路径"反而看不见。
+# 超出加 `…`；正文标题一字不改（只是在索引里省地方）。
+LAYOUT_INDEX_TITLE_MAX_CHARS = 48
+
+# B2 项目状态表（PST）· §4.8。六列顺序是契约（判据按列序断言，不按文案匹配）。
+PST_COLUMNS = ("项目", "状态", "最近活跃", "看板入口", "主责 AI", "未了事项")
+PST_OPEN_WINDOW_DAYS = 30            # Q5：与注入包 ATTENTION_OPEN_WINDOW_DAYS 同口径
+PST_OWNER_FALLBACK_DAYS = 7          # Q4：无开档期时回退"最近 7 天记忆 owner"
+# 三种显式 `—`：缺数据必须说清是哪一种，否则"没数据"和"没人"看起来一样（PST-5）。
+PST_DASH_NO_MEMORY = "—（无记忆）"
+PST_DASH_NO_BOARD = "—（今日无看板）"
+PST_DASH_NO_OWNER = "—（无开档期）"
+PST_DASH_NONE = "—"                  # 未了事项为 0
+PST_DASH_UNAVAILABLE = "—（数据源不可用）"
+
+# README 四要素（HOME-2）。判据按这四组关键词判，不认文案细节：
+#   ① `## 这是什么`  ② `## 能做什么`（必须含"不能"）
+#   ③ `## 谁在写`    ④ `生成时刻：` + "手改会被覆盖"
+README_SECTION_MARKERS = ("这是什么", "能做什么", "谁在写")
+README_STAMP_MARKERS = ("生成时刻：", "手改会被覆盖")
+README_NEGATIVE_WORD = "不能"
+
+# HOME-8 / §5.7：门面产物里绝不出现凭证形态。渲染后自检与 verify 共用同一份正则，
+# 两处各写一份就会出现"渲染拦得住、体检看不见"这种假绿。
+CREDENTIAL_PATTERNS = (
+    r"fsh_[A-Za-z0-9_-]{20,}",           # fish 会话凭证形态
+    r"token\s*=",                        # 环境变量 / 查询串里的 token=
+    r"BEGIN [A-Z ]*PRIVATE KEY",         # 私钥头
+)
+
 # ------------------------------------------------------------------ 基础
-
-def ulid() -> str:
-    ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)
-    return f"{ts:013d}{uuid.uuid4().hex[:13].upper()}"
-
-
-def now_utc() -> str:
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
 
 def normalize_occurred_at(value):
     """`occurred_at` 校验：缺省 = 现在；给了就必须是可解析的 ISO8601 UTC。
@@ -168,7 +344,6 @@ def parse_utc(s):
 
 def local_date() -> str:
     return datetime.datetime.now().strftime("%y%m%d")
-
 
 # ------------------------------------------------------ 推送地基 DDL（单一定义来源）
 # 依据：13-推送系统设计 §2 + 16 §5.6。这是推送系统的地基层，P0 必须先建：
@@ -539,14 +714,88 @@ _BOARDS_DDL = """CREATE TABLE IF NOT EXISTS boards (
 _PRESENCE_DDL = """CREATE TABLE IF NOT EXISTS presence (
   board_id      INTEGER NOT NULL REFERENCES boards(id),
   citizen_id    TEXT NOT NULL,
-  agent_id      TEXT,                     -- 会话/宿主侧标识（可为空）
+  -- ↓ 2026-10-26（撞车自撞修复 T01 · 设计 45 §2.1）：会话维度**进主键**。
+  --   为什么另加一列而不是复用 agent_id：agent_id 是"外部可读的宿主侧标识"，
+  --   它的历史值里有非会话形态（`codebuddy-主AI/ffd54d84`），拿它当权限级主键
+  --   等于把"猜出来的身份"焊进唯一约束。
+  --   为什么是空串而不是 NULL：NULL 在唯一约束里互不相等（NULL != NULL），
+  --   "同一公民的无会话行"每次插入都会变成新行——那比"合并成一行"更坏。
+  --   '' = 无会话归属（旧行 / 无凭证路径 / 未知来源），**不是**"某个会话"。
+  session_key   TEXT NOT NULL DEFAULT '',
+  agent_id      TEXT,                     -- 会话/宿主侧标识（自动行会存 session_key）
   status        TEXT NOT NULL DEFAULT 'active',  -- active | idle | left
   doing         TEXT,                     -- 一句话：在做什么（≤80 字，撞车判断靠它）
   surface       TEXT,                     -- 占用面（文件/目录前缀，逗号分隔）
   first_seen_at TEXT NOT NULL,
   last_seen_at  TEXT NOT NULL,
-  PRIMARY KEY (board_id, citizen_id)
+  -- ↓ 2026-10-26（hooks 深度利用 T02）：自动占用的**缓存**三列（真相在 tool_activity）。
+  --   auto_surface 只是"最近一次聚合的快照"，供外部读者/快照快速取用；
+  --   看板渲染、推送、撞车判定都以 tool_activity 的读时聚合为准。
+  --   否则「声明 vs 实际」又变成两份会漂的真相。
+  auto_surface  TEXT,                     -- 最近一次聚合的目录（逗号分隔，≤3）
+  auto_seen_at  TEXT,                     -- 最后一次写动作时间（UTC）
+  auto_source   TEXT                      -- session_start | session_inject | remember | activity
+  ,PRIMARY KEY (board_id, citizen_id, session_key)
 );"""
+
+# 旧库补列清单（顺序纪律：先建表 → 再补列 → 最后建索引）。
+# 声明必须是「可加到非空表上」的形态（SQLite 的 ALTER ADD COLUMN 不允许无默认值 NOT NULL）。
+_PRESENCE_NEW_COLS = (
+    ("auto_surface", "TEXT"),
+    ("auto_seen_at", "TEXT"),
+    ("auto_source", "TEXT"),
+)
+
+# `session_key` **刻意不在上面那份补列清单里**：它要连主键一起重建，走
+# `_ensure_presence_session`（补列与重建是同一次事务的两步，拆开就会留下
+# "有列、两列主键"的半迁移态——那正是 R3 要避免的形态）。
+_PRESENCE_V3_COLS = ("board_id", "citizen_id", "session_key", "agent_id", "status",
+                     "doing", "surface", "first_seen_at", "last_seen_at",
+                     "auto_surface", "auto_seen_at", "auto_source")
+
+# 目标主键（**顺序是契约**：判据 S24 按元组全等比对，不看集合）。
+_PRESENCE_PK_COLS = ("board_id", "citizen_id", "session_key")
+
+# 回填规则（迁移只跑一次；之后不再推断）：只认「已知宿主前缀 + 冒号 + 至少 1 字符」。
+# `?*` 里的 `?` 是必要的：GLOB 的 `*` 能匹配空串，少了 `?` 就会把 `dsh:` 这种空 id
+# 也当成会话键（那等于伪造证据）。非标准形态（`codebuddy-主AI/ffd54d84`：带 `/`、
+# 无 `:`）一律回填 ''，保留旧的"合并成一行"语义。
+_PRESENCE_SESSION_BACKFILL = (
+    "CASE WHEN agent_id IS NOT NULL AND ("
+    " agent_id GLOB 'dsh:?*' OR agent_id GLOB 'codebuddy:?*'"
+    " OR agent_id GLOB 'workbuddy:?*' OR agent_id GLOB 'cli:?*'"
+    " OR agent_id GLOB 'self:?*') THEN agent_id ELSE '' END"
+)
+
+# 回滚用的**历史形态**（两列主键）。只给 `presence_session_rollback` 建临时表用，
+# 不参与新建库——新库永远走 `_PRESENCE_DDL`（v3）。写死一份是刻意的：v2 从此冻结，
+# 它不该跟着 v3 的列增删漂。
+_PRESENCE_V2_DDL = """CREATE TABLE IF NOT EXISTS presence_v2 (
+  board_id      INTEGER NOT NULL REFERENCES boards(id),
+  citizen_id    TEXT NOT NULL,
+  agent_id      TEXT,
+  status        TEXT NOT NULL DEFAULT 'active',
+  doing         TEXT,
+  surface       TEXT,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at  TEXT NOT NULL,
+  auto_surface  TEXT,
+  auto_seen_at  TEXT,
+  auto_source   TEXT
+  ,PRIMARY KEY (board_id, citizen_id)
+);"""
+
+_PRESENCE_V2_COLS = ("board_id", "citizen_id", "agent_id", "status", "doing", "surface",
+                     "first_seen_at", "last_seen_at", "auto_surface", "auto_seen_at",
+                     "auto_source")
+
+
+class PresenceMigrationError(RuntimeError):
+    """presence 迁移失败。**原表一字不动**，调用方决定降级还是中止。
+
+    为什么是独立异常类型：迁移失败有两种处置（步 3 降级 / 步 6 回滚中止），
+    调用方必须能区分"迁移没做"与"别的地方出错"，否则只会 `except Exception` 静默吞掉。
+    """
 
 _BOARDS_INDEXES = (
     "CREATE INDEX IF NOT EXISTS ix_boards_scope ON boards(scope, scope_key, period_key)",
@@ -572,17 +821,72 @@ _BOARD_POSTS_INDEXES = (
 # 看板"已看到"快照（EVAL-261025-20，2026-10-25 修）：记录**每个公民上次注入时**
 # 看到的看板状态。推送候选拿它与当前状态比较——"你看完之后又有人动了"才推。
 # 为什么单独建表而不是塞进 config：config 是全局键值，多公民会互相覆盖。
+# 2026-10-27（P0-3）：主键升到 **(board_id, citizen_id, session_key)**。
+# 旧表按公民记"上次看到哪"——同公民多会话会互相吞推送（A 会话看过，B 会话就收不到
+# "板上有人动了"）。升三列后每个会话各有自己的快照；旧行迁成 session_key=''（无凭证会话）。
 _BOARD_SEEN_DDL = """CREATE TABLE IF NOT EXISTS board_seen (
   board_id         INTEGER NOT NULL,
   citizen_id       TEXT NOT NULL,
+  session_key      TEXT NOT NULL DEFAULT '',
   last_post_id     INTEGER NOT NULL DEFAULT 0,
   last_presence_at TEXT NOT NULL DEFAULT '',
   updated_at       TEXT NOT NULL,
-  PRIMARY KEY (board_id, citizen_id)
+  PRIMARY KEY (board_id, citizen_id, session_key)
 );"""
+_BOARD_SEEN_PK_COLS = ("board_id", "citizen_id", "session_key")
 _BOARD_TABLE_DDLS = (_BOARDS_DDL, _PRESENCE_DDL, _BOARD_POSTS_DDL, _BOARD_SEEN_DDL)
 _BOARD_SCHEMA = "\n" + "\n\n".join(_BOARD_TABLE_DDLS) + "\n"
 
+
+# ------------------------------------------------------ 动作流（2026-10-26 · T02）
+# 独立审计表，**不进记忆库**（设计 §4.1）：
+#   · 不进 `events`：事件流是不可变真相、要参与投影重建；动作流是低语义审计，
+#     进事件会让 rebuild_projection 多处理一类无投影价值的事件；
+#   · 不进 `memory_fts`/`recall`：会污染记忆检索（EVAL 建议 7）。
+# 两条都写成判据（见 test_activity）。
+_TOOL_ACTIVITY_DDL = """CREATE TABLE IF NOT EXISTS tool_activity (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  host        TEXT NOT NULL,          -- dsh | workbuddy（方言来源，便于分宿主统计）
+  session_key TEXT NOT NULL,          -- dsh:<session_id> / codebuddy:<session_id>
+  citizen_id  TEXT,                   -- 由 session_key 反查；查不到 NULL，不猜
+  project     TEXT,                   -- workspace_map 最长前缀；可空（不猜）
+  tool_name   TEXT NOT NULL,          -- 小写归一：write/edit/bash/...
+  action      TEXT NOT NULL,          -- write | exec（本批只落这两种）
+  path        TEXT,                   -- 相对项目根（无则相对 cwd），展示/聚合
+  path_dir    TEXT,                   -- 相对目录，聚合键
+  path_abs    TEXT,                   -- 归一化绝对路径，撞车判定（跨 cwd 可比）
+  args_digest TEXT,                   -- sha256(参数摘要)[:16]，**不含内容**
+  ok          INTEGER,                -- 1/0/NULL（NULL=未知，不假装成功）
+  seen_at     TEXT NOT NULL           -- UTC ISO（%Y-%m-%dT%H:%M:%SZ）
+);"""
+
+_ACTIVITY_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS ix_activity_seen ON tool_activity(seen_at)",
+    "CREATE INDEX IF NOT EXISTS ix_activity_session "
+    "ON tool_activity(session_key, seen_at DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_activity_citizen "
+    "ON tool_activity(citizen_id, seen_at DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_activity_dir "
+    "ON tool_activity(project, path_dir, seen_at DESC)",
+)
+_ACTIVITY_SCHEMA = "\n" + _TOOL_ACTIVITY_DDL + "\n"
+
+# 旧库补列清单（与 `_PRESENCE_NEW_COLS` 同理；当前与 DDL 逐列一致，
+# 留这份清单是为了"下次加列"时不用再想顺序，也为了让补列路径有单一入口）。
+_TOOL_ACTIVITY_COLS = (
+    ("host", "TEXT"),
+    ("session_key", "TEXT"),
+    ("citizen_id", "TEXT"),
+    ("project", "TEXT"),
+    ("tool_name", "TEXT"),
+    ("action", "TEXT"),
+    ("path", "TEXT"),
+    ("path_dir", "TEXT"),
+    ("path_abs", "TEXT"),
+    ("args_digest", "TEXT"),
+    ("ok", "INTEGER"),
+    ("seen_at", "TEXT"),
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -669,7 +973,8 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
   body_idx,
   tokenize='unicode61'
 );
-""" + _PUSH_SCHEMA + _IDENTITY_SCHEMA + _WORKSPACE_SCHEMA + _NAME_SCHEMA + _BOARD_SCHEMA
+""" + _PUSH_SCHEMA + _IDENTITY_SCHEMA + _WORKSPACE_SCHEMA + _NAME_SCHEMA + _BOARD_SCHEMA \
+    + _ACTIVITY_SCHEMA + _KB_SCHEMA
 
 
 def connect(root: Path) -> sqlite3.Connection:
@@ -804,12 +1109,476 @@ def _ensure_push_tables(conn: sqlite3.Connection):
                 pass
 
 
+def _presence_pk_cols_of(conn, table) -> tuple:
+    """某张表的主键列（按 `PRAGMA table_info` 的 pk 序）。表不存在 → `()`。"""
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    except sqlite3.Error:
+        return ()
+    keyed = sorted((int(r[5] or 0), str(r[1])) for r in rows if int(r[5] or 0) > 0)
+    return tuple(name for _seq, name in keyed)
+
+
+def _presence_pk_cols(conn) -> tuple:
+    """`presence` 当前主键列（按序）。**三列 = 已迁移，两列 = 未迁移/已降级**。"""
+    return _presence_pk_cols_of(conn, "presence")
+
+
+def _presence_columns(conn) -> tuple:
+    """`presence` 当前真实列名（按声明序）。表不存在 → `()`。"""
+    try:
+        return tuple(str(r[1]) for r in conn.execute("PRAGMA table_info(presence)"))
+    except sqlite3.Error:
+        return ()
+
+
+def _presence_has_session(conn) -> bool:
+    """`presence.session_key` 列在不在（读侧兜底的总开关，见设计 §2.1.1 的 F1/F2/F3）。
+
+    为什么不直接假定它在：迁移可能因"备份写不进"而**故意不升级**（设计步 5/6），
+    此时库还是两列形态，任何 `SELECT p.session_key` 都会 `no such column`。
+    读侧必须能应付这种过渡态——否则"宁可这次不升级"就变成了"这次直接罢工"。
+    """
+    return "session_key" in _presence_columns(conn)
+
+
+def _presence_write_shape(conn) -> tuple:
+    """返回 `(INSERT 是否带 session_key, ON CONFLICT 目标)`——写侧的**唯一**分叉点。
+
+    三列主键 → `(True, "board_id, citizen_id, session_key")`
+    两列主键（迁移未跑 / 故障降级）→ `(False, "board_id, citizen_id")`
+
+    为什么只按**主键**判、不按配置判：`ON CONFLICT` 的目标必须与某个唯一约束逐列
+    一致，否则 SQLite 直接报 `ON CONFLICT clause does not match`，签到与自动行全崩
+    （R2）。配置项 `board.presence_session_rows` 只影响读侧渲染（设计 §6.3）。
+    """
+    if _presence_pk_cols(conn) == _PRESENCE_PK_COLS:
+        return True, "board_id, citizen_id, session_key"
+    return False, "board_id, citizen_id"
+
+
+def _presence_data_root(conn):
+    """这个连接指向的数据目录（拿不到 → `None` → 迁移**只补列、不重建**）。
+
+    为什么不用 `conn_data_dir`：它对内存库会回落到 `DEFAULT_ROOT`（生产 data 目录），
+    于是测试里的 `:memory:` 连接会把备份写进生产目录——那是最难发现的一类污染。
+    """
+    try:
+        for row in conn.execute("PRAGMA database_list").fetchall():
+            if row[1] == "main" and row[2]:
+                return Path(row[2]).parent
+    except sqlite3.Error:
+        return None
+    return None
+
+
+def _presence_backup(conn, data_root) -> str:
+    """迁移前的库快照，返回路径；失败抛 `PresenceMigrationError`（**不迁移**）。
+
+    为什么用 SQLite 官方 backup API 而不是文件拷贝：WAL 模式下直接 copy 会拿到
+    **撕裂快照**（拷到一半的 WAL 还没合并），还原回去是一份不一致的库。
+    命名与既有 `data/_backups/index-before-*.sqlite` 同风格；**永不自动删**
+    （回滚点是人的凭据，不是缓存——与 `kb backup` 同一条纪律）。
+    """
+    if data_root is None:
+        raise PresenceMigrationError("拿不到数据目录，无法备份 → 本次不迁移（宁可不升级）")
+    out_dir = Path(data_root) / "_backups"
+    stamp = datetime.datetime.now().strftime("%y%m%d-%H%M%S")
+    dest = out_dir / f"index-before-presence-session-{stamp}.sqlite"
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dst = sqlite3.connect(str(dest))
+        try:
+            conn.backup(dst)
+        finally:
+            dst.close()
+    except (OSError, sqlite3.Error) as exc:
+        raise PresenceMigrationError(f"备份失败（{dest}）：{exc}") from exc
+    return str(dest)
+
+
+def _board_seen_columns(conn) -> tuple:
+    """`board_seen` 当前真实列名（按声明序）。表不存在 → `()`。"""
+    try:
+        return tuple(str(r[1]) for r in conn.execute("PRAGMA table_info(board_seen)"))
+    except sqlite3.Error:
+        return ()
+
+
+def _board_seen_write_shape(conn) -> tuple:
+    """`(INSERT 是否带 session_key, ON CONFLICT 目标)`——写侧唯一分叉点（P0-3）。
+
+    与 `_presence_write_shape` 同一条纪律：迁移可能因"备份写不进"而故意不升级，
+    此时库还是两列形态，写侧必须自动降级，否则"宁可这次不升级"会变成"这次直接崩"。
+    """
+    if "session_key" in _board_seen_columns(conn):
+        return True, "board_id, citizen_id, session_key"
+    return False, "board_id, citizen_id"
+
+
+def _board_seen_backup(conn, data_root) -> str:
+    """迁移前的库快照（SQLite backup API，WAL 下不撕裂）；失败 → 不迁移。"""
+    if data_root is None:
+        raise PresenceMigrationError("拿不到数据目录，无法备份 → 本次不迁移（宁可不升级）")
+    out_dir = Path(data_root) / "_backups"
+    stamp = datetime.datetime.now().strftime("%y%m%d-%H%M%S")
+    dest = out_dir / f"index-before-board-seen-session-{stamp}.sqlite"
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dst = sqlite3.connect(str(dest))
+        try:
+            conn.backup(dst)
+        finally:
+            dst.close()
+    except (OSError, sqlite3.Error) as exc:
+        raise PresenceMigrationError(f"备份失败（{dest}）：{exc}") from exc
+    return str(dest)
+
+
+def _ensure_board_seen_session(conn, *, data_root=None) -> dict:
+    """幂等：把 `board_seen` 升到三列主键（P0-3：会话维度）。
+
+    状态机与 `_ensure_presence_session` 同构（备份 → 事务内重建 → 三重校验 → 失败回滚）：
+
+      0. 表不存在 → 空操作（全新库由 `_BOARD_SEEN_DDL` 直接建三列）
+      1. 已三列主键 → 空操作（幂等出口，不备份、不重建）
+      2. 旧两列 → 备份 + 重建（旧行 `session_key=''`）
+      3. 有列但主键不符/顺序不符 → `pending`（人工处置，不重建）
+      4. 备份失败 → 不迁移（写侧 `_board_seen_write_shape` 自动降级两列）
+    """
+    result = {"rebuilt": False, "backup": None, "rows_before": 0, "rows_after": 0,
+              "pk": (), "pending": None}
+    cols = _board_seen_columns(conn)
+    if not cols:
+        return result
+    pk = _presence_pk_cols_of(conn, "board_seen")
+    result["pk"] = pk
+    rows_before = int(conn.execute("SELECT COUNT(*) FROM board_seen").fetchone()[0] or 0)
+    result["rows_before"] = rows_before
+    result["rows_after"] = rows_before
+    if pk == _BOARD_SEEN_PK_COLS:
+        return result
+    if "session_key" in cols:
+        result["pending"] = "pk_mismatch" if len(pk) == 3 else "rebuild"
+        return result
+    root = Path(data_root) if data_root is not None else _presence_data_root(conn)
+    try:
+        conn.commit()
+        result["backup"] = _board_seen_backup(conn, root)
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("BEGIN IMMEDIATE")
+        committed = False
+        try:
+            conn.execute("DROP TABLE IF EXISTS board_seen_v3")
+            head = "CREATE TABLE IF NOT EXISTS board_seen"
+            if _BOARD_SEEN_DDL.count(head) != 1:
+                raise PresenceMigrationError("_BOARD_SEEN_DDL 形态变了：找不到唯一的建表头")
+            conn.execute(_BOARD_SEEN_DDL.replace(head, "CREATE TABLE IF NOT EXISTS board_seen_v3", 1))
+            conn.execute(
+                "INSERT INTO board_seen_v3 (board_id,citizen_id,session_key,last_post_id,"
+                "last_presence_at,updated_at) "
+                "SELECT board_id,citizen_id,'',last_post_id,last_presence_at,updated_at "
+                "FROM board_seen")
+            rows_after = int(
+                conn.execute("SELECT COUNT(*) FROM board_seen_v3").fetchone()[0] or 0)
+            pk_after = _presence_pk_cols_of(conn, "board_seen_v3")
+            if rows_after != rows_before:
+                raise PresenceMigrationError(
+                    f"行数不守恒：{rows_before} → {rows_after}（已回滚，原表未动）")
+            if pk_after != _BOARD_SEEN_PK_COLS:
+                raise PresenceMigrationError(f"主键列不符：{pk_after}（已回滚）")
+            conn.execute("DROP TABLE board_seen")
+            conn.execute("ALTER TABLE board_seen_v3 RENAME TO board_seen")
+            conn.execute("COMMIT")
+            committed = True
+        except Exception:
+            if not committed:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")
+        result.update({"rebuilt": True, "rows_after": rows_after,
+                       "pk": _presence_pk_cols_of(conn, "board_seen")})
+        return result
+    except PresenceMigrationError:
+        raise
+    except sqlite3.Error as exc:
+        raise PresenceMigrationError(f"重建失败（原表未动）：{exc}") from exc
+
+
+def _presence_rebuild_ddl(table="presence_v3") -> str:
+    """把 v3 的 `_PRESENCE_DDL` 改成建到临时表名——**DDL 只有一份**。
+
+    两份 DDL 必然漂（本项目的老账），所以这里只做改名，不复制声明；万一
+    `_PRESENCE_DDL` 形态变了（找不到唯一的建表头）就响亮失败，绝不猜。
+    """
+    head = "CREATE TABLE IF NOT EXISTS presence"
+    if _PRESENCE_DDL.count(head) != 1:
+        raise PresenceMigrationError("_PRESENCE_DDL 形态变了：找不到唯一的建表头")
+    return _PRESENCE_DDL.replace(head, f"CREATE TABLE IF NOT EXISTS {table}", 1)
+
+
+def _presence_session_counts(conn) -> tuple:
+    """`(有会话归属的行数, 无会话归属的行数)`；列不存在 → `(0, 总行数)`。"""
+    cols = _presence_columns(conn)
+    if not cols:
+        return 0, 0
+    total = int(conn.execute("SELECT COUNT(*) FROM presence").fetchone()[0] or 0)
+    if "session_key" not in cols:
+        return 0, total
+    filled = int(conn.execute(
+        "SELECT COUNT(*) FROM presence WHERE session_key != ''").fetchone()[0] or 0)
+    return filled, total - filled
+
+
+def _presence_prefix_conflicts(conn) -> list:
+    """同一公民下「A 是 B 的前缀」的会话键清单——**只报告，不合并**。
+
+    已知残留：`dsh:session-779a` 与 `dsh:session-779a464a-…` 像是同一会话的短/长
+    两种写法。合并要靠人判断：猜错就是把两个会话的历史焊死，而且没有回滚路径。
+    """
+    if not _presence_has_session(conn):
+        return []
+    buckets = {}
+    for cid, sk in conn.execute(
+            "SELECT DISTINCT citizen_id, session_key FROM presence WHERE session_key != ''"):
+        buckets.setdefault(cid, set()).add(str(sk))
+    out = []
+    for cid in sorted(buckets):
+        keys = sorted(buckets[cid])
+        for short in keys:
+            for longer in keys:
+                if short != longer and longer.startswith(short):
+                    out.append({"citizen_id": cid, "short": short, "long": longer})
+    return out
+
+
+def presence_session_report(conn) -> dict:
+    """presence 会话维度的**现状读数**（`--report` / `--dry-run` 共用这一份实现）。
+
+    `pending` 的三种取值各自意味着什么（设计 §2.2 状态机）：
+      · `None`        —— 已迁移（三列主键）或全新库，无需动作；
+      · `"rebuild"`   —— 还没有 session_key 列（或只有列没重建）：需要显式 `--apply`；
+      · `"pk_mismatch"` —— 三列主键但顺序不对：人工处置（本函数不猜）。
+    """
+    cols = _presence_columns(conn)
+    total = int(conn.execute("SELECT COUNT(*) FROM presence").fetchone()[0] or 0) if cols else 0
+    pk = _presence_pk_cols(conn)
+    filled, blank = _presence_session_counts(conn)
+    expected = filled
+    if cols and "session_key" not in cols and "agent_id" in cols:
+        expected = int(conn.execute(
+            f"SELECT COUNT(*) FROM presence WHERE ({_PRESENCE_SESSION_BACKFILL}) != ''"
+        ).fetchone()[0] or 0)
+    pending = None
+    if cols:
+        if "session_key" not in cols:
+            pending = "rebuild"
+        elif pk != _PRESENCE_PK_COLS:
+            pending = "pk_mismatch" if len(pk) == 3 else "rebuild"
+    return {"rows": total, "pk": list(pk), "has_session_key": "session_key" in cols,
+            "backfilled": filled, "blank": blank, "expected_backfilled": expected,
+            "pending": pending, "prefix_conflicts": _presence_prefix_conflicts(conn)}
+
+
+def _ensure_presence_session(conn, *, data_root=None) -> dict:
+    """幂等：把 `presence` 升到 v3（三列主键 + `session_key`）。
+
+    返回 `{"rebuilt", "backup", "rows_before", "rows_after", "backfilled", "blank",
+    "pk", "pending"}`；`pending` 非空表示"补列成功但未重建"（留给显式脚本）。
+
+    ## 七步状态机（设计 §2.2）
+
+      0. 表不存在 → 什么都不做（由 `_BOARD_TABLE_DDLS` 直接建 v3，全新库路径）
+      1. 已三列主键 → 空操作（幂等出口；**不备份、不重建、零写入**）
+      2. 无 `session_key` 列 → 备份 + 事务内重建 + 三重校验（行数 / 主键序 / 回填数）
+      3. 有列、两列主键 → 只报 `pending="rebuild"`（半迁移态，人工处置）
+      4. 三列但顺序不符 → `pending="pk_mismatch"` + 大声记日志
+      5. 备份失败 → **不迁移**（宁可这次不升级，也不拿生产库赌）
+      6. 校验不过 → `ROLLBACK`，原表一字不动
+
+    ## 三个容易踩错的点（都写进代码而不是注释）
+
+      · `PRAGMA foreign_keys` 在**事务内会被静默忽略**，所以必须先 `commit()` 再关；
+      · 重建会连带 DROP 掉 `ix_presence_last`，索引必须排在本函数**之后**建；
+      · 校验不通过时 `ROLLBACK` 之后还要把 FK 重新打开（否则这个连接后续写不校验外键）。
+    """
+    result = {"rebuilt": False, "backup": None, "rows_before": 0, "rows_after": 0,
+              "backfilled": 0, "blank": 0, "pk": (), "pending": None}
+    cols = _presence_columns(conn)
+    if not cols:
+        return result                                  # 步 0：全新库，由建表负责
+    pk = _presence_pk_cols(conn)
+    result["pk"] = pk
+    rows_before = int(conn.execute("SELECT COUNT(*) FROM presence").fetchone()[0] or 0)
+    result["rows_before"] = rows_before
+    result["rows_after"] = rows_before
+    if pk == _PRESENCE_PK_COLS:
+        result["backfilled"], result["blank"] = _presence_session_counts(conn)
+        return result                                  # 步 1：幂等出口
+    if "session_key" in cols:
+        result["pending"] = "pk_mismatch" if len(pk) == 3 else "rebuild"
+        result["backfilled"], result["blank"] = _presence_session_counts(conn)
+        return result                                  # 步 3/4：不重建，只报状态
+
+    root = Path(data_root) if data_root is not None else _presence_data_root(conn)
+    try:
+        conn.commit()                                  # FK 开关必须在事务外
+        expected = int(conn.execute(
+            f"SELECT COUNT(*) FROM presence WHERE ({_PRESENCE_SESSION_BACKFILL}) != ''"
+        ).fetchone()[0] or 0)
+        result["backup"] = _presence_backup(conn, root)
+        fill_cols = ", ".join(_PRESENCE_V3_COLS)
+        select_cols = ", ".join(
+            _PRESENCE_SESSION_BACKFILL if name == "session_key" else name
+            for name in _PRESENCE_V3_COLS)
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("BEGIN IMMEDIATE")
+        committed = False
+        try:
+            conn.execute("DROP TABLE IF EXISTS presence_v3")
+            conn.execute(_presence_rebuild_ddl("presence_v3"))
+            conn.execute(
+                f"INSERT INTO presence_v3 ({fill_cols}) SELECT {select_cols} FROM presence")
+            rows_after = int(
+                conn.execute("SELECT COUNT(*) FROM presence_v3").fetchone()[0] or 0)
+            pk_after = _presence_pk_cols_of(conn, "presence_v3")
+            filled = int(conn.execute(
+                "SELECT COUNT(*) FROM presence_v3 WHERE session_key != ''"
+            ).fetchone()[0] or 0)
+            if rows_after != rows_before:
+                raise PresenceMigrationError(
+                    f"行数不守恒：{rows_before} → {rows_after}（已回滚，原表未动）")
+            if pk_after != _PRESENCE_PK_COLS:
+                raise PresenceMigrationError(f"主键列不符：{pk_after}（已回滚）")
+            if filled != expected:
+                raise PresenceMigrationError(
+                    f"回填数不符：预期 {expected}，实际 {filled}（已回滚）")
+            conn.execute("DROP TABLE presence")
+            conn.execute("ALTER TABLE presence_v3 RENAME TO presence")
+            for stmt in _BOARDS_INDEXES:
+                conn.execute(stmt)
+            bad = conn.execute("PRAGMA foreign_key_check(presence)").fetchall()
+            if bad:
+                raise PresenceMigrationError(f"外键校验失败：{len(bad)} 行（已回滚）")
+            conn.execute("COMMIT")
+            committed = True
+        except Exception:
+            if not committed:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass                               # 事务已不在（例如校验后已 COMMIT）
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")
+        result.update({"rebuilt": True, "rows_after": rows_after,
+                       "backfilled": filled, "blank": rows_after - filled,
+                       "pk": _presence_pk_cols(conn)})
+        return result
+    except PresenceMigrationError:
+        raise
+    except sqlite3.Error as exc:
+        raise PresenceMigrationError(f"重建失败（原表未动）：{exc}") from exc
+
+
+def presence_session_rollback(conn, *, data_root=None, dry_run=False) -> dict:
+    """把 `presence` 退回两列主键（**合并**会话行、丢弃 `session_key`）。
+
+    返回 `{"rebuilt", "backup", "rows_before", "rows_after", "dropped", "pk"}`；
+    `dropped` 逐条给出被合并掉的行（`doing` / `surface` / 会话键），调用方负责
+    打印到 stderr 并落 `_audit/`——**丢信息必须留证**（设计 §6.2 ②）。
+
+    `dry_run=True`：只算"会丢什么"并返回（`rebuilt=False`、不备份、不写库）。
+    CLI 的 `--dry-run` 与 `--apply` 因此共用同一份合并口径——两份实现必然漂。
+
+    合并规则**写死在这里，不许临场判断**（设计 §6.2 ②）：
+      · 每个 `(board_id, citizen_id)` 选 `max(last_seen_at, auto_seen_at)` 最大的行做主行；
+      · `session_key` 丢弃，`agent_id` 取主行的值；
+      · 主行 `first_seen_at` 换成该组**最早**的 `first_seen_at`（首签时间不该被合并改晚）。
+    """
+    cols = _presence_columns(conn)
+    if not cols:
+        return {"rebuilt": False, "backup": None, "rows_before": 0, "rows_after": 0,
+                "dropped": [], "pk": ()}
+    rows_before = int(conn.execute("SELECT COUNT(*) FROM presence").fetchone()[0] or 0)
+    rows = conn.execute(
+        "SELECT board_id, citizen_id, "
+        + ("session_key, " if "session_key" in cols else "'', ")
+        + "agent_id, status, doing, surface, first_seen_at, last_seen_at, "
+        "auto_surface, auto_seen_at, auto_source FROM presence").fetchall()
+    groups, order = {}, []
+    for row in rows:
+        key = (row[0], row[1])
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(row)
+    kept, dropped = [], []
+    for key in order:
+        group = groups[key]
+        main = max(group, key=lambda r: max(r[8] or "", r[10] or ""))
+        earliest = min((r[7] or "" for r in group), default="") or (main[7] or "")
+        kept.append((key[0], key[1], main[3], main[4], main[5], main[6], earliest,
+                     main[8], main[9], main[10], main[11]))
+        for row in group:
+            if row is main:
+                continue
+            dropped.append({"board_id": row[0], "citizen_id": row[1],
+                            "session_key": row[2] or "", "doing": row[5] or "",
+                            "surface": row[6] or ""})
+    root = Path(data_root) if data_root is not None else _presence_data_root(conn)
+    if dry_run:
+        return {"rebuilt": False, "backup": None, "rows_before": rows_before,
+                "rows_after": len(kept), "dropped": dropped,
+                "pk": _presence_pk_cols(conn), "dry_run": True}
+    conn.commit()
+    backup = _presence_backup(conn, root)
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute("BEGIN IMMEDIATE")
+    committed = False
+    try:
+        conn.execute("DROP TABLE IF EXISTS presence_v2")
+        conn.execute(_PRESENCE_V2_DDL)
+        marks = ",".join("?" * len(_PRESENCE_V2_COLS))
+        conn.executemany(
+            f"INSERT INTO presence_v2 ({', '.join(_PRESENCE_V2_COLS)}) VALUES ({marks})",
+            kept)
+        conn.execute("DROP TABLE presence")
+        conn.execute("ALTER TABLE presence_v2 RENAME TO presence")
+        for stmt in _BOARDS_INDEXES:
+            conn.execute(stmt)
+        bad = conn.execute("PRAGMA foreign_key_check(presence)").fetchall()
+        if bad:
+            raise PresenceMigrationError(f"回滚后外键校验失败：{len(bad)} 行（已回滚）")
+        conn.execute("COMMIT")
+        committed = True
+    except Exception:
+        if not committed:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+    return {"rebuilt": True, "backup": backup, "rows_before": rows_before,
+            "rows_after": len(kept), "dropped": dropped, "pk": _presence_pk_cols(conn)}
+
+
 def _ensure_board_tables(conn: sqlite3.Connection):
-    """幂等：把看板三张表建好、建索引（新旧库都能反复跑）。
+    """幂等：把看板三张表建好、补齐缺列、建索引（新旧库都能反复跑）。
 
     顺序与 `_ensure_push_tables` 同一条纪律：**先建表 → 再补列 → 最后建索引**。
     看板是 2026-10-25 新加的，没有"旧版缺列"的历史包袱，但仍按同一形态写——
     下次加列时不用再想一遍顺序。
+
+    2026-10-26（T02）：`presence` 补 3 列 `auto_*`（自动占用的缓存）。
+    补列必须在建索引之前——否则旧库里 `CREATE INDEX ... (auto_seen_at)` 会
+    报 no such column，整个升级路径崩在启动时（就是 citizens.is_owner 那条教训）。
     """
     for ddl in _BOARD_TABLE_DDLS:
         # 表名从 DDL 里取，避免再维护一份名单（两份名单就是漂移的起点）
@@ -819,9 +1588,95 @@ def _ensure_board_tables(conn: sqlite3.Connection):
         table = m.group(1)
         if not conn.execute(f"PRAGMA table_info({table})").fetchall():
             conn.execute(ddl)
+    have = {r[1] for r in conn.execute("PRAGMA table_info(presence)")}
+    for name, decl in _PRESENCE_NEW_COLS:
+        if name not in have:
+            conn.execute(f"ALTER TABLE presence ADD COLUMN {name} {decl}")
+    # 2026-10-26（撞车自撞修复 T01 · 设计 §2.2）：`presence` 升到 v3
+    # （三列主键 + `session_key`）。落点在结构段、**索引之前**——重建会连带
+    # DROP 掉 `ix_presence_last`，索引语句必须排在重建之后。
+    # 失败**不阻断启动**：原表一字未动，写侧自动降级两列（`_presence_write_shape`）；
+    # 但"正在降级跑"必须响亮（R3），否则看板悄悄回到"一行/公民"而没人知道。
+    presence_migration = {"rebuilt": False, "pending": None, "pk": ()}
+    try:
+        presence_migration = _ensure_presence_session(conn)
+    except PresenceMigrationError as exc:
+        print(f"警告：presence 会话维度迁移未完成（本次降级为两列主键）：{exc}",
+              file=sys.stderr)
     for stmt in _BOARDS_INDEXES + _BOARD_POSTS_INDEXES:
         conn.execute(stmt)
+    if presence_migration.get("pending"):
+        print(f"警告：presence 主键待重建（pending="
+              f"{presence_migration['pending']}）——同公民多会话会互相覆盖，"
+              "跑 `python migrate_presence_session.py --root data --apply`。",
+              file=sys.stderr)
+    # 2026-10-27（P0-3）：`board_seen` 升三列主键（会话维度）。失败不阻断启动：
+    # 写侧 `_board_seen_write_shape` 自动降级两列；但"正在降级跑"必须响亮。
+    board_seen_migration = {"rebuilt": False, "pending": None}
+    try:
+        board_seen_migration = _ensure_board_seen_session(conn)
+    except PresenceMigrationError as exc:
+        print(f"警告：board_seen 会话维度迁移未完成（本次降级为两列主键）：{exc}",
+              file=sys.stderr)
+    if board_seen_migration.get("pending"):
+        print(f"警告：board_seen 主键待重建（pending="
+              f"{board_seen_migration['pending']}）——同公民多会话会互相吞推送。",
+              file=sys.stderr)
 
+
+def _ensure_activity_table(conn: sqlite3.Connection):
+    """幂等：建 `tool_activity` + 4 条索引（表 → 列 → 索引 的同一条顺序纪律）。
+
+    旧库特征：表不存在 → `CREATE TABLE IF NOT EXISTS`；**没有历史数据要迁**
+    （动作流是本批才开始记的，迁不了也不该编）。
+    """
+    have = conn.execute("PRAGMA table_info(tool_activity)").fetchall()
+    if not have:
+        conn.execute(_TOOL_ACTIVITY_DDL)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tool_activity)")}
+    for name, decl in _TOOL_ACTIVITY_COLS:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE tool_activity ADD COLUMN {name} {decl}")
+    for stmt in _ACTIVITY_INDEXES:
+        conn.execute(stmt)
+
+def _ensure_kb_views(conn: sqlite3.Connection):
+    """幂等：kb_path_stats 视图**定义不符才重建**（照 `_ensure_citizens_all_view` 的模式）。
+
+    为什么不无条件 `DROP VIEW` + 重建：DROP 要拿写锁，多进程并发打开时会把别人的
+    查询打断。视图列与 `_KB_PATH_STATS_COLUMNS` 一致时，这里一个字节都不动。
+
+    建完立刻 `SELECT * ... LIMIT 0`：SQLite 的视图是**惰性校验**的——允许建一个
+    引用了不存在列的视图，错误留到查询时才报。不在这里真查一次，坏视图会一路活到
+    某个调用方手里（citizens_all 那次教训的同一形态）。
+    """
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='view' AND name='kb_path_stats'").fetchone()
+    if exists:
+        try:
+            have = tuple(r[1] for r in conn.execute("PRAGMA table_info(kb_path_stats)"))
+        except sqlite3.DatabaseError:
+            have = ()                      # 旧定义引用了还不存在的列（半升级态）→ 重建
+        if have == _KB_PATH_STATS_COLUMNS:
+            return
+        conn.execute("DROP VIEW kb_path_stats")
+    conn.execute(_KB_PATH_STATS_VIEW)
+    conn.execute("SELECT * FROM kb_path_stats LIMIT 0")
+
+
+def _ensure_kb_tables(conn: sqlite3.Connection):
+    """幂等：知识库两表 + 索引 + 视图（新旧库都能反复跑）。
+
+    顺序仍是那条硬纪律：**先建表 → 再建索引 → 最后建视图**。视图引用了 kb_access 的列，
+    提前一步会撞 `no such column`（旧库是"同名表缺列"时更明显），整个升级路径崩在启动时。
+
+    本函数只做结构，不写任何行：vault 登记是 `kb vault add` 的事，审计行是读写路径的事。
+    """
+    conn.execute(_KB_VAULT_DDL)
+    conn.execute(_KB_ACCESS_DDL)
+    for stmt in _KB_VAULT_INDEXES + _KB_ACCESS_INDEXES:
+        conn.execute(stmt)
+    _ensure_kb_views(conn)
 
 # ------------------------------------------------------ 身份层 P1-a：建表 / 补列 / 视图
 def _ensure_citizens_all_view(conn: sqlite3.Connection):
@@ -993,6 +1848,17 @@ def migrate(conn: sqlite3.Connection):
     _ensure_name_tables(conn)
     # 看板（P1-b · 2026-10-25）：三张表 + 索引。同样加在链尾。
     _ensure_board_tables(conn)
+    # ── 结构段（两条线的新结构都在这里；铁律：结构全做完，才允许数据迁移）
+    #   · 知识库：建表/索引/视图（结构）
+    #   · 动作流：tool_activity + 索引（结构）—— 加在结构段末尾，不改前人顺序
+    _ensure_kb_tables(conn)
+    _ensure_activity_table(conn)
+    # ── 数据迁移段（必须排在所有结构升级之后）
+    #   · 看板落点：改 boards.path 的值（相对 fish-home）
+    #   · 强制忽略项回填既有行（改 kb_vault.ignore_globs 的值）
+    # 两段都幂等：连跑两次，第二次是空操作。
+    _ensure_boards_home_paths(conn)
+    _kb_backfill_mandatory_globs(conn)
     conn.commit()
 
 
@@ -1409,7 +2275,8 @@ def store_blob(root: Path, src: Path) -> dict:
 def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
                   mem_type: str = "fact", tags=None, visibility: str = "shared",
                   owner=None, session_actor=None, attachments=None,
-                  occurred_at=None, supersedes=None, cause=None, hints=None) -> tuple:
+                  occurred_at=None, supersedes=None, cause=None, hints=None,
+                  supersede_notes=None) -> tuple:
     """**唯一的记忆写入入口** —— CLI 与 MCP 都必须走这里。
 
     为什么要抽出来：2026-10-22 发现 cmd_remember 与 MCP tool_remember 是两份
@@ -1493,13 +2360,21 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
     _index_one_fts(conn, code, title, tags or [], body)
 
     # ---- 替代旧条目（写新的同时标记旧的）----
+    # **顺序即承诺**（FB-11）：新条目已经落盘并提交，才轮到置旧条目 superseded。
+    # 反过来会留下"旧的已死、新的没写成"的半状态——那比不替代糟得多。
+    # `supersede_notes`（可选）把每条的结果/原因交回调用方：CLI 要按 MCP 同口径
+    # 打印，而"静默吞掉失败"正是双入口不一致的老毛病。
     if supersedes:
         olds = supersedes if isinstance(supersedes, (list, tuple)) else [supersedes]
         for old in olds:
             try:
-                supersede_memory(conn, old, code, reason="被新记录替代", actor=owner)
-            except ValueError:
-                pass  # 旧条目不存在就不阻断写入，但会在返回值里体现
+                msg = supersede_memory(conn, old, code, reason="被新记录替代", actor=owner)
+                if supersede_notes is not None:
+                    supersede_notes.append({"old": old, "ok": True, "message": msg})
+            except ValueError as e:
+                # 旧条目不存在就不阻断写入（新条目已经成功），但要在返回值里体现
+                if supersede_notes is not None:
+                    supersede_notes.append({"old": old, "ok": False, "message": str(e)})
 
     # ---- 写入时建关联边（13 推送系统设计 §2.3 路 1）----
     # 兜底两层：build_links_on_write 内部逐条兜，这里再兜一次整体。
@@ -1667,7 +2542,7 @@ def access_log_rows(conn, code=None, citizen_id=None, session_key=None, via=None
 #   push_log          = **这一次推送**：我们主动塞了什么、占多少预算、有没有反应
 # inject 已经写过 access_log(via='push')——那记的是"这条被展示了"，记不出"这次推送批次"。
 # 而批次恰恰是时机策略的计量单位：推 3 条读了 1 条 ≠ 推 1 条读了 1 条。
-PUSH_CHANNELS = ("inject", "hook", "tool_after", "situational")
+PUSH_CHANNELS = ("inject", "hook", "tool_after", "situational", "prompt")
 # 反应值是一个**封闭词表**（NULL=待判 / accepted / ignored / expired），但它没有写入校验点：
 # reaction 只由 mark_push_accepted 与 close_stale_pushes 两个函数写，取值写死在 SQL 里。
 # 刻意不设 PUSH_REACTIONS 常量：现在没有任何地方**校验**它，那只会变成一份会漂移的注释。
@@ -1812,6 +2687,41 @@ def close_stale_pushes(conn, *, window_hours=None, now=None) -> int:
     cur = conn.execute(
         "UPDATE push_log SET reaction='ignored' WHERE reaction IS NULL AND pushed_at < ?",
         (cutoff,))
+    conn.commit()
+    return cur.rowcount or 0
+
+
+def mark_push_accepted_prefix(conn, prefix, *, session_key=None, window_hours=None,
+                              reacted_at=None) -> int:
+    """按**编码前缀**回填 accepted（`board:` / `kb:` 这类非记忆候选的唯一回填口）。
+
+    ## 为什么需要它
+
+    `mark_push_accepted` 按**精确编码**回填记忆推送；但看板/知识库候选的 `code`
+    是 `board:<label>` / `kb:<vault>:<rel>`——AI "看了看板"或"读了知识库文件"时
+    没有对应的记忆编码可匹配，于是这三类推送永远等不到 accepted，只能在窗口后
+    被判 ignored。度量上看起来像"从来没被采纳"，这是假象。
+
+    ## 四条条件与 `mark_push_accepted` 相同
+
+    同会话 / 同前缀 / 窗口内 / 尚未判过。前缀按 `LIKE 'board:%'` 精确到类，
+    不会把 kb 的推送算成"看了看板"。
+    """
+    if not prefix:
+        return 0
+    window = push_outcome_window_hours(conn) if window_hours is None else int(window_hours)
+    if window <= 0:
+        return 0                             # 关闭判定：不猜任何反应
+    ts = reacted_at or now_utc()
+    now_dt = parse_utc(ts)
+    if now_dt is None:
+        raise ValueError(f"reacted_at 必须是 ISO8601 UTC（如 2026-10-24T01:00:00Z），收到 {ts!r}")
+    cutoff = (now_dt - datetime.timedelta(hours=window)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cur = conn.execute(
+        "UPDATE push_log SET reaction='accepted', reacted_at=?, "
+        "latency_sec=CAST((julianday(?) - julianday(pushed_at)) * 86400 AS INTEGER) "
+        "WHERE code LIKE ? AND session_key IS ? AND reaction IS NULL AND pushed_at >= ?",
+        (ts, ts, prefix, session_key, cutoff))
     conn.commit()
     return cur.rowcount or 0
 
@@ -2954,44 +3864,10 @@ def compute_session_profile(conn, *, session_actor=None, citizen_id=None,
 
 
 # ------------------------------------------------------------------ 全文检索（ADR-005）
-
-_CJK = re.compile(r"[\u4e00-\u9fff]+")
-_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-_.]*")
-
-
-def index_tokens(text: str) -> list:
-    """把文本切成可入 FTS 的 token（ADR-005 的切分规则）。
-
-    中文连续段 → **重叠 bigram**（两字滑窗）。为什么必须自己切：SQLite 内置的
-    unicode61 不做中文分词，未切分时「协作约定」是一个 token，查「协作」永远 0 条
-    （2026-10-22 实测，见 ADR-005 背景表第 2 条）。
-    拉丁 / 数字 / 单号（含 - _ .）→ 原样小写，交给 FTS 再切。
-    """
-    text = text or ""
-    out = [m.group(0).lower() for m in _WORD.finditer(text)]
-    for m in _CJK.finditer(text):
-        s = m.group(0)
-        if len(s) == 1:
-            out.append(s)
-        else:
-            out.extend(s[i:i + 2] for i in range(len(s) - 1))
-    return out
-
-
-def fts_text(text: str) -> str:
-    return " ".join(index_tokens(text))
-
-
-def fts_match_expr(query: str):
-    """查询串 → FTS5 MATCH 表达式；没有可查 token 时返回 None。
-
-    **每个 token 必须加双引号**：不加的话 `CR-12` 会被 FTS5 解析成「CR 列包含 12」，
-    直接抛 sqlite3.OperationalError: no such column: 12（2026-10-22 实测，ADR-005 §背景 1）。
-    """
-    toks = [t for t in index_tokens(query) if t]
-    if not toks:
-        return None
-    return " AND ".join('"' + t.replace('"', '""') + '"' for t in toks)
+# 切词三函数（index_tokens / fts_text / fts_match_expr）已下沉 `fish_common`
+# （2026-10-27 · 语料层 T01 · 设计 D09）：语料层要按**同一套**切法建 corpus_fts，
+# 两套切法的症状是「存进去搜不到」而两边单测都绿。这里只留注释，名字由上面那行
+# `from fish_common import …` 再导出（同一对象，不是副本）。
 
 
 def _index_one_fts(conn, code, title, tags, body):
@@ -3081,8 +3957,10 @@ def search_memories(conn, *, query=None, code=None, project=None, tags=None,
         _fparams.extend(_pnames)
     for _t in ([tags] if isinstance(tags, str) else (tags or [])):
         if _t:
-            _filters.append("ci.tags LIKE ?")
-            _fparams.append(f'%"{_t}"%')
+            # 评审 🟡9：模式与 ESCAPE 声明成对出现（见 `_like_literal`），
+            # 否则 tag 里的 `%` / `_` 会当通配符用。
+            _filters.append("ci.tags LIKE ?" + LIKE_ESCAPE_SQL)
+            _fparams.append(tag_like_pattern(_t))
     _where = (" AND " + " AND ".join(_filters)) if _filters else ""
     _fts_sql = ("SELECT f.code FROM memory_fts f JOIN code_index ci ON ci.code = f.code "
                 "WHERE memory_fts MATCH ?" + _where + " LIMIT ?")
@@ -3121,8 +3999,8 @@ def search_memories(conn, *, query=None, code=None, project=None, tags=None,
         params.extend(_pnames)
     for t in ([tags] if isinstance(tags, str) else (tags or [])):
         if t:
-            sql += " AND tags LIKE ?"
-            params.append(f'%"{t}"%')
+            sql += " AND tags LIKE ?" + LIKE_ESCAPE_SQL
+            params.append(tag_like_pattern(t))
 
     found = {r[0]: r for r in conn.execute(sql, params)}
     rows = []
@@ -3132,6 +4010,162 @@ def search_memories(conn, *, query=None, code=None, project=None, tags=None,
             if len(rows) >= limit:
                 break
     return rows, src_of
+
+
+# ------------------------------------------------- 列出模式（无 query 的记忆列举）
+#
+# 2026-10-26（FB-01）：在这之前，"只看某个项目里带某个标签的条目"这件事**做不到**——
+#   · `recall(project=..., tags=...)` 没有 query 时会走"未找到 + 最近条目"，
+#     也就是明明给了完整的过滤条件，回包却说"没找到"，然后丢一串**不受 tags 约束**的
+#     最近条目（`recent_fallback` 应用了 tags，但语义仍是"没找到"）；
+#   · `recall(tags=[...])` 单独用则直接报错「query / code / project 至少要给一个」——
+#     报错本身没错（没有限定范围），错的是**没说清怎么修**。
+# 所以补一个显式的"列出"读入口：它不猜关键词，只按 项目 + 标签 过滤后按时间倒序给。
+# 与 `search_memories` 同一个纪律：**CLI 与 MCP 共用一份**，并且返回同样形状的行，
+# 这样两边的渲染器也共用（两处各写一份必然漂，见 `recent_fallback` 那次跨项目串台）。
+
+LIST_SOURCE = "列出"        # 行的"匹配来源"列：告诉读者这条不是搜到的，是列出来的
+# 列出模式的默认条数（比检索的 10 宽）：没有关键词时，"多看几条"本身就是目的。
+LIST_DEFAULT_LIMIT = 20
+
+# `tags` 单独用时的引导语（MCP 与 CLI 共用一处）。为什么是引导而不是报错：
+# 报错只说明"不行"，而调用方真正缺的是"那该怎么写"。这句话就是下一步。
+TAGS_ONLY_HINT = (
+    "tags 只作附加过滤；请加 project 限定"
+    "（例：recall(project=\"anyi-studio\", tags=[\"fish-feedback\"])）")
+
+
+def _like_literal(value) -> str:
+    """把用户给的字符串转成 LIKE 的**字面量**：转义 `\\` / `%` / `_`（评审 🟡9）。
+
+    为什么必须转义：标签是**用户数据**，而 `%` 与 `_` 在 LIKE 里是通配符。
+    旧实现 `tags LIKE '%"<t>"%'` 里 t 直接拼进模式，于是 tag `a_b` 会命中 `axb`、
+    `a%b` 会命中任何夹在中间的值——**查错了却查到了**，是比查不到更坏的一类错
+    （判据/SQL 都不会报错，只有人肉对比才发现多了一条）。
+
+    转义字符选反斜杠，调用点的 SQL 必须同步写 `ESCAPE '\\'`（SQL 侧是**一个**字符）。
+    两处只改一处等于没改：模式转义了但 SQL 没声明 ESCAPE，反斜杠就被当字面量。
+    """
+    text = "" if value is None else str(value)
+    return (text.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_"))
+
+
+# 与 `_like_literal` 成对出现的 SQL 片段（含引号内的单个反斜杠 → SQL 里 ESCAPE '\'）。
+# 抽成常量是为了让"改一处忘另一处"不可能发生：模式与 ESCAPE 声明必须同时在场。
+LIKE_ESCAPE_SQL = " ESCAPE '\\'"
+
+
+def tag_like_pattern(tag) -> str:
+    """标签过滤的 LIKE 模式：`%"<转义后的标签>"%`（匹配 tags JSON 里的一个完整标签）。
+
+    为什么带引号包住：`tags` 列存的是 JSON 数组文本，标签边界就是引号——
+    不包引号的话 `a` 会命中 `ab`（那是"前缀"不是"同一个标签"）。
+
+    **两层转义，顺序不能反**（2026-10-26 复审 ⚪N5）：
+      ① 先过 **JSON**：库里的文本是 `json.dumps` 的产物，标签里的 `\\` 与 `"` 已经被
+         JSON 转义过一次（`a\\b` 存成 `"a\\\\b"`）。拿原串直接去匹配，含反斜杠的
+         标签**永远查不到**；
+      ② 再过 **LIKE**：JSON 转义吐出来的反斜杠，在 LIKE 里必须再转义一次，
+         否则会被 SQL 的 `ESCAPE '\\'` 当转义符吃掉。
+    先 LIKE 后 JSON 等于把①的产物当成用户数据再转义一遍——两层都会错。
+    `ensure_ascii=False`：中文标签在库里是原字面量（写入侧同一份 dumps 口径）。
+    """
+    text = "" if tag is None else str(tag)
+    json_literal = json.dumps(text, ensure_ascii=False)[1:-1]
+    return f'%"{_like_literal(json_literal)}"%'
+
+
+def _list_where(conn, *, project=None, tags=None, include_superseded=False):
+    """列出模式的 WHERE 子句 + 参数——`count_memories` 与 `list_memories` 共用。
+
+    分出来是因为"总数"与"这一页"必须用**同一个谓词**：两处各拼一份，
+    迟早出现"共 5 条"却只回了 3 条这种无法自证的不一致。
+    项目过滤展开别名（与 `search_memories` / `recent_fallback` 同口径）。
+    """
+    where, params = [], []
+    if not include_superseded:
+        where.append("status = 'active'")
+    pnames = resolve_project_names(conn, project) if project else []
+    if pnames:
+        where.append("project IN (" + ",".join("?" * len(pnames)) + ")")
+        params.extend(pnames)
+    for t in ([tags] if isinstance(tags, str) else (tags or [])):
+        if t:
+            where.append("tags LIKE ?" + LIKE_ESCAPE_SQL)
+            params.append(tag_like_pattern(t))
+    return ((" WHERE " + " AND ".join(where)) if where else ""), params
+
+
+def count_memories(conn, *, project=None, tags=None, include_superseded=False) -> int:
+    """列出模式命中多少条（**不含** limit）——回包首行的"共 N 条"用它，不用 len(rows)。"""
+    clause, params = _list_where(conn, project=project, tags=tags,
+                                 include_superseded=include_superseded)
+    try:
+        return int(conn.execute("SELECT COUNT(*) FROM code_index" + clause,
+                                params).fetchone()[0])
+    except sqlite3.Error:
+        return 0
+
+
+def list_memories(conn, *, project=None, tags=None, limit=LIST_DEFAULT_LIMIT,
+                  include_superseded=False):
+    """**列出模式**：无 query 时按 项目（含别名展开）+ 标签 过滤，时间倒序。
+
+    与 `search_memories` 的区别是"不猜"：检索要做 FTS + 排序 + 来源标注，
+    列出只做过滤 —— 所以它给的每一行都是"符合你写的条件"的条目，而不是
+    "碰巧命中关键词"的条目。回包的 `来源` 列写 `列出`，让读者一眼分清。
+
+    返回行形状与 `search_memories` 完全一致：
+      (code, title, project, mem_type, status, file_path, dormant, LIST_SOURCE)
+    ——同一个形状 = 同一个渲染器，CLI 与 MCP 不必各写一份。
+
+    排序 `recorded_at DESC, code DESC`：先按"这件事什么时候发生"，同刻再按编码
+    （编码里的日期段与序号同向，所以这是个稳定的次序）。
+    """
+    limit = max(1, int(limit or LIST_DEFAULT_LIMIT))
+    clause, params = _list_where(conn, project=project, tags=tags,
+                                 include_superseded=include_superseded)
+    sql = ("SELECT code,title,project,mem_type,status,file_path,dormant FROM code_index"
+           + clause + " ORDER BY recorded_at DESC, code DESC LIMIT ?")
+    params = list(params) + [limit]
+    return [tuple(r) + (LIST_SOURCE,) for r in conn.execute(sql, params).fetchall()]
+
+
+def format_list_declaration(*, project, tags, shown, total) -> str:
+    """列出模式回包的首行声明：**说清这次按什么过滤、共几条**。
+
+    为什么要声明：检索模式的第一行会交代"关键词匹配，不是语义检索"；列出模式
+    也必须交代自己的口径，否则读者无法判断"这些就是全部，还是只是被过滤后的子集"。
+    全量条数（total）与实际给出条数（shown）分开写，被 limit 截过时读者看得出来。
+    """
+    conds = [f"project={project}"] if project else []
+    tl = [t for t in ([tags] if isinstance(tags, str) else (tags or [])) if t]
+    if tl:
+        conds.append("tags=" + "、".join(tl))
+    head = ("已按 " + ("、".join(conds) if conds else "无过滤")
+            + " 过滤，共 " + str(total) + " 条（时间倒序")
+    if int(shown) < int(total):
+        head += f"，仅列前 {int(shown)} 条"
+    return head + "）"
+
+
+# -------------------------------------- 检索结果的状态列（CLI 与 MCP 共用同一处渲染）
+#
+# 2026-10-26（FB-10）：`status` 与 `dormant` 是**两个维度**——
+#   status  说"这条还能不能用"（active / superseded / withdrawn）
+#   dormant 说"它衰减到休眠了没有"（可被召回唤醒）
+# 旧输出把 dormant 挂在方括弧**外面**：`[fact/active] (休眠)`。两个后果：
+#   · 一个空格的间隔，长行里几乎看不见 → "休眠但能唤醒"这层意思被漏读；
+#   · 更像"另一个 status 值"，读者会以为状态名就叫「休眠」。
+# 现在两者合并进同一个标签：`[fact/active+dormant]`——**一个方括弧 = 一条条目的完整快照**。
+RECALL_DIMENSION_NOTE = "说明：status 与 dormant 是两个维度（dormant=衰减休眠，可被召回唤醒）"
+
+
+def format_status_tag(mem_type, status, dormant) -> str:
+    """状态列的唯一渲染点：`[类型/状态]`，休眠时合并成 `[类型/状态+dormant]`。"""
+    return f"[{mem_type}/{status}{'+dormant' if dormant else ''}]"
 
 
 def recent_fallback(conn, project=None, tags=None, limit=5, include_superseded=False):
@@ -3168,13 +4202,195 @@ def recent_fallback(conn, project=None, tags=None, limit=5, include_superseded=F
             params.extend(pnames)
     for t in ([tags] if isinstance(tags, str) else (tags or [])):
         if t:
-            where.append("tags LIKE ?")
-            params.append(f'%"{t}"%')
+            where.append("tags LIKE ?" + LIKE_ESCAPE_SQL)
+            params.append(tag_like_pattern(t))
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY code DESC LIMIT ?"
     params.append(limit)
     return conn.execute(sql, params).fetchall()
+
+
+# -------------------------------------- FB-15 提炼建议层（distill；人确认后才入库）
+#
+# 依据：`16-最终架构-v1-整合裁决.md` §11.4 的 `fish distill <项目> --from episode
+# --days 30`。三步里本轮**只做前两步**：按 tags 聚类 → 生成建议文件。
+# 三条硬约束（本层一条都不许松）：
+#   ① **不自动入库**：产出是「建议」，不是记忆——不写 lesson、不碰 code_index；
+#   ② **保留溯源**：建议文件逐条列 source episode 的 code，人确认后写 lesson 时
+#      `cause` 可以直接指向这批 code（本轮不生成正文，所以只留 code）；
+#   ③ **原 episode 不删**：本轮连 `distilled_into` 都不标（标记是下一轮的事）。
+# 为什么不生成 lesson 正文：fish 没有内置 LLM（R1-7 列在 P2）。靠字符串拼接硬造一段
+# "总结"等于用模板冒充判断，比不给更糟——建议文件里留着原文编码，人来判断更可靠。
+DISTILL_DIRNAME = "提炼建议"
+DISTILL_DEFAULT_DAYS = 30
+DISTILL_MIN_GROUP = 2
+DISTILL_MAX_GROUPS = 10
+DISTILL_PREVIEW_CODES = 5
+
+
+def _distill_now_z(now=None) -> str:
+    """把 `now` 归一到库里的时间口径（`%Y-%m-%dT%H:%M:%SZ`，UTC）。
+
+    缺省 = 现在；`datetime`（无 tz 视为 UTC）或 ISO8601 UTC 字符串都接受。
+    解析不了就**响亮失败**：窗口算错的建议文件会漏掉该提炼的那批 episode，
+    而且漏得无声无息——这比直接报错坏得多。
+    """
+    if now in (None, ""):
+        return now_utc()
+    if isinstance(now, datetime.datetime):
+        moment = now if now.tzinfo else now.replace(tzinfo=datetime.timezone.utc)
+        return moment.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    parsed = parse_utc(str(now))
+    if parsed is None:
+        raise ValueError(
+            f"now 必须是 ISO8601 UTC（如 2026-10-26T00:00:00Z），收到 {now!r}")
+    return parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_tags_column(raw) -> list:
+    """解析 `code_index.tags`（JSON 数组字符串）→ 去重后的标签列表。
+
+    解析失败按空处理、**不抛**：这是读侧聚类，一行坏数据不该让整个 `distill` 崩掉
+    （这一条只是不参与聚类，真相不受影响）。非字符串 / 空白 tag 同样跳过。
+    """
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(value, (list, tuple)):
+        return []
+    out = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        tag = item.strip()
+        if tag and tag not in out:
+            out.append(tag)
+    return out
+
+
+def distill_clusters(conn, *, project, days=DISTILL_DEFAULT_DAYS,
+                     min_group=DISTILL_MIN_GROUP,
+                     max_groups=DISTILL_MAX_GROUPS, now=None) -> dict:
+    """把窗口内的 episode 按 tag 聚成"同主题候选组"——**只读，不写任何东西**。
+
+    口径（与 `list_memories` 同一条）：
+      · `mem_type='episode'` 且 `status='active'`（superseded / withdrawn 不算素材：
+        它们已经是"被否掉的过去"，再拿去提炼只会把结论带回老路）；
+      · `recorded_at >= now - days`（无 `recorded_at` 的行不进窗口）；
+      · 项目**展开别名**（`resolve_project_names`，与检索同口径）。
+
+    返回
+      `{"project": 规范名, "days": 天数, "min_group": 阈值, "checked": 窗口内条数,
+        "clusters": [{"tag": t, "count": n,
+                      "episodes": [{"code","title","recorded_at"}, ...]}, ...]}`
+      ——组内按 `code` 升序；组间按条数降序、同条数按 tag 升序（要确定性：
+      同样的库两次跑必须给出同一个顺序，否则"建议"本身不可复核）。
+      `checked` 是窗口内 episode 总数（不管有没有 tag），用来说明"看了多少条"。
+    """
+    p = (project or "").strip()
+    if not p:
+        raise ValueError("distill 需要一个项目名（如 测试项目）")
+    try:
+        days = int(days)
+        min_group = int(min_group)
+        max_groups = int(max_groups)
+    except (TypeError, ValueError):
+        raise ValueError("days / min_group / max_groups 必须是整数")
+    if days < 0:
+        raise ValueError(f"days 不能为负（收到 {days}）")
+    if min_group < 1:
+        raise ValueError(f"min_group 至少为 1（收到 {min_group}）")
+    if max_groups < 1:
+        raise ValueError(f"max_groups 至少为 1（收到 {max_groups}）")
+
+    now_z = _distill_now_z(now)
+    cutoff = (parse_utc(now_z) - datetime.timedelta(days=days)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    pnames = resolve_project_names(conn, p) or [p]
+    sql = ("SELECT code, title, tags, recorded_at FROM code_index "
+           "WHERE mem_type='episode' AND status='active' AND recorded_at IS NOT NULL "
+           "AND recorded_at >= ? AND project IN ("
+           + ",".join("?" * len(pnames)) + ") ORDER BY code")
+    rows = conn.execute(sql, [cutoff] + list(pnames)).fetchall()
+
+    groups = {}
+    for code, title, tags, recorded_at in rows:
+        for tag in parse_tags_column(tags):
+            groups.setdefault(tag, []).append(
+                {"code": code, "title": title or "", "recorded_at": recorded_at})
+
+    clusters = []
+    for tag, eps in groups.items():
+        # 变异自证①：删掉这一行 → 单条 tag 也会成组（E2 必红）。
+        if len(eps) < min_group:
+            continue
+        clusters.append({"tag": tag, "count": len(eps), "episodes": eps})
+    clusters.sort(key=lambda c: (-c["count"], c["tag"]))
+    return {"project": pnames[0], "days": days, "min_group": min_group,
+            "checked": len(rows), "clusters": clusters[:max_groups]}
+
+
+def write_distill_suggestion(root, project, clusters, *, now=None) -> Path:
+    """把聚类结果落成**建议文件**（`data/projects/<项目>/提炼建议/<时间戳>.md`）。
+
+    `clusters` 收 `distill_clusters()` 的原样返回（能带上 checked / days / min_group
+    这些说明"这份建议是在什么窗口下得出的"的上下文），也收它的 `clusters` 列表
+    （调用方想先裁剪再写时用）。**本函数不接收 conn**：写建议不碰真相，
+    这是结构性的保证，不是纪律承诺（变异自证②：给它加一句 INSERT，E4 必红）。
+
+    文件里每条 source episode 以 `- <code> <title>` 出现 = 溯源；确认后写 lesson 时
+    `cause` 指向这批 code 即可。返回落盘路径。
+    """
+    if isinstance(clusters, dict):
+        items = list(clusters.get("clusters") or [])
+        checked = clusters.get("checked")
+        days = clusters.get("days")
+        min_group = clusters.get("min_group")
+        project = project or clusters.get("project") or ""
+    else:
+        items = list(clusters or [])
+        checked = days = min_group = None
+
+    p = (project or "").strip()
+    if not p:
+        raise ValueError("write_distill_suggestion 需要项目名（建议文件按项目落盘）")
+    now_z = _distill_now_z(now)
+    target_dir = Path(root) / "projects" / p / DISTILL_DIRNAME
+    target_dir.mkdir(parents=True, exist_ok=True)
+    stamp = parse_utc(now_z).strftime("%Y%m%d-%H%M%S")
+    path = target_dir / f"{stamp}.md"
+    seq = 1
+    while path.exists():                    # 同一秒跑两次不许互相覆盖
+        path = target_dir / f"{stamp}-{seq}.md"
+        seq += 1
+
+    head = [f"# 提炼建议 · {p}", "",
+            "> 本文件是**建议**，不是记忆：未入库、不自动生效；"
+            "确认后由人或 AI 另行 remember。", "",
+            f"as-of {now_z}"
+            + (f" ｜ 窗口 {days} 天" if days is not None else "")
+            + (f" ｜ 窗口内 episode {checked} 条" if checked is not None else "")
+            + (f" ｜ 组内 ≥{min_group} 条" if min_group is not None else "")
+            + f" ｜ 共 {len(items)} 组", ""]
+    body = []
+    if not items:
+        body += ["（本轮没有达到阈值的同主题 episode，未产生建议。）", ""]
+    for idx, cluster in enumerate(items, 1):
+        tag = cluster.get("tag") or ""
+        eps = cluster.get("episodes") or []
+        body += [f"## {idx}. {tag}（{len(eps)} 条）", ""]
+        for ep in eps:
+            code = ep.get("code") or ""
+            title = (ep.get("title") or "").strip()
+            body.append(f"- {code} {title}".rstrip())
+        body.append("")
+    tail = ["---", f"来源：fish distill {p}（只读聚类）；本文件不改变任何记忆状态。", ""]
+    path.write_text("\n".join(head + body + tail), encoding="utf-8")
+    return path
 
 
 def withdraw_memory(conn, code: str, reason: str = "", actor=None) -> str:
@@ -3299,6 +4515,160 @@ def find_citizen_by_name(conn, name):
         "ORDER BY created_at, citizen_id LIMIT 1", (name,)).fetchone()
 
 
+def find_same_name_citizens(conn, display_name, exclude_citizen_id=None) -> list:
+    """列出**同名的在用公民**（FB-08）：`[{citizen_id, kind}, ...]`。
+
+    为什么签发完才查（而不是签发前）：这里问的不是"能不能叫这个名字"，而是
+    "**你是不是又给自己建了一个身份**"。名字不唯一是既定决策（14：同名视作两个
+    公民，不合并），所以不能拦；但不说一声，AI 就会在两个公民名下各写一半记忆，
+    而两条通道全都返回 OK——那种分裂只有比十六进制串才发现。
+
+    `status='active'` 与 `citizen_id<>?` 来自设计给定的查询：已退出的公民不算
+    "还有人在用这个名字"，自己也不算冲突。排序用 `created_at` 保证输出确定。
+    """
+    name = (display_name or "").strip()
+    if not name:
+        return []
+    rows = conn.execute(
+        "SELECT citizen_id,kind FROM citizens "
+        "WHERE display_name=? AND status='active' AND citizen_id<>? "
+        "ORDER BY created_at, citizen_id",
+        (name, exclude_citizen_id or "")).fetchall()
+    return [{"citizen_id": r[0], "kind": r[1] or "unknown"} for r in rows]
+
+
+def same_name_notice(citizen_id, kind) -> str:
+    """FB-08 的回执文案（**唯一实现**）：CLI 与 MCP 两个入口必须说同一句话。
+
+    一句话三件事：命中了谁（id + 形态）、不做什么（不自动合并）、下一步怎么做
+    （`--citizen` 绑定）。少任何一件，读的人都会误以为系统"已经帮你合并了"。
+    """
+    return (f"检测到同名公民 {citizen_id}（{kind or 'unknown'}）；"
+            "如需沿用请用 --citizen 绑定（不自动合并）")
+
+
+# `related_citizens` 允许的**锚定列白名单**（关系名 → 列名）。
+# 为什么是白名单而不是让调用方传列名：SQL 里的列名只能来自实现内部的常量表，
+# 传进来的永远是**值**。否则这个函数就是一个 ORDER BY/WHERE 注入口。
+RELATED_ANCHORS = (("session", "host_session_key"),
+                   ("name", "display_name"),
+                   ("account", "account_id"))
+
+# 相关公民清单的硬上限（`whoami all=true`）。20 足够覆盖"同一 AI 的两三套身份"，
+# 又不至于让一次诊断变成全库扫描——这个清单的用途是**对人**，不是导出。
+RELATED_CITIZENS_LIMIT = 20
+
+
+def related_citizens(conn, *, display_name=None, host_session_key=None,
+                     account_id=None, exclude_citizen_id=None,
+                     limit=RELATED_CITIZENS_LIMIT) -> list:
+    """与本会话上下文相关的公民（`whoami all=true` 的唯一取数口，FB-03）。
+
+    三条锚**任一命中**即算相关，按 citizen_id 去重后回一行一条：
+      · `session` —— `host_session_key` 相同（同一个宿主会话建出了两个公民）；
+      · `name`    —— `display_name` 相同（决策 14：同名就是两个公民，不合并）；
+      · `account` —— `account_id` 相同（同一账号在不同宿主/设备上的身份）。
+
+    这正是"身份双视图"的取证面：`register` 说 A、带 token 的 `whoami` 说 B，
+    两个公民都活着、都不报错。系统**不合并**（那是人的决定），但必须能一眼看见
+    "原来有两条身份"以及它们各自长什么样、手上还有几条有效凭证。
+
+    几条实现纪律：
+      · **不是全库 dump**：一个锚都没有就直接空转返回（`[]`），绝不"没锚就列全部"；
+        有锚也受 `limit` 截断，调用方负责说明"被截断了"。
+      · `status` 不过滤：退役的公民也要在清单里被看见（列上有 status 一栏）；
+        但排序把 `active` 放前面——"谁现在还在用"才是诊断的第一问题。
+      · `token_count` 只数**未吊销**的凭证：一条已吊销的 token 说明不了"它还活着"。
+      · 读的是热表 `citizens`（归档公民不参与"当前的上下文"，它们已经搬去冷表）。
+    """
+    values = {"session": host_session_key, "name": display_name,
+              "account": account_id}
+    columns = ("citizen_id", "display_name", "kind", "status", "host",
+               "last_seen_at", "created_at")
+    found = {}
+    for relation, column in RELATED_ANCHORS:
+        anchor = values[relation]
+        anchor = anchor.strip() if isinstance(anchor, str) else anchor
+        if not anchor:
+            continue
+        rows = conn.execute(
+            f"SELECT {', '.join(columns)} FROM citizens WHERE {column}=? "
+            "ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, "
+            "created_at, citizen_id", (anchor,)).fetchall()
+        for row in rows:
+            item = found.get(row[0])
+            if item is None:
+                item = dict(zip(columns, row))
+                item["relations"] = []
+                item["token_count"] = 0
+                found[row[0]] = item
+            if relation not in item["relations"]:
+                item["relations"].append(relation)
+    if exclude_citizen_id:
+        found.pop(exclude_citizen_id, None)
+    if not found:
+        return []
+    ids = list(found.keys())
+    placeholders = ",".join("?" * len(ids))
+    counts = dict(conn.execute(
+        "SELECT citizen_id,COUNT(*) FROM session_tokens WHERE revoked_at IS NULL "
+        f"AND citizen_id IN ({placeholders}) GROUP BY citizen_id",
+        ids).fetchall())
+    order = {relation: index for index, (relation, _column) in enumerate(RELATED_ANCHORS)}
+    items = sorted(
+        found.values(),
+        key=lambda it: (0 if it["status"] == "active" else 1,
+                        min(order[r] for r in it["relations"]),
+                        it["created_at"] or "", it["citizen_id"]))
+    for item in items:
+        # 关系名按白名单顺序归一（session → name → account），保证输出稳定可判。
+        item["relations"] = [r for r, _c in RELATED_ANCHORS if r in item["relations"]]
+        item["token_count"] = int(counts.get(item["citizen_id"], 0))
+    cut = int(limit or 0)
+    return items[:cut] if cut > 0 else []
+
+
+def related_citizens_lines(conn, citizen_id=None) -> list:
+    """`whoami --all`（CLI）与 `whoami all=true`（MCP）的**唯一渲染**。
+
+    2026-10-26（评审 🟠3）：CLI 原来没有 `--all`，MCP 有——同一句"还有谁和我占着
+    同一个上下文"，在一个入口能问、在另一个入口问不到。补 CLI 的那一刻必须
+    **把渲染也搬下来**：两个入口各写一段文案，第二次改口径就会漂（本轮修的
+    三处漂移里有两处正是这个来源）。所以 MCP 的 `_related_citizens_lines` 现在
+    只做一件事——把 `ident` 变成一个 citizen_id 然后调这里。
+
+    `citizen_id` 为空 = 没有锚（没带有效凭证）：必须说清"不是库里没有人"，
+    否则"没列"会被读成"没有"。
+    """
+    head = ("相关公民（**不含你自己**；按 会话/同名/账号 关联，不是全库清单；"
+            "token 数 = 未吊销凭证数，最多 "
+            f"{RELATED_CITIZENS_LIMIT} 条）：")
+    if not citizen_id:
+        return [head,
+                "- （未列出）这份清单需要一条**有效 token** 当锚：没凭证就没有"
+                "会话键、公民名与账号可关联——这不等于“库里没有人”。"]
+    me = load_citizen(conn, citizen_id) or {}
+    rows = related_citizens(
+        conn,
+        display_name=me.get("display_name"),
+        host_session_key=me.get("host_session_key"),
+        account_id=me.get("account_id"),
+        exclude_citizen_id=citizen_id)
+    if not rows:
+        return [head, "- （没有匹配到相关公民：本会话、同名、同账号都没有别人）"]
+    lines = [head]
+    for it in rows:
+        lines.append(
+            f"- {it['citizen_id']}｜{it['display_name'] or '（无名）'}｜"
+            f"{it['kind'] or 'unknown'}｜{it['status'] or 'unknown'}｜"
+            f"宿主 {it['host'] or '未记录'}｜最近活跃 {it['last_seen_at'] or '未记录'}｜"
+            f"token {it['token_count']}｜关联：{'/'.join(it['relations'])}")
+    if len(rows) >= RELATED_CITIZENS_LIMIT:
+        lines.append(f"（已达上限 {RELATED_CITIZENS_LIMIT} 条，可能还有更多；"
+                     "全库清单请用 `fish citizen list`）")
+    return lines
+
+
 def find_duplicate_display_names(conn) -> list:
     """列出有重复的 display_name（同名多公民）。
 
@@ -3390,6 +4760,43 @@ def rename_citizen(conn, citizen_id, new_name, *, actor=None, reason="") -> dict
             "changed": True, "same_name_exists": same, "event": "citizen.renamed"}
 
 
+def resolve_actor_from_token(conn, token=None):
+    """把 `FISH_SESSION_TOKEN`（或显式给的 token）解成公民行；解不出返回 None。
+
+    为什么行动者解析要读凭证（2026-10-26 复审 ⚪N6）：`FISH_SESSION_TOKEN` 原先只有
+    `whoami` 一个消费者，于是同一个 AI 走 MCP 有归属、走 CLI 得到「未确定行动者」——
+    **token 是唯一归属**这句话在 CLI 面上是空的。这里把它接进行者解析的主路，
+    `fish inject` / `fish whoami` 因此与 MCP 同源（同一个 token → 同一个公民）。
+
+    返回形状必须与 `find_citizen_by_name` **完全一致**（citizen_id, display_name,
+    kind, role, host）——调用点按位置取 `actor[0]` / `actor[1]`，形状变了会静默错位。
+
+    无效/吊销/过期凭证一律返回 None（判定只有 `validate_session_token` 一处）；
+    已归档的公民也返回 None：归档 = 这个身份不再参与在册行动。
+    """
+    raw = (token or "").strip() or env_session_token()
+    if not raw:
+        return None
+    citizen_id = validate_session_token(conn, raw)
+    if not citizen_id:
+        return None
+    return conn.execute(
+        "SELECT citizen_id,display_name,kind,role,host FROM citizens_all "
+        "WHERE citizen_id=? AND status='active'", (citizen_id,)).fetchone()
+
+
+def token_actor_citizen_id(conn):
+    """env 凭证解出的 citizen_id（无凭证 / 无效 / 已归档 → None）。
+
+    给"没显式指定归属"的写入口用（`fish remember` 缺 `--owner`）：MCP 侧的口径是
+    `_owner_value` = "token 有效就记给该公民"，CLI 侧原先只会记给系统主人——
+    同一个 AI 从两个入口写同一条记忆，归属却不同（2026-10-26 复审 ⚪N6）。
+    **只补"没指定"这一档**：显式给了 `--owner` 时以调用方为准，绝不覆盖。
+    """
+    row = resolve_actor_from_token(conn)
+    return row[0] if row else None
+
+
 def resolve_actor(conn, actor_name=None):
     """当前行动者：按名字查公民；查不到返回 None（未登记访客）。
 
@@ -3397,12 +4804,23 @@ def resolve_actor(conn, actor_name=None):
       owner  = 系统主人（human/resident），一个系统只有一个
       actor  = 此刻在动手的公民（visitor/role），可能每次会话都不同
     whoami 必须返回 actor，否则 AI 会自称主人。
+
+    优先级（2026-10-26 复审 ⚪N6 补齐最后一档）：
+      显式 actor_name > `FISH_ACTOR` env > `config.actor_name` > **env 凭证的公民**。
+    最后那一档为什么必须有：名字是"描述性标签"，凭证是"归属证据"；只认名字时，
+    一个只带凭证的 CLI 会话会得到"没有行动者"，而它手上明明握着系统签发的归属。
+    显式给了 `actor_name` 但查不到时**不回落**到凭证：那是调用方写错了名字
+    （拼错/刚退役），静默换成另一个人比报空更坏。
     """
-    if actor_name is None:
-        # 优先级：环境变量 FISH_ACTOR > config.actor_name
-        # 环境变量优先，因为 MCP hook 是独立进程，配置不一定能传进来
-        actor_name = os.environ.get("FISH_ACTOR") or get_config(conn, "actor_name")
-    return find_citizen_by_name(conn, actor_name)
+    if actor_name is not None:
+        return find_citizen_by_name(conn, actor_name)
+    # 优先级：环境变量 FISH_ACTOR > config.actor_name
+    # 环境变量优先，因为 MCP hook 是独立进程，配置不一定能传进来
+    name = os.environ.get("FISH_ACTOR") or get_config(conn, "actor_name")
+    row = find_citizen_by_name(conn, name)
+    if row:
+        return row
+    return resolve_actor_from_token(conn)
 
 
 # ------------------------------------------------------ 身份层 P1-b：会话身份与凭证
@@ -3448,6 +4866,38 @@ SESSION_ALIAS_ENVS = ("FISH_SESSION_ACTOR", "FISH_ACTOR")
 SELF_SESSION_PREFIX = "self:"
 ANON_SESSION_PREFIX = "anon:"
 
+# 「会话名入参」里可能**已经带着**的前缀（FB-05）。两类：
+#   · 自建前缀 `self:` / `anon:`（AI 把上一次回执里的 session_key 原样回传）；
+#   · 宿主前缀 `dsh:` / `codebuddy:` / `claude:`（AI 把 whoami/日志里看到的机器键回传），
+#     外加历史遗留的 `zcode:` / `workbuddy:`（宿主方言名，见 prompt-push 的 choices）。
+# 为什么必须识别它们：再拼一层就是 `self:self:xxx`——同一个会话两条键，
+# 而"同一个会话 → 同一个公民"正是这套身份的幂等承诺（生产库已实锤
+# `self:self:fish外部评估`，就是这条没做）。
+SESSION_NAME_PREFIXES = (SELF_SESSION_PREFIX, ANON_SESSION_PREFIX,
+                         "dsh:", "codebuddy:", "claude:", "zcode:", "workbuddy:")
+
+
+def strip_session_name_prefixes(name):
+    """剥掉会话名里**已经带着**的已知前缀（幂等：`self:self:x` → `x`）。
+
+    只剥前缀、不动名字本体：`self:abc` 与 `abc` 必须落到**同一个** session_key，
+    否则"重跑 start 命中同一个公民"这句话是假的（这就是 FB-05 的判据）。
+    循环剥是为了收拾历史脏值（`self:self:self:x` 在各种重试里是会长出来的）。
+    """
+    text = (name or "").strip()
+    changed = True
+    while changed:
+        changed = False
+        low = text.lower()
+        for prefix in SESSION_NAME_PREFIXES:
+            # `len(text) > len(prefix)`：纯前缀（`"self:"`）不剥——剥成空串等于
+            # 把"给了名字"变成"没给名字"，那是另一条分支（匿名），不该在这里被制造。
+            if low.startswith(prefix) and len(text) > len(prefix):
+                text = text[len(prefix):].strip()
+                changed = True
+                break
+    return text
+
 # token 明文的前缀。存在理由见 `issue_session_token` 的 docstring：
 # 主要是**别以 `-` 开头**（argparse 会把它当选项），顺带让 token 自解释、可被扫描器识别。
 SESSION_TOKEN_PREFIX = "fsh_"
@@ -3491,6 +4941,30 @@ def env_session_alias(environ=None):
     return None
 
 
+# 凭证明文的 env 来源（2026-10-26 · F3）。
+# 与 `SESSION_ALIAS_ENVS` 的区别：那两个是**会话名**（描述性标签），这个是**凭证**
+# （决定归属的 bearer token），语义完全不同，所以分开一组常量，不混在一起。
+SESSION_TOKEN_ENVS = ("FISH_SESSION_TOKEN",)
+
+
+def env_session_token(environ=None):
+    """凭证的 env 来源（`FISH_SESSION_TOKEN`）——CLI 侧的"我手上这条 token"。
+
+    为什么需要它（2026-10-26 · F3）：MCP 的 token 是**工具入参**（每次调用显式带），
+    而 CLI 一次进程一条命令，没有"这次调用"可挂；`fish whoami` 若只认 `--token`，
+    每次都要把明文写进命令行（会落进 shell 历史与宿主日志）。env 是 CLI 唯一的
+    会话级载体，与 `FISH_SESSION_ACTOR`（会话名）、`FISH_ACTOR`（账号）同一族。
+
+    **有效性判定不在这里做**：拿到明文之后一律交给 `validate_session_token`。
+    """
+    environ = os.environ if environ is None else environ
+    for var in SESSION_TOKEN_ENVS:
+        raw = (environ.get(var) or "").strip()
+        if raw:
+            return raw
+    return None
+
+
 def env_actor_name(environ=None):
     """AI 账号的 env 来源（`FISH_ACTOR`）。与"会话名"不是一个概念：账号跨会话，会话不跨。"""
     environ = os.environ if environ is None else environ
@@ -3510,7 +4984,10 @@ def build_session_identity(alias=None, environ=None) -> dict:
     硬编一个稳定 key 等于凭空宣布一个事实；宁可多建一个匿名公民，也不假装认识它。
     """
     facts = host_session_facts(environ)
-    reported = (alias or "").strip() or env_session_alias(environ)
+    # FB-05：入参里的会话名先**剥掉已知前缀**再拼（唯一入口就在这里）。
+    # 顺序不能反：先拼后剥会漏掉"env 里的自报名也带前缀"这一路（历史环境的残留值）。
+    reported = strip_session_name_prefixes(
+        (alias or "").strip() or env_session_alias(environ))
     if facts["evidence"] == "machine":
         return {"session_key": facts["session_key"], "evidence": "machine",
                 "channel": "cli", "host": facts["host"], "alias": reported,
@@ -3561,6 +5038,26 @@ def auto_session_display_name(host, session_key, role=None) -> str:
     return f"{base}:{role}" if role else base
 
 
+# CLI 入口的 shim 名（FB-13）。`install_cli.py --apply` 生成的就是它。
+CLI_ENTRY_SHIM = "fish.cmd"
+
+
+def cli_entry_hint(p0_dir=None) -> str:
+    """回执里的「CLI 入口」一行（FB-13）。**唯一实现**，whoami / register 共用。
+
+    为什么把它写进回执：装好 MCP 的 AI 手上只有**工具**，没有**命令**。它想跑
+    `fish session start` 时会得到 `'fish' 不是内部或外部命令`，然后**放弃并绕路**——
+    绕路的具体形态就是"身份未核"的日常来源（明明能签 machine 级，却一直用
+    self-reported 在跑）。一行路径的成本，换掉一次静默降级。
+
+    `<root>/p0/fish.py` 里的 root 是仓库根（`p0` 的上一级）；这里直接给绝对路径，
+    因为它要能被**复制粘贴就能跑**。
+    """
+    p0 = Path(p0_dir) if p0_dir else Path(__file__).resolve().parent
+    return (f"CLI 入口：python {p0 / 'fish.py'}"
+            f"（或 install_cli.py --apply 生成 {CLI_ENTRY_SHIM}）")
+
+
 def hash_session_token(token: str) -> str:
     """库里只存 sha256(token)。**明文没有第二份副本**（表里没有明文列）。"""
     return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
@@ -3584,6 +5081,34 @@ def _is_expired(expires_at, at=None) -> bool:
     if not expires_at:
         return False
     return expires_at <= (at or now_utc())
+
+
+def remaining_token_hours(expires_at, at=None) -> int:
+    """到 `expires_at` 还剩几小时：**未过期时向上取整、至少 1；已过期返回 0**。
+
+    为什么方向是"向上"：剩 20 分钟报 1 小时比报 0 更接近事实（"还没到期"这件事
+    在读数上不能被抹平成 0），而 `max(1, ...)` 兜住"剩 1 秒"被算成 0 的边界——
+    同一秒内的读数不该在 1 和 0 之间跳。
+
+    **2026-10-26 修（评审 🟠1）**：旧实现对**过去**的 `expires_at` 也走同一条
+    `max(1, ...)`，于是 `expires_at` 已经过去 3 小时的凭证被念成「剩余 1 小时」——
+    而同一份回执的另一行（身份来源）老实写着「未归属」。两句话互相矛盾，读的人
+    会以为"还能用一小时"，然后带着一条死凭证去写入，写入被记成 unattributed。
+    现在**已过期返回 0**，由调用方（`credential_state_line`）走「已过期」那一档：
+    读数不许再靠 `max(1, …)` 伪造一个"还剩一点"的假象。
+
+    非标准 `expires_at`（长度/分隔符不是定长 UTC）会抛 `ValueError`：这是底层
+    读数函数，**判据应当能看见坏数据**；whoami 那侧另有兜底（见
+    `credential_state_line`），不许让探针崩在措辞层。
+    """
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    moment_text = at or now_utc()
+    if _is_expired(expires_at, moment_text):
+        return 0
+    moment = datetime.datetime.strptime(moment_text, fmt)
+    expire = datetime.datetime.strptime(expires_at, fmt)
+    seconds = (expire - moment).total_seconds()
+    return max(1, int(math.ceil(seconds / 3600.0)))
 
 
 def issue_session_token(conn, *, citizen_id, session_key, evidence, channel,
@@ -3684,6 +5209,88 @@ def validate_session_token(conn, token, at=None):
     if info["expires_at"] and info["expires_at"] <= moment:
         return None
     return info["citizen_id"]
+
+
+# ------------------------------------------- 身份来源 / 凭证状态（MCP 与 CLI 共用一份措辞）
+#
+# 为什么必须共用（2026-10-26 · FB-03 / FB-07 / F3）：同一件事（"这次回执凭什么算身份"
+# "我这条凭证还能用多久"）在两个入口各写一份，漂移是必然的——MCP 改了口径，CLI 还念
+# 旧台词，读的人会把两句话当两个事实。所以**文案与判定都收在这里**，两个入口只调。
+IDENTITY_SOURCE_TOKEN = "身份来源：token（session_tokens）"
+IDENTITY_SOURCE_REGISTER = "身份来源：register 登记（不参与归属）"
+IDENTITY_SOURCE_UNATTRIBUTED = "身份来源：未归属"
+
+CREDENTIAL_NO_TOKEN = "凭证状态：未提供凭证（无凭证写入的归属会记成 unattributed）"
+CREDENTIAL_UNKNOWN = ("凭证状态：未知（这条 token 不在库中——明文只在签发时输出一次，"
+                      "丢了就重签：同一个 session_name → 同一个公民，只换凭证）")
+CREDENTIAL_EXPIRED_FMT = "凭证状态：已过期（{expires_at}）；重跑 session_start 换一条"
+
+
+def identity_source_line(citizen_id=None, *, registered=False) -> str:
+    """一行写明**这条回执的身份是从哪来的**（三档，MCP / CLI 共用）。
+
+      · `token（session_tokens）`：有一条**有效**凭证，归属以它为准；
+      · `register 登记（不参与归属）`：register 的回执——它只建公民、不绑定会话，
+        所以这条身份不参与任何写入归属；
+      · `未归属`：什么都没有（没带凭证，也不是 register 的回执）。
+
+    判定不在这一层：`citizen_id` 必须由 `validate_session_token` 算出来
+    （全仓唯一一处"什么算有效"）。这里只负责措辞。
+    """
+    if citizen_id:
+        return IDENTITY_SOURCE_TOKEN
+    return IDENTITY_SOURCE_REGISTER if registered else IDENTITY_SOURCE_UNATTRIBUTED
+
+
+def credential_state_line(conn, token) -> str:
+    """本条凭证**处于什么状态**（一行五档，MCP / CLI 共用唯一实现）。
+
+    五档：没带凭证 / 不在库中 / 已吊销 / **已过期** / 永久·剩余 N 小时。
+    与 `ident.status` 的分工：后者只回答"这次调用能不能署名"，这一行走得更远——
+    AI 看到「身份未核」时分得清是**哪种**未核，才知道该不该重签（重签是唯一出口）。
+
+    **2026-10-26 修（评审 🟠1）**：旧实现只有四档，**没有「已过期」**。过期凭证落到
+    最后一档，被 `remaining_token_hours` 的 `max(1, …)` 念成「剩余 1 小时」——而同一
+    回执的「身份来源」行老实写着「未归属」。同一屏两句话，一句说还能用、一句说不管用，
+    读的人只会相信前一句（它更具体），于是带着死凭证去写入、把归属丢成 unattributed。
+    现在按 `_is_expired` 单列一档，并把 `expires_at` 原值印出来（可核对，不用猜）：
+    过期与吊销的处置**不同**（吊销要查是谁吊销的，过期只需重签），所以档位必须分开。
+
+    **判定仍然不在这里做**：吊销与到期都读 `lookup_session_token` 的现查结果，
+    "什么算失效"永远只有 `validate_session_token` 一个答案；这里只负责措辞。
+    非标准 `expires_at`（坏数据）**不许把 whoami 弄崩**：`remaining_token_hours`
+    抛 ValueError 时回落打印原始值——探针崩掉的代价比读数不精确大得多（评审 ⚪12）。
+    """
+    if not token:
+        return CREDENTIAL_NO_TOKEN
+    info = lookup_session_token(conn, token)
+    if info is None:
+        return CREDENTIAL_UNKNOWN
+    if info["revoked_at"]:
+        return f"凭证状态：已吊销（{info['revoked_at']}）——重跑 session_start 换一条"
+    if not info["expires_at"]:
+        return "凭证状态：永久（随会话 end 吊销）"
+    # 2026-10-26（复审 ⚪N10）：**先校验格式，再判断"过没过期"**。
+    #
+    # 旧实现直接问 `_is_expired`，而它靠"定长 UTC 的字典序 = 时序"工作——
+    # 垃圾值 `!!bad!!` 与 `2026-…` 比较时字典序更小，于是被判成**已过期**，
+    # 回执念出「已过期（!!bad!!）」：把一条数据损坏说成了一个具体事实。
+    # 先 `parse_utc` 校验：解析不了就统一说"无法解析"（格式坏 = 归因未知，
+    # 不是"过期"也不是"还有几小时"）。判定仍只有 `validate_session_token` 一处。
+    if parse_utc(info["expires_at"]) is None:
+        return (f"凭证状态：到期时刻无法解析（{info['expires_at']!r}）"
+                "——这条凭证不算有效（归属会被记成 unattributed）；"
+                "重跑 session_start 换一条")
+    if _is_expired(info["expires_at"]):
+        return CREDENTIAL_EXPIRED_FMT.format(expires_at=info["expires_at"])
+    try:
+        hours = remaining_token_hours(info["expires_at"])
+    except ValueError:
+        # 坏 `expires_at`（不是定长 UTC）：如实印原值 + 说明无法解析。
+        # 不抛：whoami 是探针，崩在措辞层等于让"我这条凭证怎么了"这个问题无解。
+        return (f"凭证状态：到期时刻无法解析（{info['expires_at']!r}）"
+                "——重跑 session_start 换一条")
+    return f"凭证状态：剩余 {hours} 小时"
 
 
 def find_session_citizen(conn, session_key):
@@ -3835,6 +5442,22 @@ def normalize_workspace_path(path) -> str:
     return s.lower()
 
 
+def _canonical_path(path) -> str:
+    """物理路径归一（junction / symlink / 短路径都折到同一目录）；失败退回文本归一。
+
+    2026-10-27（C）：`C:\\Users\\x\\.dsh` 与 `I:\\...\\home` 是**同一个物理目录**，
+    只做文本归一它们永远是两个字符串：映射里写的是后者、hook 报的是前者 → 解析成 None。
+    `realpath` 解析失败（盘不存在/权限）时**不许抛**，退回文本归一即可。
+    """
+    text = normalize_workspace_path(path)
+    if not text:
+        return ""
+    try:
+        return normalize_workspace_path(os.path.realpath(str(path)))
+    except (OSError, ValueError):
+        return text
+
+
 def resolve_project_by_cwd(conn, cwd) -> "str | None":
     """按**最长前缀 + 路径分量边界**把工作区路径解析成项目前缀；没有匹配返回 None。
 
@@ -3850,24 +5473,33 @@ def resolve_project_by_cwd(conn, cwd) -> "str | None":
     读侧再归一一次：库里若有人手写了大写/尾斜杠的行，这里不让它变成幽灵路径
     （写侧 set_workspace_mapping 已经归一，读侧这次是防手写数据）。
 
+    2026-10-27（C · 链接坑）：文本归一之外**再按 `os.path.realpath` 比一次**——junction /
+    symlink / 8.3 短路径会让同一个物理目录有两种写法。最长前缀与分量边界的语义不变：
+    物理比对只在文本没命中时补一次，长度仍用**命中那条前缀**的长度（前缀越长越优先）。
+
     **没有匹配返回 None，绝不回退到"猜一个"**：R1 的病根就是猜（见
     _resolve_injection_project 的四档说明）。返回 None 让上层能直说"未声明"。
     """
     target = normalize_workspace_path(cwd)
     if not target:
         return None
+    target_canon = _canonical_path(cwd)
     best = None                       # (prefix_len, project)
     for prefix, project in conn.execute(
             "SELECT path_prefix, project FROM workspace_map").fetchall():
         norm = normalize_workspace_path(prefix)
         if not norm:
             continue
-        if target == norm or target.startswith(norm + "/"):
-            key = (len(norm), project)
-            # 同长度不可能有两条不同前缀（主键唯一）；仍给一个稳定次序，
-            # 免得将来碰上脏数据时输出随查询顺序漂。
-            if best is None or key[0] > best[0] or (key[0] == best[0] and key[1] < best[1]):
-                best = key
+        canon = norm
+        if not (target == norm or target.startswith(norm + "/")):
+            canon = _canonical_path(prefix)       # C：两种写法指向同一物理目录
+            if not (target_canon == canon or target_canon.startswith(canon + "/")):
+                continue
+        key = (len(canon), project)
+        # 同长度不可能有两条不同前缀（主键唯一）；仍给一个稳定次序，
+        # 免得将来碰上脏数据时输出随查询顺序漂。
+        if best is None or key[0] > best[0] or (key[0] == best[0] and key[1] < best[1]):
+            best = key
     return best[1] if best else None
 
 
@@ -4295,6 +5927,10 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
          "citizen_created": who["created"], "rotated": rotated,
          "stint_actions": [{"project": s["project"], "action": s["action"]}
                            for s in stints]})
+    # FB-08：签发后查**同名在用公民**。查在签发之后是刻意的——名字不唯一是既定
+    # 决策（不合并、不拦），这里只负责让"你可能又建了一个自己"这件事可见。
+    same_name = find_same_name_citizens(
+        conn, who["display_name"], who["citizen_id"])
     return {"token": issued["token"], "token_hash": issued["token_hash"],
             "citizen_id": who["citizen_id"], "session_key": ident["session_key"],
             "evidence": ident["evidence"], "channel": ident["channel"],
@@ -4305,7 +5941,8 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
             "warning": ident["warning"],
             "issued_at": issued["issued_at"], "expires_at": issued["expires_at"],
             "project": project_list[0] if len(project_list) == 1 else None,
-            "projects": project_list, "archived": who["archived"]}
+            "projects": project_list, "archived": who["archived"],
+            "name_conflicts": same_name}
 
 
 def assert_agent_parent_allowed(parent) -> None:
@@ -4443,6 +6080,127 @@ def session_status(conn, *, token=None, environ=None) -> dict:
             "stints": stints, "stint": stints[-1] if stints else None}
 
 
+# ------------------------------------------------------ 公民归档（FB-12 · 30 天裁决的另一半）
+#
+# 2026-10-25 的裁定只落到了一半：配置项 `session.archive_after_days` 有、冷表
+# `citizens_archive` 有、`citizens_all` 视图也有，但**没有任何调用点**——于是整条
+# 策略是"写着但不存在"的状态（冷表永远是空的，热表永远只增）。下面补齐执行面。
+#
+# 五条判据必须同时满足才动，缺一条就跳过并写明理由：
+#   ① `archived_at IS NULL`      —— 没归档过（幂等）
+#   ② `is_owner=0`               —— 主人永不自动归档（搬走主人 = 系统没有主人）
+#   ③ `last_seen_at` 早于 now-days —— 闲置；**没有 last_seen_at 一律跳过**（无法判定）
+#   ④ 无未关档期（`project_stints.to_ts IS NULL` 不存在）—— 正在项目上干活
+#   ⑤ 无未失效凭证（未吊销且(永久或未到期)）—— 手里还有能用的 token
+# 为什么 ④⑤ 是硬门槛：搬走一个正在干活/还握着凭证的公民，它下次调用会**查不到自己**
+# （变成"未归属"）却毫无报错——那是静默降级，比不归档糟得多。
+CITIZEN_ARCHIVE_DAYS_KEY = "session.archive_after_days"
+CITIZEN_ARCHIVE_REASON = "闲置归档"
+
+
+def _has_open_stint(conn, citizen_id) -> bool:
+    """还有开着的档期吗（`to_ts IS NULL` = 此刻正在某个项目上）。"""
+    return bool(conn.execute(
+        "SELECT 1 FROM project_stints WHERE citizen_id=? AND to_ts IS NULL LIMIT 1",
+        (citizen_id,)).fetchone())
+
+
+def _has_live_token(conn, citizen_id, at) -> bool:
+    """还有没失效的凭证吗：未吊销 且（永久 或 到期时间在 `at` 之后）。"""
+    return bool(conn.execute(
+        "SELECT 1 FROM session_tokens WHERE citizen_id=? AND revoked_at IS NULL "
+        "AND (expires_at IS NULL OR expires_at > ?) LIMIT 1",
+        (citizen_id, at)).fetchone())
+
+
+def archive_citizens(conn, *, days, dry_run=False, now=None,
+                     reason=CITIZEN_ARCHIVE_REASON) -> dict:
+    """把闲置超过 `days` 天的**非主人 / 无档期 / 无凭证**公民搬进 `citizens_archive`。
+
+    归档 = INSERT 冷表 + DELETE 热表 + 一条 `citizen.archived` 事件（含 reason 与
+    判定依据）。**搬而不是复制**：`citizens_all` 是 UNION ALL，同一 id 两边都有
+    会被看见两条（那是搬迁出错的信号，不该被去重掩盖）。
+
+    返回 `{days, now, cutoff, dry_run, checked, planned, archived, archived_count,
+    skipped}`。`dry_run=True` 只算不动——归档是"搬行"，先看计划再执行是纪律
+    （同正文归档 `fish archive` 默认演练）。
+
+    `now` 接受 ISO 串或 `datetime`（判据要能钉住时钟："2 天前活跃"不该依赖测试
+    跑多快）。`days<1` **响亮拒绝**：0 的语义是"不自动归档"，把它当阈值会归档掉
+    所有非主人公民；跳过这句判断的责任在调用方（daily_report / CLI）。
+    """
+    days = int(days or 0)
+    if days < 1:
+        raise ValueError(
+            f"days 必须 ≥1（收到 {days}）：0 的语义是「不自动归档」，"
+            "调用方应先判 0 再决定跳过。")
+    now_ts = _utc_str(now) if now is not None else now_utc()
+    now_dt = parse_utc(now_ts)
+    if now_dt is None:
+        raise ValueError(
+            f"now 必须是 ISO8601 UTC（如 2026-10-26T04:00:00Z），收到 {now_ts!r}")
+    cutoff = (now_dt - datetime.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    idle_before = now_dt - datetime.timedelta(days=days)
+
+    rows = conn.execute(
+        "SELECT citizen_id, display_name, kind, last_seen_at FROM citizens "
+        "WHERE archived_at IS NULL AND COALESCE(is_owner,0)=0 "
+        "ORDER BY citizen_id").fetchall()
+    planned, skipped, archived = [], [], []
+    for cid, name, kind, last_seen in rows:
+        last = (last_seen or "").strip()
+        entry = {"citizen_id": cid, "display_name": name or "", "kind": kind or ""}
+        if not last:
+            skipped.append({**entry, "why": "没有 last_seen_at（无法判定闲置）"})
+            continue
+        seen_dt = parse_utc(last)
+        if seen_dt is None:
+            skipped.append({**entry, "why": f"last_seen_at 无法解析（{last}）"})
+            continue
+        if seen_dt >= idle_before:
+            skipped.append({**entry, "why": f"仍活跃（最后活跃 {last} ≥ 截止 {cutoff}）"})
+            continue
+        if _has_open_stint(conn, cid):
+            skipped.append({**entry, "why": "有未关档期（正在某个项目上干活）"})
+            continue
+        if _has_live_token(conn, cid, now_ts):
+            skipped.append({**entry, "why": "还有未失效凭证（搬走会让它变成未归属）"})
+            continue
+        planned.append({**entry, "last_seen_at": last})
+
+    if not dry_run:
+        cols = ", ".join(_CITIZENS_ALL_COLUMNS)
+        marks = ", ".join("?" for _ in _CITIZENS_ALL_COLUMNS)
+        for it in planned:
+            row = conn.execute(f"SELECT {cols} FROM citizens WHERE citizen_id=?",
+                               (it["citizen_id"],)).fetchone()
+            if row is None or row[_CITIZENS_ALL_COLUMNS.index("archived_at")]:
+                continue                      # 被并发处理过：跳过，不当成失败
+            info = dict(zip(_CITIZENS_ALL_COLUMNS, row))
+            info["archived_at"] = now_ts
+            conn.execute(f"INSERT INTO citizens_archive ({cols}) VALUES ({marks})",
+                         tuple(info[c] for c in _CITIZENS_ALL_COLUMNS))
+            conn.execute("DELETE FROM citizens WHERE citizen_id=?", (it["citizen_id"],))
+            append_event(
+                conn, "citizen.archived",
+                # 这是**系统按配置判的**，不是某个会话的主张：证据级别写 machine，
+                # 依据逐条进 payload，事后能回答"凭什么把它搬走"。
+                {"citizen_id": it["citizen_id"], "evidence_level": "machine"},
+                {"kind": "citizen", "id": it["citizen_id"]},
+                {"reason": reason,
+                 "evidence": {"days": days, "now": now_ts, "cutoff": cutoff,
+                              "last_seen_at": it["last_seen_at"],
+                              "is_owner": 0, "live_token": False, "open_stint": False},
+                 "display_name": it["display_name"], "kind": it["kind"],
+                 "archived_at": now_ts})
+            archived.append(it["citizen_id"])
+        conn.commit()
+
+    return {"days": days, "now": now_ts, "cutoff": cutoff, "dry_run": bool(dry_run),
+            "checked": len(rows), "planned": planned, "archived": archived,
+            "archived_count": len(archived), "skipped": skipped}
+
+
 def load_decay_cfg(conn):
     """从 config 表读出全部衰减参数（缺项回落默认值）。"""
     return {k: get_config(conn, k) for k in CONFIG_DEFAULTS if k.startswith("decay.")}
@@ -4470,6 +6228,85 @@ def compute_decay(mem_type, last_accessed_at, recorded_at, cfg=None):
     if decay > archive_t:
         return decay, "dormant"
     return decay, "archived"
+
+
+# ------------------------------------------------------ 陈旧性（2026-10-26 · T04）
+# 用户点名的核心：**相关性对了，但信息过时 = 错的信息**，比不推更糟。
+#
+# 为什么参考时间必须是 `occurred_at/recorded_at`（**内容年龄**）而不是
+# `last_accessed_at`：`_touch()` 在每次注入展示时都会刷新 `last_accessed_at`
+# （mcp_server.py:1090-1108），用它算陈旧性会把"刚被展示过的老事实"当成新鲜——
+# 那正是这个功能要防的错。`access_count` 只做小幅置信度加成，绝不改年龄。
+#
+# 为什么复用 `compute_decay`：半衰期参数与 dormant 门槛只许有一处定义
+# （`fish.py:4451` 那一份）；新造一套衰减公式等于迟早两套口径打架。
+STALE_SENSITIVE_TYPES = ("fact", "episode", "artifact")
+# 规范/教训按年龄打折是荒谬的：一条铁律不会因为写在两年前就变假。
+FRESHNESS_EXEMPT_TYPES = ("rule", "identity", "lesson")
+
+
+def _utc_str(value) -> str:
+    """把 datetime（或已是字符串的值）变成 `%Y-%m-%dT%H:%M:%SZ` 的 UTC 串。
+
+    为什么要这个转换：`datetime.isoformat()` 产出 `2026-10-26T01:23:45.123+00:00`，
+    而 fish 全库只认 `2026-10-26T01:23:45Z`（定长、可直接比大小）。
+    两者混用会让 `parse_utc` 静默返回 None —— 那是"时间判断全部失效但不报错"的最坏形态。
+    """
+    if isinstance(value, datetime.datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=datetime.timezone.utc)
+        return value.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return str(value or "")
+
+
+def memory_freshness(conn, code, *, now=None) -> dict:
+    """一条记忆的**内容新鲜度**：`{factor, age_days, ref, band, note}`。
+
+    band：`fresh`(≥0.7) / `aging`(≥0.35) / `stale`(<0.35) / `unknown`。
+    硬过滤优先于折扣：`status != 'active'`（superseded/withdrawn）直接 `factor=0`，
+    调用方应当**硬过滤**它，而不是靠分数把它压下去。
+
+    `now` 接受 ISO 串或 datetime（统一转 `%Y-%m-%dT%H:%M:%SZ`；解析不了就用当前时间——
+    时间参数坏了不该让整条候选消失）。
+    """
+    row = conn.execute(
+        "SELECT mem_type, occurred_at, recorded_at, last_accessed_at, access_count, "
+        "dormant, status FROM code_index WHERE code=?", (code,)).fetchone()
+    if not row:
+        return {"factor": 0.0, "age_days": None, "ref": None, "band": "unknown",
+                "note": "查不到这条记忆"}
+    mem_type, occurred, recorded, last_access, access_count, dormant, status = row
+    if (status or "active") != "active":
+        return {"factor": 0.0, "age_days": None, "ref": occurred or recorded,
+                "band": "stale", "note": "已退役（被取代/作废）"}
+    if (mem_type or "") in FRESHNESS_EXEMPT_TYPES:
+        return {"factor": 1.0, "age_days": None, "ref": occurred or recorded,
+                "band": "fresh", "note": "规范/教训不按年龄打折"}
+    content_ref = occurred or recorded
+    if not content_ref:
+        return {"factor": 0.5, "age_days": None, "ref": None, "band": "aging",
+                "note": "没有内容时间（occurred_at/recorded_at 都空）——无从判断，取中性值"}
+    # 关键：第 2 个参数刻意传 None —— 让 compute_decay 回落到 recorded_at/
+    # content_ref，而不是 last_accessed_at（见上面的理由）。
+    factor, _state = compute_decay(mem_type, None, content_ref, load_decay_cfg(conn))
+    now_dt = parse_utc(_utc_str(now)) if now else None
+    if now_dt is None:
+        now_dt = datetime.datetime.now(datetime.timezone.utc)
+    ref_dt = parse_utc(content_ref)
+    age_days = round((now_dt - ref_dt).total_seconds() / 86400, 1) if ref_dt else None
+    if dormant:
+        factor *= 0.5
+    if access_count and last_access:
+        last_dt = parse_utc(last_access)
+        if last_dt and (now_dt - last_dt).days <= 30:
+            factor = min(1.0, factor + 0.05)      # 置信度小加成，**不改年龄**
+    band = "fresh" if factor >= 0.7 else ("aging" if factor >= 0.35 else "stale")
+    note = ""
+    if age_days is not None:
+        half_life = get_config(conn, f"decay.{mem_type}_days") if isinstance(mem_type, str) else 0
+        note = f"{age_days} 天前（{mem_type}，半衰期 {half_life or '∞'} 天）"
+    return {"factor": round(factor, 4), "age_days": age_days, "ref": content_ref,
+            "band": band, "note": note}
 
 
 # ------------------------------------------------------------------ 邻近
@@ -4580,6 +6417,16 @@ def cmd_init(args):
                  {"kind": "config", "id": "init"},
                  {"key": "schema_version", "new_value": "p1a"})
     print(f"已初始化：{root}")
+    # 2026-10-26（FB-09）：初始化是**唯一**该提"下一步"的时刻——空库里既没有主人、
+    # 也没有凭证，只丢一句"已初始化"等于把人留在原地（`EVAL-261025-05` 的实测路径：
+    # 试 add_project → 试 healthcheck → 最后才想到 CLI）。
+    # 已有主人时保持安静：重复 init 是幂等的补装动作，每次都念一遍引导只是噪音，
+    # 而且会把这次真正新增的输出淹掉。
+    # 判定复用 `resolve_owner`（含旧的 config 回退），不在这里另写一条 SELECT——
+    # "谁是主人"只能有一处判断，两份实现必然漂。
+    if not resolve_owner(conn):
+        print("下一步：设置主人 → fish owner <citizen_id>")
+        print("签发凭证 → fish session start --project <项目>")
     conn.close()
 
 
@@ -4904,20 +6751,27 @@ def cmd_remember(args):
     # 参数校验失败时不要吐 traceback：报错里已写清原因和下一步，直接读即可。
     # （getattr 兼容测试里手工构造的 args 命名空间）
     try:
-        owner = resolve_owner_arg(conn, args.owner)
+        # 2026-10-26（复审 ⚪N6）：没给 `--owner` 且手上有有效 env 凭证 → 记给凭证的
+        # 公民（MCP 的 `_owner_value` 就是这一句）。给了 `--owner` 时一个字都不干预。
+        owner_arg = getattr(args, "owner", None) or token_actor_citizen_id(conn)
+        owner = resolve_owner_arg(conn, owner_arg)
         occurred_at = normalize_occurred_at(getattr(args, "occurred_at", None))
     except ValueError as e:
         conn.close()
         print(f"错误：{e}", file=sys.stderr)
         sys.exit(2)
     hints = []
+    # FB-11：`remember --supersedes <旧编码>` 与 MCP 的 `supersedes` 入参同一条路
+    # （都进 `record_memory`），所以"新的先写成功、再置旧"这个顺序只有一个实现。
+    supersede_notes = []
     code, rel = record_memory(
         conn, root,
         project=args.project, title=args.title, body=args.body or "",
         mem_type=args.type, tags=args.tags or [], visibility=args.visibility,
         owner=owner, session_actor=args.session_actor,
         attachments=args.attach or [], occurred_at=occurred_at, cause=args.cause,
-        hints=hints)
+        supersedes=getattr(args, "supersedes", None) or None,
+        hints=hints, supersede_notes=supersede_notes)
     try:
         print(f"{code}\t{args.title}\t{rel}")
     except UnicodeEncodeError:
@@ -4927,34 +6781,104 @@ def cmd_remember(args):
     hint = format_dup_hint(hints)
     if hint:
         print(hint, file=sys.stderr)
+    # 替代结果也走 stderr（同理由）：成功一行、失败一行。
+    # 失败**不回滚新条目**——新记忆已经写成了，"替代没生效"是另一件事，
+    # 该说的是"旧条目不存在/不能替代"，而不是把调用方的成果一起撤掉。
+    for note in supersede_notes:
+        print(("已替代：" if note["ok"] else "替代未生效：") + note["message"],
+              file=sys.stderr)
     conn.close()
+
+
+def cmd_supersede(args):
+    """`fish supersede <旧编码> --by <新编码>`（FB-11）：CLI 补上 MCP 早有的入口。
+
+    **回执与 MCP 同口径**：两边都只调 `supersede_memory` 并原样打印它的返回串
+    （MCP 那句只多一个结尾换行）。双入口各自拼一段话，就是"同一个动作两种说法"
+    的老毛病——AI 见到两种说法会以为做了两件不同的事。
+    """
+    conn = connect(Path(args.root))
+    conn.executescript(SCHEMA)
+    migrate(conn)
+    try:
+        reason = args.reason or ""
+        try:
+            msg = supersede_memory(conn, args.code, args.by, reason=reason,
+                                   actor=resolve_owner(conn))
+        except ValueError as e:
+            print(f"错误：{e}", file=sys.stderr)
+            sys.exit(2)
+        print(msg)
+    finally:
+        conn.close()
 
 
 def cmd_recall(args):
     conn = connect(Path(args.root))
     conn.executescript(SCHEMA)
     migrate(conn)
+    # 2026-10-26（FB-01）：与 MCP 的 recall 同一套三分支。
+    #   · 有 query / code → 检索（并保留"未命中 + 最近条目"的回退）；
+    #   · 无 query / code，有 project → **列出**（按项目 + 标签过滤，时间倒序）；
+    #   · 只有 tags → 引导（tags 是附加过滤，单独用没有范围可列）。
+    # 为什么 CLI 要跟着改：`--project` / `--tags` 这两个过滤器本来就在，缺的只是
+    # "不给关键词时也能用"这一档。若只有 MCP 面能"列"，同一句诉求在两个入口
+    # 会得到不同答案——那正是本轮要收掉的漂移。
+    q = (getattr(args, "query", None) or "").strip()
+    project = getattr(args, "project", None)
+    code = getattr(args, "code", None)
+    tags = getattr(args, "tags", None)
+    limit = int(getattr(args, "limit", 10) or 10)
+    if not q and not code:
+        if not project:
+            if tags:
+                print(TAGS_ONLY_HINT)
+            else:
+                print("要查什么？给一个关键词（fish recall <词>）、编码（--code）"
+                      "或项目（--project）——本命令不猜。")
+            conn.close()
+            return
+        rows = list_memories(conn, project=project, tags=tags, limit=limit)
+        total = count_memories(conn, project=project, tags=tags)
+        print(format_list_declaration(project=project, tags=tags,
+                                      shown=len(rows), total=total))
+        if not rows:
+            # 评审 ⚪11：措辞要按**有没有给 tags** 分支。旧实现在没给 tags 时也说
+            # "去掉 --tags 看全部"——让读者去删一个他根本没写的参数。提示的每一步
+            # 都必须是**这个人此刻能做的动作**，否则它只是在暴露实现细节。
+            if [t for t in ([tags] if isinstance(tags, str) else (tags or [])) if t]:
+                print("（该项目下没有符合标签条件的条目；去掉 --tags 看全部）")
+            else:
+                print("（该项目下还没有记忆；有内容后这里会按时间倒序列出）")
+            conn.close()
+            return
+        record_access(conn, [r[0] for r in rows], "recall")
+        print(RECALL_DIMENSION_NOTE)
+        for code_, title, proj, mtype, status, fp, dormant, src in rows:
+            print(f"{code_}\t{format_status_tag(mtype, status, dormant)}"
+                  f"\t{title}\t{fp}\t匹配:{src}")
+        conn.close()
+        return
     ensure_fts(conn, Path(args.root))
     rows, _ = search_memories(
-        conn, query=args.query,
-        code=getattr(args, "code", None),
-        project=getattr(args, "project", None),
-        tags=getattr(args, "tags", None),
-        scope=getattr(args, "scope", "all"),
-        limit=args.limit)
+        conn, query=q, code=code, project=project, tags=tags,
+        scope=getattr(args, "scope", "all"), limit=limit)
     if not rows:
-        cand = recent_fallback(conn, project=getattr(args, "project", None),
-                               tags=getattr(args, "tags", None))
-        print(f"未找到「{args.query}」。最近的条目：")
+        cand = recent_fallback(conn, project=project, tags=tags)
+        print(f"未找到「{q}」。最近的条目：")
         for c, t in cand:
             print(f"  {c}\t{t}")
         conn.close()
         return
     # 记录访问：刷新衰减，被想起即唤醒（并写 memory.accessed 事件，见 07 D-12）
     record_access(conn, [r[0] for r in rows], "recall")
+    # 2026-10-26（FB-10）：维度说明先说话——第一行就交代「+dormant 是什么」，
+    # 否则标签得靠读者猜。状态列走 `format_status_tag`，与 MCP 的 recall 共用
+    # 同一个常量 + 同一个函数：两处各写一份必然会漂。
+    print(RECALL_DIMENSION_NOTE)
     for code, title, proj, mtype, status, fp, dormant, src in rows:
-        flag = " (休眠)" if dormant else ""
-        print(f"{code}\t[{mtype}/{status}]{flag}\t{title}\t{fp}\t匹配:{src}")
+        print(f"{code}\t{format_status_tag(mtype, status, dormant)}"
+              f"\t{title}\t{fp}\t匹配:{src}")
     conn.close()
 
 
@@ -5039,6 +6963,54 @@ def cmd_forgetting(args):
     conn.close()
 
 
+def cmd_distill(args):
+    """FB-15：把窗口内同主题的 episode 聚成「提炼建议」。
+
+    **默认演练**（只打印，不落文件）——建议层的第一条硬约束是"不自动入库"，
+    演练是它最便宜的执行方式：先看聚成了什么，再决定要不要留痕。
+    `--write` 只调 `write_distill_suggestion`：不写记忆、不改状态、不删任何东西。
+    """
+    root = Path(args.root)
+    conn = connect(root)
+    conn.executescript(SCHEMA)
+    migrate(conn)
+    try:
+        try:
+            res = distill_clusters(conn, project=args.project, days=args.days,
+                                   min_group=args.min, max_groups=args.max_groups)
+        except ValueError as exc:
+            print(f"错误：{exc}", file=sys.stderr)
+            # 评审 🟡8：原来这里是 `return 2`，但 `main()` 结尾只顾调 `args.func(args)`、
+            # **不传播返回值**——于是"参数错了"在退出码上表现为成功（0）。
+            # 退出码是脚本唯一能被机器读到的结论，写错它等于让调用方的 `&&` 链条失效。
+            # 与 `cmd_supersede` 同口径：参数错误 = 显式 `sys.exit(2)`。
+            # （`try/finally` 里的 `conn.close()` 仍会执行：SystemExit 也走 finally。）
+            sys.exit(2)
+        clusters = res["clusters"]
+        if not clusters:
+            print(f"未找到可提炼的同主题 episode"
+                  f"（窗口 {res['days']} 天，组内 ≥{res['min_group']} 条）")
+            return 0
+        print(f"窗口 {res['days']} 天 ｜ episode {res['checked']} 条 ｜ "
+              f"同主题组 {len(clusters)} 个（组内 ≥{res['min_group']} 条）")
+        for cluster in clusters:
+            codes = [ep["code"] for ep in cluster["episodes"]]
+            preview = "、".join(codes[:DISTILL_PREVIEW_CODES])
+            if len(codes) > DISTILL_PREVIEW_CODES:
+                preview += f" …（共 {len(codes)} 个）"
+            print(f"  {cluster['tag']} ｜ {cluster['count']} 条 ｜ {preview}")
+        if args.write:
+            path = write_distill_suggestion(root, res["project"], res)
+            print(f"建议已写入：{path}")
+            print("（这是建议，不是记忆：未入库、不自动生效；"
+                  "确认后由人或 AI 另行 remember）")
+        else:
+            print("（演练：未落文件。确认无误后加 --write 生成建议文件）")
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_citizen_add(args):
     conn = connect(Path(args.root))
     conn.executescript(SCHEMA)
@@ -5062,12 +7034,29 @@ def cmd_citizen_add(args):
 
 
 def cmd_whoami(args):
+    """我是谁（CLI 版）：身份段 + 凭证状态 + 身份来源 + 主人 + 机器事实。
+
+    2026-10-26（F3 · 与 MCP 的 FB-03 / FB-07 对齐）：CLI 的 `whoami` 原先只有
+    「登记身份 / 主人 / 机器事实」，没有 MCP 那两行——同一个 AI 从两个入口问
+    "我是谁"，会得到详略不同的两种答案，而回答里最关键的"凭什么算身份""凭证还能用多久"
+    恰好只在 MCP 那边。这里补的就是那两行，且口径与 MCP **同源**：
+    `credential_state_line` / `identity_source_line` 是两边共用的唯一实现。
+
+    token 从哪来：`--token` 优先，其次 env `FISH_SESSION_TOKEN`（CLI 没有"本次调用"
+    可挂，env 是它唯一的会话级载体）。两者都没有 = 没带凭证，如实写「未提供凭证」；
+    判有效性只问 `validate_session_token`，CLI 不许自己再判一遍吊销/过期。
+    """
     conn = connect(Path(args.root))
     conn.executescript(SCHEMA)
     migrate(conn)
 
+    token = (getattr(args, "token", None) or "").strip() or env_session_token()
+    token_citizen = validate_session_token(conn, token) if token else None
+
     owner_id = resolve_owner(conn)
     if args.citizen:
+        # 契约面（test_identity_p1a 判据 G）：这一条是**改动前就存在**的 SQL（含 role/host），
+        # 一字不改——基线的价值就在于"既有查询不许被顺手重写"。
         actor = conn.execute(
             "SELECT citizen_id,display_name,kind,role,host FROM citizens WHERE citizen_id=?",
             (args.citizen,)).fetchone()
@@ -5078,16 +7067,59 @@ def cmd_whoami(args):
     else:
         actor = resolve_actor(conn)
 
+    # 2026-10-26（复审 🟠N2）：**有效凭证必须进身份段**。
+    #
+    # 旧实现的身份段只走 `--citizen` / `resolve_actor`，token 只喂给"凭证状态 / 身份来源"
+    # 两行。于是只带 env 凭证的 CLI 会话读到自己那屏是：
+    #     你：未登记访客（…请 register）        ← 身份段
+    #     凭证状态：剩余 23 小时                ← 同一个 token
+    #     身份来源：token（session_tokens）     ← 同一个 token
+    # 一屏三句话，前一句否认后两句。而"请 register"还是 CLI 根本没有的命令
+    # （register 是 MCP 工具），照做只会造出第二个公民。
+    #
+    # 现在：token 有效 → 身份段以**凭证归属**为首句（与 MCP 的「登记身份」同源，
+    # 同一 token 两个入口给出**同一个 citizen_id**）；名字解析出来的 `actor` 若存在
+    # 就照旧再印一行（有 `--citizen` / FISH_ACTOR 的场景），两者不同则当场点明
+    # 以哪个为准——"两套视图"只有在明面上才不伤人。
+    token_owner_row = None
+    if token_citizen:
+        # 复用一个**已存在**的读点（`load_citizen` → citizens_all 全列），
+        # 不在 `cmd_whoami` 里新增第三条 citizens 查询：判据 G 冻结的是**函数内的语句集**，
+        # 新增一条同样会被判"改了契约"。新逻辑要新查询时，把它放进有名字的函数里。
+        token_owner_row = load_citizen(conn, token_citizen)
+    if token_citizen:
+        t_name = (token_owner_row or {}).get("display_name") or token_citizen
+        t_kind = (token_owner_row or {}).get("kind") or "unknown"
+        print(f"凭证归属：公民 {token_citizen}（{t_name}，形态 {t_kind}）")
+        print("　这条身份来自 session_tokens（与 MCP 的「登记身份」同源："
+              "同一 token 两个入口给同一个 citizen_id）。")
+
     if actor:
         print(f"登记身份：{actor[1]}（公民 {actor[0]}，形态 {actor[2]}，"
               f"角色 {actor[3] or '-'}）")
         print("说明：这是你在 fish 的账户名（宿主级），与你的宿主身份不冲突。")
+        if token_citizen and actor[0] != token_citizen:
+            print(f"注意：名字解析到公民 {actor[0]}，凭证归属 {token_citizen}——"
+                  "写入归属**以凭证为准**（FISH_ACTOR / config.actor_name 指向了别人）。")
     else:
         an = get_config(conn, "actor_name")
-        if an:
-            print(f"你：未登记访客（actor_name={an} 未找到，请 register）")
+        if token_citizen:
+            # 有效凭证已在上面的「凭证归属」段说过身份了，这里**绝不再说"未登记"**。
+            print("（没有按名字解析到行动者；本次身份以上面的凭证归属为准。）")
+        elif an:
+            print(f"你：未登记访客（actor_name={an} 未找到）")
         else:
-            print("你：未登记访客（未配置 actor_name；设 FISH_ACTOR 或调用 register）")
+            print("你：未登记访客（未配置 actor_name，也没有可用的会话凭证）")
+        if not token_citizen:
+            # 下一步必须是**CLI 真有的命令**：register 是 MCP 工具，CLI 里没有它。
+            print("　· 已在库里 → `fish citizen-add <名字>`（同名幂等复用）")
+            print("　· 还没有凭证 → `fish session start --project <项目>` 签发一条后带 token")
+
+    # 2026-10-26（F3）：与 MCP 的 whoami 同顺序、同措辞的两行。
+    # 放在「主人」之前：它们回答"这次回执算不算我的归属"，属于身份信息；
+    # 主人是另一个人，排在身份信息之后才不打断阅读。
+    print(credential_state_line(conn, token))
+    print(identity_source_line(token_citizen))
 
     if owner_id:
         ro = conn.execute("SELECT display_name,kind FROM citizens WHERE citizen_id=?",
@@ -5097,6 +7129,15 @@ def cmd_whoami(args):
     else:
         print("主人：未设置（fish config set owner_citizen <id>）")
 
+    # 2026-10-26（评审 🟠3）：`--all` 与 MCP 的 `all=true` 对齐。
+    # 位置也刻意一致（主人之后、机器事实之前）：它是"还有谁和你占着同一个上下文"
+    # 的诊断面。渲染走 `fish.related_citizens_lines`——与 MCP **同一份文案**，
+    # 两个入口读到的行必须逐字相同（否则同一件事在两处看起来是两件事）。
+    if getattr(args, "all", False):
+        print("")
+        for line in related_citizens_lines(conn, token_citizen):
+            print(line)
+
     env = {k: v for k, v in
            ((k, os.environ.get(k)) for k in
             ("FISH_ACTOR", "DSH_SESSION_ID", "CODEBUDDY_SESSION_ID", "CLAUDE_SESSION_ID"))
@@ -5104,24 +7145,6 @@ def cmd_whoami(args):
     if env:
         print(f"机器事实：{env}")
     conn.close()
-
-
-_ENC = None
-
-
-def count_tokens(text: str) -> int:
-    """优先用 tiktoken 精确计数；不可用时按字符估算（中文≈1.2 token/字）。"""
-    global _ENC
-    if _ENC is None:
-        try:
-            import tiktoken
-            _ENC = tiktoken.get_encoding("cl100k_base")
-        except Exception:
-            _ENC = False
-    if _ENC is False:
-        return int(len(text) * 1.2)
-    return len(_ENC.encode(text))
-
 
 # ------------------------------------------------------ L1「当前项目」的四档解析
 # 2026-10-24（R1 根治）：项目归属必须有证据，按下面顺序取**第一个有证据的**档：
@@ -5293,8 +7316,15 @@ def _render_project_head(project, count, last_seen, source) -> str:
 #   · rule 标题里含「必须/不得/一律/所有」等通用词的实测只有 1 条：
 #     现在的 rule 绝大多数是**项目特定**的，这也支持"按项目分栏、不硬造全局栏"。
 
-RULES_PER_SOURCE_LIMIT = 3          # ③ 每栏最多列几条（本项目规矩 / 全局规矩 各自算）
+# 2026-10-26（FB-02）：这两个数原来是写死的常量。写死的问题不是"数不对"，而是
+# **"想多看一条规矩"要么改代码、要么放弃**——而"看几条"本来就是口味差异。
+# 现在默认值只在配置表里写一次（`CONFIG_DEFAULTS`），这里派生引用：
+# 两份各写一个 3，迟早出现"改了一处、另一处还在用旧值"的漂移。
+RULES_PER_SOURCE_LIMIT = int(CONFIG_DEFAULTS["inject.rules_per_source"][0])
+RULES_PER_SOURCE_MIN = 1            # 下限：0 条规矩等于"这段没有意义"
+RULES_PER_SOURCE_MAX = 10           # 上限：再多就把整包预算吃掉了（每条约 15-25 token）
 RULES_BLOCK_MAX_TOKENS = 300        # ③ 段自身的硬上限（超了少列一条，**不截断标题**）
+BOARD_MAX_RATIO = float(CONFIG_DEFAULTS["inject.board_max_ratio"][0])
 ATTENTION_PER_TYPE_LIMIT = 2        # ④ 每类信号各取 top N
 ATTENTION_BLOCK_MAX_TOKENS = 400    # ④ 段自身的硬上限（超了从末尾丢行）
 ATTENTION_TITLE_MAX_CHARS = 50      # ④ 标题截断长度（只截这里；③ 的标题不截）
@@ -5305,6 +7335,11 @@ ATTENTION_LESSON_WINDOW_DAYS = 7    # B 最近的坑：近 7 天
 # 但 `TODO` 在本库真实标题里既有大写也有小写，所以统一走小写匹配。
 ATTENTION_OPEN_KEYWORDS = ("未闭合", "待办", "下一步", "todo", "待确认",
                            "待定", "待验证", "待补")
+# ④ 段 C 类的**扫描上限**（评审 🟡5 · 2026-10-26）：段头要印「别处读过 b/B」，
+# B 必须来自一次"不设 per_type 闸"的取数，否则"这条信号到底有几条"永远不可知。
+# 50 是防御性上限（该信号在生产库实测是 0-2 条量级）：真到 50 条时，
+# 段头写的是"50"而不是"更多"——那仍然比"只印 2"诚实一个量级。
+ATTENTION_GAP_SCAN_LIMIT = 50
 
 # ④ 段三类信号的行前缀。也是"这条为什么出现在这里"的可读说明。
 _ATTENTION_LABELS = {"open": "未闭合", "lesson": "最近的坑", "gap": "别处读过但你没看"}
@@ -5357,26 +7392,72 @@ def _rule_rows(conn, *, project=None, limit=RULES_PER_SOURCE_LIMIT, exclude=()):
     return out
 
 
-def build_short_rules_block(conn, *, project=None, per_source=RULES_PER_SOURCE_LIMIT,
+def count_rule_rows(conn, *, project=None) -> int:
+    """某一栏**总共有多少条**规矩（不受 limit 限制）——段头「显示 N/M 条」的 M。
+
+    为什么要单独一条 count：`_rule_rows` 已经按 limit 截过，从返回值里数不出
+    "本来有 7 条、只列了 3 条"。而**没列出来的那 4 条必须被说出来**——否则
+    AI 会以为"这个项目的规矩就这 3 条"，那比少列更糟（少列是省预算，不说才是骗）。
+    口径与 `_rule_rows` 完全一致（rule / active / 未休眠 / 同一栏谓词）；
+    老库缺列时返回 0（注入包不能因为这段崩）。
+    """
+    key = (project or "").strip() or None
+    if key is None:
+        clause, params = "project IS NULL", []
+    else:
+        clause, params = "project = ?", [key]
+    try:
+        return int(conn.execute(
+            "SELECT COUNT(*) FROM code_index WHERE mem_type='rule' "
+            "AND status='active' AND dormant=0 AND " + clause, params).fetchone()[0])
+    except sqlite3.Error:
+        return 0
+
+
+def _clamp_rules_per_source(value) -> int:
+    """把每栏条数夹到 1–10（配置写错不该让注入包报错，也不该静默变成 0 条）。"""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return RULES_PER_SOURCE_LIMIT
+    return max(RULES_PER_SOURCE_MIN, min(RULES_PER_SOURCE_MAX, n))
+
+
+def build_short_rules_block(conn, *, project=None, per_source=None,
                             max_tokens=RULES_BLOCK_MAX_TOKENS) -> dict:
     """段③「规矩」：本项目规矩 + 全局规矩，各取最近 N 条。
 
-    返回 `{"text", "codes", "trimmed"}`：
+    返回 `{"text", "codes", "trimmed", "total", "omitted"}`：
       · `text`    —— 印进注入包的整段（**结尾带换行**；两栏都空时为 ""，调用方据此整段不出现）；
       · `codes`   —— 真正印进包里的编码（`meta["rules_codes"]` / push_log 用）；
-      · `trimmed` —— 本段自己的裁剪标记（超 `max_tokens` 时**少列条目**，绝不截断标题）。
+      · `trimmed` —— 本段自己的裁剪标记（超 `max_tokens` 时**少列条目**，绝不截断标题）；
+      · `total`   —— 本段两栏**共有**多少条（不受 limit / 预算影响）；
+      · `omitted` —— `total - len(codes)`：被上限或预算省掉的条数。
 
-    为什么"最近 3 条"而不是全部：本库 rule 已有 39 条（生产库实测），全列会吃光预算；
+    2026-10-26（FB-02）：段头现在会**声明自己不全**——`规矩段：显示 3/7 条…`。
+    旧实现固定 3 条、且回包不提这件事，于是读者无从判断"这是全部还是抽样"。
+    声明放在两栏表头**之前**（块头）而不是结尾：结尾的话，读的人早就已经
+    按"这就是全部"理解完了。
+
+    `per_source=None` → 读配置 `inject.rules_per_source`（默认 3，夹紧到 1–10）。
+    为什么默认值走配置而不是形参常量：调用点（`build_injection_pack`）不该关心
+    这个数——它属于"注入包的呈现口味"，与预算、风格是同一类旋钮。
+
+    为什么"最近 N 条"而不是全部：本库 rule 已有 39 条（生产库实测），全列会吃光预算；
     规矩的**新旧**代表当前在用的版本，老的还在库里（recall 查得到），不必占据开场那一屏。
 
     `project` 为空（当前项目未声明）时**只有全局栏**——不拿"某个项目"冒充你的项目。
     **不再接受 `owner_id`**：按作者筛规矩是 2026-10-25 证伪的口径（见本节开头）。
     两栏标题：本项目规矩（ANYI）：/ 全局规矩：；空栏整块不出现（不写"暂无"）。
     """
+    per_source = _clamp_rules_per_source(
+        get_config(conn, "inject.rules_per_source") if per_source is None else per_source)
     proj_key = (project or "").strip() or None
     proj_items = _rule_rows(conn, project=proj_key, limit=per_source) if proj_key else []
     taken = {code for code, _ in proj_items}
     global_items = _rule_rows(conn, project=None, limit=per_source, exclude=taken)
+    total = (count_rule_rows(conn, project=proj_key) if proj_key else 0) \
+        + count_rule_rows(conn, project=None)
 
     def render(proj_list, global_list):
         lines, codes = [], []
@@ -5390,11 +7471,20 @@ def build_short_rules_block(conn, *, project=None, per_source=RULES_PER_SOURCE_L
             for code, title in global_list:
                 lines.append(f"- {code} {title}")
                 codes.append(code)
+        if lines:
+            # 段头的"我列了多少 / 一共有多少"声明（FB-02）。只在**真的少了**的时候
+            # 才说"其余因预算/上限省略"——N==M 时还这么写就是一句假话。
+            shown = len(proj_list) + len(global_list)
+            head = (f"规矩段：显示 {shown}/{max(total, shown)} 条"
+                    f"（本项目 {len(proj_list)} + 全局 {len(global_list)}）")
+            if shown < total:
+                head += "；其余因预算/上限省略"
+            lines.insert(0, head)
         return ("\n".join(lines) + "\n") if lines else "", codes
 
     text, codes = render(proj_items, global_items)
     if not text:
-        return {"text": "", "codes": [], "trimmed": []}
+        return {"text": "", "codes": [], "trimmed": [], "total": total, "omitted": 0}
 
     proj_list, global_list = list(proj_items), list(global_items)
     trimmed = []
@@ -5408,17 +7498,64 @@ def build_short_rules_block(conn, *, project=None, per_source=RULES_PER_SOURCE_L
         text, codes = render(proj_list, global_list)
         if "规矩截断" not in trimmed:
             trimmed.append("规矩截断")
-    return {"text": text, "codes": codes, "trimmed": trimmed}
+    return {"text": text, "codes": codes, "trimmed": trimmed,
+            "total": total, "omitted": max(0, total - len(codes))}
 
 
-def _open_loop_rows(conn, since_z, limit, exclude=()):
-    """A 类「未闭合事项」：标题命中开放词表的 active 记忆（窗口内，时间降序）。"""
+def _open_loop_predicate():
+    """A 类「未闭合事项」的**唯一谓词**（`_open_loop_rows` 与 `count_open_loop_rows` 共用）。
+
+    分出来的理由与 `_list_where` 完全相同：段头要印「显示 N/M 条」，而 M 必须与
+    真正的取数用**同一个谓词**。两处各拼一份，迟早出现"显示 1/3 条"但实际有 5 条
+    这种无法自证的数字——那比不声明更坏（读者会相信那个 M）。
+    """
     cond = " OR ".join("INSTR(LOWER(COALESCE(title,'')), ?) > 0"
                        for _ in ATTENTION_OPEN_KEYWORDS)
-    sql = ("SELECT code,title FROM code_index WHERE status='active' AND dormant=0 "
-           "AND recorded_at >= ? AND (" + cond + ") "
-           "ORDER BY recorded_at DESC, code DESC LIMIT ?")
-    params = [since_z] + [k.lower() for k in ATTENTION_OPEN_KEYWORDS]
+    return ("status='active' AND dormant=0 AND recorded_at >= ? AND (" + cond + ")",
+            [k.lower() for k in ATTENTION_OPEN_KEYWORDS])
+
+
+def count_open_loop_rows(conn, since_z, exclude=()):
+    """A 类在窗口内**总共有多少条**（不受 `per_type` 限制）——段头 N/M 的 M。
+
+    读失败返回 **None**，不返回 0（2026-10-26 复审 ⚪N8）：段头会把 M 念成
+    「显示 2/2 条」，读者据此相信"这一类就这两条"。而真相是**读不出来**——
+    把未知说成 0 是比"少列几条"更自信的假，且无法从文本上分辨。
+    调用方（`build_attention_block`）见到 None 就写「总数未知（读取失败）」。
+    """
+    where, keywords = _open_loop_predicate()
+    sql = "SELECT COUNT(*) FROM code_index WHERE " + where
+    # 参数顺序 = 占位符顺序：`recorded_at >= ?` 在前，关键词在后（`_open_loop_predicate`
+    # 只回关键词，窗口起点由调用方给——它是"这一刻"的证据，不属于谓词定义）。
+    params = [since_z] + list(keywords)
+    extra = [c for c in (exclude or ()) if c]
+    if extra:
+        sql += " AND code NOT IN (" + ",".join("?" * len(extra)) + ")"
+        params += extra
+    try:
+        return int(conn.execute(sql, params).fetchone()[0])
+    except sqlite3.Error:
+        return None
+
+
+def _open_loop_rows(conn, since_z, limit, exclude=(), *, project=None):
+    """A 类「未闭合事项」：标题命中开放词表的 active 记忆（窗口内，时间降序）。
+
+    `project=None`（默认）= 旧行为，**跨项目**（注入包一直这么用，判据
+    `test_push_p1a_candidates` 是它的守护者）。
+    `project=<前缀>` = 只取该项目的未闭合事项（B2 状态表的「未了事项」列）。
+
+    **合并裁决 2026-10-26**：谓词走 `_open_loop_predicate()`（与
+    `count_open_loop_rows` 同源）——段头印「显示 N/M」，M 必须与取数用同一个
+    谓词；`project` 仍是**仅关键字**参数（既有调用全是位置调用）。
+    """
+    where, keywords = _open_loop_predicate()
+    sql = "SELECT code,title FROM code_index WHERE " + where
+    params = [since_z] + list(keywords)
+    if project is not None:
+        sql += " AND project = ? "
+        params.append(str(project))
+    sql += " ORDER BY recorded_at DESC, code DESC LIMIT ?"
     params += [int(limit) + len(set(exclude))]
     try:
         rows = conn.execute(sql, params).fetchall()
@@ -5432,6 +7569,30 @@ def _open_loop_rows(conn, since_z, limit, exclude=()):
         if len(out) >= int(limit):
             break
     return out
+
+
+def count_lesson_rows(conn, since_z, exclude=()):
+    """窗口内 lesson 的**总条数**（不受 `per_type` 限制）——段⑤ 段头 N/M 的 M。
+
+    谓词与 `_lesson_rows(same_project=None)` 一致（lesson / active / 未休眠 / 窗口内），
+    `exclude` 是"已在别段印过的编码"——被别段占用的条目不算本段的可用量，
+    否则段头会把它们算进 M，读者一对照就发现"说 3 条只列 1 条"。
+
+    读失败返回 **None**（与 `count_open_loop_rows` 同一纪律，2026-10-26 复审 ⚪N8）：
+    "读不出来"和"一条都没有"在段头文本上必须是两句话，否则「显示 2/2 条」会让
+    读者相信错题本就这两条。
+    """
+    sql = ("SELECT COUNT(*) FROM code_index WHERE mem_type='lesson' AND status='active' "
+           "AND dormant=0 AND recorded_at >= ?")
+    params = [since_z]
+    extra = [c for c in (exclude or ()) if c]
+    if extra:
+        sql += " AND code NOT IN (" + ",".join("?" * len(extra)) + ")"
+        params += extra
+    try:
+        return int(conn.execute(sql, params).fetchone()[0])
+    except sqlite3.Error:
+        return None
 
 
 def _lesson_rows(conn, since_z, limit, exclude=(), same_project=None):
@@ -5539,14 +7700,34 @@ def build_attention_block(conn, root, *, citizen_id=None, session_actor=None,
             continue
         seen.add(code)
         bags["open"].append((code, title))
-    for item in _attention_gaps(conn, root, citizen_id, session_actor, per_type):
+    # 2026-10-26（评审 🟡5）：C 类先按**扫描上限**取全，再切 `per_type`——段头要印
+    # 「别处读过 b/B」，B 得是这条信号的真实规模。旧实现只拿到 `per_type` 条，
+    # 于是"到底有几条"永远不可知（而 `_（无）_` 与"只有 0 条"必须能分开）。
+    gap_scan = _attention_gaps(conn, root, citizen_id, session_actor,
+                               ATTENTION_GAP_SCAN_LIMIT)
+    gap_total = len(gap_scan)
+    for item in gap_scan[:per_type]:
         code = (item or {}).get("code")
         if not code or code in seen:
             continue
         seen.add(code)
         bags["gap"].append((code, (item.get("title") or "").strip()))
+    open_total = count_open_loop_rows(conn, open_since)
 
     order = ("open", "gap")
+
+    def _count_part(label, shown, total, capped=False):
+        """段头里的一个「标签 N/M」片段。
+
+        `total is None` = 读数失败（`count_*` 返回 None）→ 写「未知」，**不写 0**：
+        「未闭合 2/0」会被读者当成"总共 0 条却列了 2 条"的荒谬，"未知"才是事实。
+        `capped` = M 是**下限**（C 类扫描到上限就停，真实规模只会更大）→ 加 `≥`。
+        旧实现把 `2/50` 印成确切值，读者会以为"这一类总共就 50 条"。
+        """
+        if total is None:
+            return f"{label} {shown}/未知"
+        mark = "≥" if capped else ""
+        return f"{label} {shown}/{mark}{max(int(total), int(shown))}"
 
     def render():
         lines, codes = [], []
@@ -5555,11 +7736,37 @@ def build_attention_block(conn, root, *, citizen_id=None, session_actor=None,
                 lines.append(f"- {_ATTENTION_LABELS[key]}：{code} "
                              + _clip_chars(title, ATTENTION_TITLE_MAX_CHARS))
                 codes.append(code)
-        return (("该注意什么：\n" + "\n".join(lines) + "\n") if lines else ""), codes
+        if not lines:
+            return "", []
+        # 段头的"我列了多少 / 一共有多少"声明（评审 🟡5）：与③规矩同一款。
+        # 为什么必须声明：④⑤ 是**固定条数**（每类 2 条）的段，而固定条数在文本上
+        # 与"总共就这么多"长得一模一样——读者会把"只列了 2 条"当成"只有 2 条"，
+        # 于是漏掉的是他不知道自己缺的那部分。段头放在条目之前（读之前就看见）。
+        shown = len(bags["open"]) + len(bags["gap"])
+        gap_capped = gap_total >= ATTENTION_GAP_SCAN_LIMIT
+        parts = []
+        if bags["open"] or open_total is None or open_total:
+            parts.append(_count_part("未闭合", len(bags["open"]), open_total))
+        if bags["gap"] or gap_total:
+            parts.append(_count_part("别处读过", len(bags["gap"]), gap_total,
+                                     capped=gap_capped))
+        detail = " + ".join(parts) if parts else "无信号"
+        if open_total is None:
+            # A 类读数失败 → 总体 M 也不可信，整段头降级成"不报总数"。
+            head = (f"该注意什么：显示 {shown} 条（总数未知（读取失败）；"
+                    f"{detail}；每类最多 {int(per_type)} 条）")
+        else:
+            total = open_total + gap_total
+            total_txt = f"≥{total}" if gap_capped else f"{max(total, shown)}"
+            head = (f"该注意什么：显示 {shown}/{total_txt} 条（"
+                    + detail + f"；每类最多 {int(per_type)} 条）")
+        return (head + "\n" + "\n".join(lines) + "\n"), codes
 
     text, codes = render()
+    # `total=None` = 读数失败（与段头同一事实）：meta 里宁可缺一个数，也不许写 0。
+    total_known = None if open_total is None else open_total + gap_total
     if not text:
-        return {"text": "", "codes": [], "trimmed": []}
+        return {"text": "", "codes": [], "trimmed": [], "shown": 0, "total": total_known}
 
     trimmed = []
     # 自身硬上限：从**末尾**往回丢（末尾是 C 类；A 类「未闭合」最该留）。
@@ -5571,7 +7778,8 @@ def build_attention_block(conn, root, *, citizen_id=None, session_actor=None,
         text, codes = render()
         if "注意截断" not in trimmed:
             trimmed.append("注意截断")
-    return {"text": text, "codes": codes, "trimmed": trimmed}
+    return {"text": text, "codes": codes, "trimmed": trimmed,
+            "shown": len(codes), "total": total_known}
 
 
 def build_lesson_block(conn, *, project=None, per_type=ATTENTION_PER_TYPE_LIMIT,
@@ -5599,17 +7807,29 @@ def build_lesson_block(conn, *, project=None, per_type=ATTENTION_PER_TYPE_LIMIT,
     rows = _recent_lesson_rows(conn, lesson_since, per_type,
                                exclude=set(exclude or ()), project=project)
     items = [(code, title) for code, title in rows if code]
+    # 2026-10-26（评审 🟡5）：段头声明「显示 N/M 条」。M 走 `count_lesson_rows`
+    # （与取数同一谓词，扣掉已在别段印过的编码）——固定 2 条的段不声明，
+    # 读者就会把"只列 2 条"当成"库里只有 2 条坑"。
+    lesson_total = count_lesson_rows(conn, lesson_since, exclude=set(exclude or ()))
 
     def render():
         if not items:
             return "", []
+        shown = len(items)
+        if lesson_total is None:
+            # 读数失败（`count_lesson_rows` 返回 None）→ 不报 M，明说未知。
+            head = (f"错题本：显示 {shown} 条（总数未知（读取失败）；"
+                    f"同项目优先，不足跨项目补齐；每类最多 {int(per_type)} 条）")
+        else:
+            head = (f"错题本：显示 {shown}/{max(lesson_total, shown)} 条"
+                    f"（同项目优先，不足跨项目补齐；每类最多 {int(per_type)} 条）")
         lines = [f"- {code} {_clip_chars(title, ATTENTION_TITLE_MAX_CHARS)}"
                  for code, title in items]
-        return ("错题本：\n" + "\n".join(lines) + "\n"), [c for c, _ in items]
+        return (head + "\n" + "\n".join(lines) + "\n"), [c for c, _ in items]
 
     text, codes = render()
     if not text:
-        return {"text": "", "codes": [], "trimmed": []}
+        return {"text": "", "codes": [], "trimmed": [], "shown": 0, "total": lesson_total}
 
     trimmed = []
     # 自身硬上限：从**末尾**丢整条（与另两段同一纪律：不截断标题）。
@@ -5618,7 +7838,8 @@ def build_lesson_block(conn, *, project=None, per_type=ATTENTION_PER_TYPE_LIMIT,
         text, codes = render()
         if "错题本截断" not in trimmed:
             trimmed.append("错题本截断")
-    return {"text": text, "codes": codes, "trimmed": trimmed}
+    return {"text": text, "codes": codes, "trimmed": trimmed,
+            "shown": len(codes), "total": lesson_total}
 
 
 # ---------------------------------------------------------------- 推送候选（P1-a）
@@ -5689,8 +7910,20 @@ def _seen_in_session(conn, code, session_key):
 
 
 def _cand(conn, code, kind, *, title, reason, current_project,
-          seen=False, key=False, now=None):
-    """构造一条候选并打分（`16` §5.1：benefit − cost，再乘静默降权）。"""
+          seen=False, key=False, now=None, relevance=None, freshness=None,
+          interrupt=0.1):
+    """构造一条候选并打分（`16` §5.1：benefit − cost，再乘静默降权）。
+
+    ## 2026-10-26（T04）三个新参数
+
+      · `relevance`：外部已算好的相关性（提示词候选）。给了就用它，**不再自己算**；
+      · `freshness`：外部已把陈旧性折扣乘进 `relevance` 时传 `None`
+        （**避免双重折扣**：prompt 候选只折扣一次，见设计 §6.5）；
+        传 dict 时由本函数乘 `(0.5 + 0.5×factor)`——供工具后/开场候选使用；
+      · `interrupt`：打断成本档位（提示词发生在用户消息边界，比工具后更"打断"）。
+
+    三条纪律写在这里，免得下一个人再加第四个折扣点。
+    """
     proj = _project_of(conn, code)
     # 2026-10-25（用户实测抓到的 #9）：**跨项目候选要降权到近乎不出现**。
     #
@@ -5702,12 +7935,18 @@ def _cand(conn, code, kind, *, title, reason, current_project,
     #   · 同项目        → rel=1.0（要的就是它）
     #   · 没有当前项目  → rel=0.0（**跨项目无从比较**：连"当前"都没有，谈什么"跨"）
     #   · 有别的项目    → rel=0.1（0.3 太高：它压得过本项目的边缘候选，占的还是同一份预算）
-    if proj and current_project and proj == current_project:
+    if relevance is not None:
+        rel = max(0.0, min(float(relevance), 1.0))
+    elif proj and current_project and proj == current_project:
         rel = 1.0
     elif not current_project:
         rel = 0.0
     else:
         rel = 0.1
+    if freshness is not None:
+        # 只对"内容可能过时"的类型打折；rule/identity/lesson 的 factor 恒为 1.0，
+        # 乘上去等于没乘（免疫是算出来的，不是特判出来的）。
+        rel *= 0.5 + 0.5 * float(freshness.get("factor", 1.0))
     novelty = 0.0 if seen else 1.0
     urgent = 1.0 if key else 0.2
     benefit = (_PUSH_W["rel"] * rel + _PUSH_W["gap"] * novelty
@@ -5716,27 +7955,145 @@ def _cand(conn, code, kind, *, title, reason, current_project,
     false_p = (ignored / float(total)) if total else 0.5   # 无历史 = 中性先验
     token_cost = min(len(title or "") / 100.0, 1.0)
     cost = (_PUSH_W["false"] * false_p + _PUSH_W["token"] * token_cost
-            + _PUSH_W["intr"] * 0.1)                       # 开场打断成本最低
+            + _PUSH_W["intr"] * float(interrupt))
     weight = 1.0 if key else _silence_weight(conn, code, now=now)
-    return {"code": code, "kind": kind, "title": title, "reason": reason,
-            "project": proj, "benefit": round(benefit, 4), "cost": round(cost, 4),
-            "weight": round(weight, 4), "key": bool(key),
-            "score": round((benefit - cost) * weight, 4)}
+    out = {"code": code, "kind": kind, "title": title, "reason": reason,
+           "project": proj, "benefit": round(benefit, 4), "cost": round(cost, 4),
+           "weight": round(weight, 4), "key": bool(key),
+           "score": round((benefit - cost) * weight, 4)}
+    if freshness is not None:
+        # 带上 freshness 便于度量/解释（"这条为什么没推"要能查）
+        out["freshness"] = {k: freshness.get(k) for k in ("factor", "band", "age_days")}
+    return out
+
+
+def _kb_push_candidates(conn, root, *, query, project=None, exclude=(), limit=2,
+                        now=None) -> list:
+    """知识库命中 → 推送候选（P0-1：把「AI 推给 AI」接进推送管线）。
+
+    ## 为什么单独一类
+
+    记忆候选（`_cand`）的 `code` 是记忆编码；知识库文件不是记忆，走同一份
+    `push_log` 只会把两种东西混在一个键空间里。所以 kb 候选的 `code` 用
+    `kb:<vault>:<rel>`（可读、可去重、可回填），`kind="kb"` 独立成一类。
+
+    ## 三条纪律
+
+      · **只在你问到时才产**：`query` 为空（tool_after 没 prompt、没项目）→ 返回 []；
+      · **vault 未登记 → 不产**（不噪音）；
+      · **24h 内推过的同一个文件不重复推**（按 `push_log.code` 去重）。
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    try:
+        vaults = kb_vault_list(conn)
+    except Exception:       # noqa: BLE001 —— 知识库是增强项，坏了不拖垮候选
+        return []
+    if not vaults:
+        return []
+    # 知识库检索是**字面子串**（不分词），用户原话常是整句（"海报排版怎么做"）。
+    # 所以先拆成检索词：优先用记忆检索同一套分词（extract_terms），取前 3 个
+    # 长度≥2 的词；都拿不到时退回整句（截断 200 字）。
+    try:
+        terms = [t for t in extract_terms(conn, q) if len(t) >= 2][:3]
+    except Exception:       # noqa: BLE001 —— 分词坏了就退回整句
+        terms = []
+    needles = terms or [q[:200]]
+    now_dt = now or datetime.datetime.now(datetime.timezone.utc)
+    since = (now_dt - datetime.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    exclude = set(exclude or ())
+    out = []
+    for vault in vaults:
+        if len(out) >= limit:
+            break
+        # 2026-10-27：**一次 walk 跑全部检索词**（原实现对每个词各扫一遍 vault，
+        # 3 个词 = 3 次全遍历 ≈ 2.7s，把 `prompt-push` 顶到 hook 的 10s 超时线上）。
+        # `_kb_search_multi` 与逐个调 `kb_search` 行为等价（见其 docstring 的对照表）。
+        try:
+            multi = _kb_search_multi(conn, vault, [n[:200] for n in needles],
+                                     limit_per_needle=2)
+        except Exception:       # noqa: BLE001 —— 单个 vault 坏了不该拖垮其它
+            continue
+        by_rel = {}
+        for needle in needles:
+            res = multi.get(needle.strip()[:200]) or multi.get(needle) or {}
+            for hit in res.get("hits") or []:
+                rel = hit.get("rel") or ""
+                cur = by_rel.get(rel)
+                if cur is None or int(hit.get("occurrences") or 0) > int(
+                        cur.get("occurrences") or 0):
+                    by_rel[rel] = hit
+        for hit in list(by_rel.values())[:2]:
+            code = f"kb:{vault['name']}:{hit.get('rel') or ''}"
+            if code in exclude or any(c["code"] == code for c in out):
+                continue
+            recent = conn.execute(
+                "SELECT 1 FROM push_log WHERE code=? AND pushed_at >= ? LIMIT 1",
+                (code, since)).fetchone()
+            if recent:
+                continue                    # 24h 内推过同一个文件 → 不重复
+            snippet = ""
+            if hit.get("lines"):
+                snippet = str((hit["lines"][0] or {}).get("text") or "")[:40]
+            out.append({
+                "code": code, "kind": "kb",
+                "title": str(hit.get("rel") or ""),
+                "reason": f"知识库「{vault['name']}」命中「{q[:24]}」",
+                "project": project, "benefit": 0.55, "cost": 0.05,
+                "weight": 1.0, "key": False, "score": 0.5,
+                "kb": {"vault": vault["name"], "rel": hit.get("rel"),
+                       "snippet": snippet},
+            })
+            exclude.add(code)
+    return out[:max(int(limit), 1)]
+
+
+def _conv_push_candidates(conn, root, *, query, project=None, session_key=None,
+                          exclude=(), limit=1, now=None):
+    """语料候选（C-P0-6）：**取数/门槛/时间窗都在 `fish_corpus`**（M8：主体已搬走）。
+
+    这里只交付两处主库依赖：`push_log` 里的"最近推过"与打分公式 `_cand`
+    ——后者必须留在 `fish.py`（公式只有一份，见 `_cand` 的三条纪律）。
+    """
+    return fish_corpus.conv_push_for_session(
+        root=root, query=query, project=project, exclude=exclude, limit=limit, now=now,
+        recent_of=lambda hours, when: _recent_pushed_codes(conn, session_key, hours=hours,
+                                                          now=when),
+        scorer=lambda item: _cand(conn, item["code"], "conv_related", title=item["title"],
+                                  reason=item["reason"], current_project=project, now=now,
+                                  relevance=item["relevance"], freshness=None, interrupt=0.4))
 
 
 def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
                           project=None, exclude=(), limit=12, now=None,
-                          session_key=None):
-    """生成四类候选（`16` §5.2），每条带 reason / benefit / cost / score。
+                          session_key=None, timing="inject", prompt=None):
+    """生成候选（`16` §5.2 四类 + 看板变更 + 2026-10-26 的两个新类）。
 
     **不过滤 score<=0**：是否真的推由 `select_push_candidates` 决定。
     但静默降权归零的会被剔除——那才是"放弃这条"的正式语义。
+
+    ## `timing` 决定追加什么（设计 §6.7）
+
+      · `inject` / `tool_after`：四类 + 看板变更 + `activity_overlap`（动作事实反哺）；
+      · `prompt`：**只追加 `prompt_related`（提示词相关的记忆）**。
+        为什么不加 `activity_overlap`：用户消息边界该只收到"你问的这件事有什么记忆"，
+        把撞车警告混进同一句会让人不知道该先做什么（设计 §6.7 的取舍）。
 
     返回列表，按 score 降序。
     """
     exclude = set(exclude or ())
     now_dt = now or datetime.datetime.now(datetime.timezone.utc)
     out = []
+
+    # 提示词时机：只递记忆（高置信 + 新鲜度硬门槛），不做四类通用候选——
+    # 规则/联想/态势都是"开场"语义，塞进用户消息边界就是噪音。
+    if timing == "prompt":
+        out = build_prompt_candidates(conn, root, prompt=prompt or "", citizen_id=citizen_id,
+                                      session_key=session_key, project=project,
+                                      now=now_dt, limit=limit)
+        out.sort(key=lambda c: (-c["score"], c["code"]))
+        return out[:int(limit)]
 
     # 锚点：当前项目最近 3 条 active。候选从它们的 links 邻居长出来，
     # 而不是"全库最近更新"——后者会让别的项目的更新把候选带偏。
@@ -5785,11 +8142,13 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
     for code, title, anchor, _w in sorted(assoc, key=lambda x: -x[3])[:4]:
         out.append(_cand(conn, code, "association", title=title, current_project=project,
                          seen=seen(code), now=now_dt,
-                         reason=f"与 {anchor} 有关联"))
+                         reason=f"与 {anchor} 有关联",
+                         freshness=memory_freshness(conn, code, now=_utc_str(now_dt))))
     for code, title, anchor, _w in sorted(serendip)[:2]:
         out.append(_cand(conn, code, "serendipity", title=title, current_project=project,
                          seen=seen(code), now=now_dt,
-                         reason=f"跨项目的意外关联（经 {anchor}）"))
+                         reason=f"跨项目的意外关联（经 {anchor}）",
+                         freshness=memory_freshness(conn, code, now=_utc_str(now_dt))))
 
     # ── C 态势（15%）：同项目、别的会话最近 10 分钟读过、本会话没读 ──────
     since10 = (now_dt - datetime.timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -5804,7 +8163,8 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
             continue
         out.append(_cand(conn, code, "situational", title=title, current_project=project,
                          seen=False, now=now_dt,
-                         reason="同项目其他会话刚读过"))
+                         reason="同项目其他会话刚读过",
+                         freshness=memory_freshness(conn, code, now=_utc_str(now_dt))))
         skip.add(code)
 
     # ── E 看板变更（EVAL-261025-20，2026-10-25 修）─────────────────────
@@ -5814,11 +8174,17 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
     # 你看到之后又有人签到 / 有新动态 → 出一条候选，交给工具后推送。
     if citizen_id:
         try:
+            # P0-3：快照按**会话**取（同公民多会话各看各的，互不吞推送）。
+            # 旧库（无 session_key 列）自动降级回"按公民"——读侧与写侧同一套分叉。
+            _bs_cols = _board_seen_columns(conn)
+            sk_where = " AND s.session_key=?" if "session_key" in _bs_cols else ""
+            sk_params = ((citizen_id, board_period()) if not sk_where
+                         else (citizen_id, board_period(), session_key or ""))
             for bid, bscope, bkey, seen_post, seen_pres in conn.execute(
                 "SELECT b.id, b.scope, b.scope_key, s.last_post_id, s.last_presence_at "
                 "FROM board_seen s JOIN boards b ON b.id = s.board_id "
-                "WHERE s.citizen_id=? AND b.status='open' AND b.period_key=?",
-                (citizen_id, board_period())).fetchall():
+                "WHERE s.citizen_id=? AND b.status='open' AND b.period_key=?" + sk_where,
+                sk_params).fetchall():
                 cur_post = conn.execute(
                     "SELECT COALESCE(MAX(id),0) FROM board_posts WHERE board_id=?",
                     (bid,)).fetchone()[0]
@@ -5848,6 +8214,36 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
         except Exception:   # noqa: BLE001 —— 看板候选是增强项，不拖垮候选生成
             pass
 
+    # ── F 动作重叠（2026-10-26 · T04）：**让动作事实反哺推送** ─────────────
+    # 只在 inject/tool_after 追加（prompt 已在函数开头直接 return）。
+    # 判据是"别的会话 30 分钟内写过的目录" ∩ "我声明占用的面"，或反过来
+    # （我 30 分钟内写的目录 ∩ 别人声明的面）——两个方向都是"可能撞车"。
+    try:
+        out.extend(_activity_overlap_candidates(
+            conn, project=project, citizen_id=citizen_id, session_key=session_key,
+            now=now_dt))
+    except sqlite3.Error:
+        pass                    # 动作反哺是增强项：库坏了不该让候选整体失败
+
+    # ── G 知识库（P0-1）：vault 命中 → 候选（有 query 才产）────────────────
+    # 对外承诺的"做设计时自动推知识库文档"就落在这里：tool_after/inject 用
+    # 项目名做 query；prompt 时机用用户原话（在 build_prompt_candidates 里）。
+    try:
+        out.extend(_kb_push_candidates(
+            conn, root, query=(prompt or project or ""), project=project,
+            exclude=skip, limit=2, now=now_dt))
+    except Exception:       # noqa: BLE001 —— 知识库候选是增强项
+        pass
+    # T04：语料候选（只 prompt 时机有 query；门槛与取数在 `fish_corpus`）。
+    # 与 kb 同规格的 try/except（M3）：语料是**增强项**，采集中库被写锁占住时最多
+    # 少推一条，绝不能把整批候选（乃至注入包）拖垮——旧实现这里没有兜底，
+    # 一次 `database is locked` 就让 tool_after 整轮抛异常。
+    try:
+        out.extend(_conv_push_candidates(conn, root, query=prompt, project=project,
+                                         session_key=session_key, now=now_dt))
+    except Exception:       # noqa: BLE001 —— 语料候选是增强项
+        pass
+
     # 静默权重归零 = **正式放弃这条**（`_silence_weight` 正常永不返回 0，
     # 只有被显式改坏时才会——这里兜住它，让"归零"这个动作真的生效）。
     # 为什么过滤放在这里而不是 _cand 里：`_cand` 要如实报出 weight，
@@ -5876,12 +8272,488 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
     return out[:int(limit)]
 
 
-def select_push_candidates(conn, cands, *, limit=4):
+def _recent_pushed_codes(conn, session_key, *, hours=24, now=None) -> set:
+    """本会话最近 N 小时**已经推过**的编码（去重用；prompt 与 tool_after 共用一份）。"""
+    if not session_key:
+        return set()
+    window = int(hours or 0)
+    if window <= 0:
+        return set()
+    now_dt = now or datetime.datetime.now(datetime.timezone.utc)
+    cutoff = (now_dt - datetime.timedelta(hours=window)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {r[0] for r in conn.execute(
+        "SELECT DISTINCT code FROM push_log WHERE session_key=? AND pushed_at >= ? "
+        "AND code IS NOT NULL", (session_key, cutoff)).fetchall()}
+
+
+def _declared_row_fresh(last_seen, auto_seen, window_min, now_dt) -> bool:
+    """声明行是否**还在有效窗口内**（`find_collisions` 的声明面口径，评审 F5）。
+
+    两条撞车通道（推送候选 / PreToolUse 快照判定）必须对"这条声明还算不算数"
+    给同一个答案：`find_collisions` 用 `declared_window_min=board.overlap_window_min`，
+    这里就用同一份窗口读 `last_seen_at` / `auto_seen_at`（任一在窗内即算）。
+
+    时间戳缺失（空串/解析失败）→ **算有效**：宁可多判一条声明面，也不许把人的
+    声明静默从判定里抹掉（漏报比多一句提示更伤，而"声明了却永远不被看见"正是
+    `EVAL-261025-09` 那个病）。
+    """
+    window = int(window_min or 0)
+    if window <= 0:
+        return True                      # 0 = 不限窗口（沿用 0=永不的约定）
+    stamps = [t for t in (parse_utc(last_seen), parse_utc(auto_seen)) if t is not None]
+    if not stamps:
+        return True
+    return any((now_dt - t).total_seconds() <= window * 60 for t in stamps)
+
+
+def _activity_overlap_hit(mine, target_abs, min_segments) -> str:
+    """我的面 vs 对方的**一个**目标（目录或文件）：命中返回给人看的共同前缀。
+
+    为什么目标要分两种形态（评审 F4）：`path_hit` **不对称**——文件面只做后缀匹配
+    （"一个文件不能包含更深的路径"）。于是：
+
+      · 我声明目录 `p0/data`、对方写 `i:/other/p0/data/x.db` → 对方的**目录键**
+        `i:/other/p0/data` 就命中；
+      · 我声明**文件** `p0/fish.py`、对方在同一个文件里写 → 对方的目录键是
+        `i:/other/p0`（比我的面**短**），`path_hit('p0/fish.py', 'i:/other/p0')`
+        是 `None`——文件面不做分量链包含。只有拿对方的**实际文件路径**
+        `i:/other/p0/fish.py` 再判一次才命中。
+
+    所以目标清单必须是「对方的实际目录 ∪ 对方的实际文件」（`auto_surfaces.files`）：
+    缺了后者 = "同一文件被两个人改"这一类真实撞车**永远沉默**。
+    """
+    for one in mine or ():
+        if not one or not target_abs:
+            continue
+        hit = fish_surface.path_hit(one, target_abs, min_segments=min_segments)
+        if hit:
+            return hit
+    return None
+
+
+def _session_labels_for(conn, pairs) -> dict:
+    """`{(citizen_id, session_key): label}` —— 查库补名字后交给 `fish_naming.session_labels`。
+
+    为什么要这一个入口：会话维度的标签要同时满足两件事——**同公民内**按会话短标识消歧
+    （4→6→8 位加长）、**跨公民**按重名规则消歧（`名字·host#2`）。两件事都在
+    `fish_naming` 里（渲染单点），这里只负责把 `display_name/host/created_at` 取出来
+    ——**不猜名字**（查不到的公民按空处理，标签自然是 `未命名`）。
+    """
+    pairs = list(pairs or ())
+    cids = sorted({str(cid) for cid, _sk in pairs if cid})
+    names = {}
+    for start in range(0, len(cids), 500):
+        chunk = cids[start:start + 500]
+        for cid, dname, host, created in conn.execute(
+                "SELECT citizen_id, display_name, host, created_at FROM citizens "
+                "WHERE citizen_id IN (" + ",".join("?" * len(chunk)) + ")", chunk):
+            names[cid] = {"display_name": dname, "host": host, "created_at": created}
+    rows = []
+    for cid, sk in pairs:
+        info = names.get(str(cid)) or {}
+        rows.append({"citizen_id": cid, "session_key": sk,
+                     "display_name": info.get("display_name"),
+                     "host": info.get("host"), "created_at": info.get("created_at")})
+    return fish_naming.session_labels(rows)
+
+
+def _activity_overlap_candidates(conn, *, project=None, citizen_id=None,
+                                 session_key=None, now=None) -> list:
+    """「动作事实 → 撞车候选」：`activity:<dir>`，24h 内同会话同目录最多一次。
+
+    为什么它值 0.8 benefit / 0.05 cost（设计 §6.7 表）：
+    真撞车（两个人同时在改同一块）是**高收益低打扰**的信号——一句话就能避免互相覆盖；
+    而它的触发条件很窄（30 分钟窗口 + 有目录 + 不是我），所以噪音天然很低。
+
+     ## 三条纪律（评审 L5：这里曾经绕过 `min_segments`）
+
+      1. **候选生成走 `path_hit(..., min_segments=board.collision_min_segments)`**——
+         与 `find_collisions` 同一份门槛。旧代码用无门槛的 `surface_hit`
+         （只比同基准前缀），于是 `p0` 这种**单段同名目录**能跨项目命中，制造假撞车；
+      2. **两边都换成绝对路径**再比：我的声明按**本项目根**解析（`make_abs`），
+         我/别人的实际目录取事实列推出来的 `dir_abs`。相对 vs 绝对的字符串比较
+         是"同名单段目录误报"的另一个来源；
+      3. **临时/缓存目录跳过**（`fish_activity.is_noise_dir`，`%TEMP%`/`node_modules`…）：
+         那里到处同名，也没有"两个人同改一块"这回事。
+
+     ## 两条补充（2026-10-26 评审 F4 / F5）
+
+      4. **目标的两种形态都要判**（F4）：`path_hit` 对文件面只做后缀匹配（"一个文件
+         不能包含更深的路径"）。我声明文件面 `p0/fish.py`、对方在同一个文件里写时，
+         对方给的是目录键 `i:/other/p0`（比我的面短），正向永远 `None`——所以目标
+         清单取「对方的实际目录 ∪ 对方的实际文件路径」（`auto_surfaces.files`），
+         见 `_activity_overlap_hit`；
+      5. **我的声明面也只在窗口内算**（F5）：`find_collisions` 用
+         `board.overlap_window_min` 判声明面的有效期，而这里曾经"今日板 status!=left
+         即算"——两条撞车通道的时间窗口径不一致，等于同一个事实两个答案。
+         现在两边都读 `board.overlap_window_min`（`last_seen/auto_seen` 任一在窗内即算，
+         时间戳缺失时**算有效**：宁可多判一条声明，也不许把人的声明静默抹掉）。
+    """
+    now_dt = now or datetime.datetime.now(datetime.timezone.utc)
+    now_text = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    my_session = str(session_key or "").strip()
+    window_min = int(get_config(conn, "board.collision_window_min"))
+    try:
+        auto = fish_activity.auto_surfaces_by_session(
+            conn, window_min=window_min, now=now_text)
+    except sqlite3.Error:
+        return []
+    # 公民级聚合**只在"我的会话未知"（`my_session == ''`）时才取**：设计 §3.6 第二处
+    # 是**两档**——有会话键就只认自己那个会话，不许拿同公民别的会话的实际面冒充"我的"。
+    citizen_auto = {}
+    if not my_session:
+        try:
+            citizen_auto = fish_activity.auto_surfaces(
+                conn, window_min=window_min, now=now_text)
+        except sqlite3.Error:
+            citizen_auto = {}
+    min_segments = int(get_config(conn, "board.collision_min_segments") or 2)
+    declared_window = int(get_config(conn, "board.overlap_window_min"))
+    # 我的声明面（今日看板上我自己那一行）+ 我实际的目录
+    mine_declared, mine_actual = [], []
+    base = None                                  # 只用于**展示**（相对路径）
+    if citizen_id:
+        try:
+            base = fish_activity.project_base(conn, project) if project else None
+            # 我的声明面只认**我这一行**（判据 S9/M1 盯的就是它）：不加过滤的话，
+            # "我的"会把同公民另一个会话的声明面也算进来，于是别人写那块时
+            # 我会收到"你也占了这块"——而我根本没声明过（那是别人窗口的事）。
+            #
+            # 为什么写成两句而不是一句 `p.session_key=?`：既有判据/历史写入方是用
+            # `agent_id` 记会话键的（`session_key` 列那时还不存在）。列是空串时认旧列，
+            # 与快照条目的 F1 双读同一口径——只认列会让这些行的声明面整个消失，
+            # 撞车候选集体静默（假绿比误报更坏）。
+            has_sk = _presence_has_session(conn)
+            sk_filter = (" AND (p.session_key=?"
+                         " OR (p.session_key='' AND p.agent_id=?))"
+                         if (my_session and has_sk) else "")
+            sql = ("SELECT p.surface, b.scope, b.scope_key, p.last_seen_at, p.auto_seen_at "
+                   "FROM presence p JOIN boards b ON b.id = p.board_id "
+                   "WHERE p.citizen_id=? AND b.period_key=?" + sk_filter +
+                   " AND p.status != 'left'")
+            params = [citizen_id, board_period()]
+            if sk_filter:
+                params.extend([my_session, my_session])
+            rows = conn.execute(sql, tuple(params)).fetchall()
+            bases = {}
+            for (surf, scope, scope_key, last_seen, auto_seen) in rows:
+                if not _declared_row_fresh(last_seen, auto_seen, declared_window, now_dt):
+                    continue          # 声明行已过窗 → 与 `find_collisions` 一样不算
+                # 声明是**相对它所在看板的项目根**写的（`surface='p0/fish.py'`），
+                # 所以按**那一行**的项目根解析——用"当前 cwd 的项目"会解析错板
+                # （没项目根的根板声明保持相对，交给 `path_hit` 的保守路径，1 段面被挡住）。
+                board_project = scope_key if scope == "project" else None
+                if board_project not in bases:
+                    bases[board_project] = (fish_activity.project_base(conn, board_project)
+                                           if board_project else None)
+                row_base = bases[board_project]
+                for item in normalize_surface(surf):
+                    mine_declared.append(fish_surface.make_abs(item, row_base))
+            # 我的实际面：有会话键 → 只取自己那个会话（第二档）；没有 → 退公民级
+            my_info = (auto.get((citizen_id, my_session)) if my_session
+                       else citizen_auto.get(citizen_id)) or {}
+            mine_actual = [d.get("dir_abs") or "" for d in my_info.get("dirs") or []]
+        except sqlite3.Error:
+            mine_declared, mine_actual = [], []
+    mine = [m for m in mine_declared + mine_actual if m]
+    if not mine:
+        return []
+    pushed = _recent_pushed_codes(
+        conn, session_key, hours=int(get_config(conn, "push.prompt_exclude_hours")),
+        now=now_dt)
+    # 标签走**会话维度**（同公民多会话的标题要带 `·dsh#88f9`，判据 S10 钉住）。
+    # 集合里**必须包含我自己**：会话短标识的消歧是"同一公民内 ≥2 个会话才加后缀"，
+    # 只喂对方那一对时，我自己的会话不在集合里 → 同公民另一会话看起来像"单人单会话"，
+    # 标题就不带后缀，读者分不清"是别人还是我另一个窗口"（S10 抓的正是这个）。
+    pairs = list(auto.keys())
+    if citizen_id:
+        pairs.append((citizen_id, my_session))
+    labels = _session_labels_for(conn, pairs)
+    out, seen = [], set()
+    for (cid, other_session), info in auto.items():
+        # 排除键 = `(citizen, session)`：同会话绝不报（那是我自己），
+        # 同公民**另一会话要报**——两个窗口同改一个文件是真撞车（设计 §3.2）。
+        # 旧实现的排除键只有公民，于是同公民另一会话的真实撞车被整个吞掉（P4）。
+        if (cid, other_session) == (citizen_id, my_session):
+            continue
+        # 目标清单 = 对方的**实际目录** ∪ 对方的**实际文件路径**（评审 F4）。
+        # 每项 `(绝对路径, 展示兜底串, 次数)`；展示列只用于没有 base 时的兜底。
+        targets = []
+        for item in info.get("dirs") or []:
+            dir_abs = item.get("dir_abs") or ""
+            if not dir_abs:
+                continue                     # 证明不了绝对目录 → 不判定（不编）
+            if fish_activity.is_noise_dir(dir_abs):
+                continue                     # %TEMP% / node_modules：同名不同处
+            targets.append((dir_abs, item.get("dir") or "", int(item.get("count") or 0)))
+        for item in info.get("files") or []:
+            file_abs = item.get("path") or ""
+            if not file_abs:
+                continue
+            if fish_activity.is_noise_dir(fish_surface.dir_of(file_abs) or ""):
+                continue                     # 临时/缓存目录里的文件同样不判
+            targets.append((file_abs, file_abs, int(item.get("count") or 0)))
+        # 每会话最多一条，取**最具体**的那块（设计 S10 的期望就是 1 条；
+        # 与 `find_collisions` 的"每会话最多 1 条"同口径）。一个会话写一个文件会同时
+        # 命中目录键与文件键，不去重就会把同一次重叠印两遍——读者会当成两处冲突。
+        best = None                       # (len(shown), code, shown, count)
+        for target_abs, shown_hint, count in targets:
+            if not _activity_overlap_hit(mine, target_abs, min_segments):
+                continue
+            # 展示用相对路径（绝对路径不进展示面），判定已经用绝对路径做完。
+            shown = (fish_surface.relativize(target_abs, base) if base
+                     else (shown_hint or target_abs))
+            code = f"activity:{shown}"
+            if code in pushed:
+                continue
+            if best is None or len(shown) > best[0]:
+                best = (len(shown), code, shown, count)
+        if best is None:
+            continue
+        _len, code, shown, count = best
+        if code in seen:
+            continue
+        seen.add(code)
+        who = labels.get((cid, other_session)) or fish_naming.UNNAMED_LABEL
+        out.append({
+            "code": code, "kind": "situational",
+            "title": f"{who} 刚在写 {shown}（{count} 次）",
+            "reason": "你也占了这块——可能撞车",
+            "project": project, "benefit": 0.8, "cost": 0.05, "weight": 1.0,
+            "key": False, "score": 0.75,
+        })
+    return out
+
+
+def _unset_or_zero(conn, key):
+    """读一个"0 = 关闭"语义的整数配置（0 不是错误值，是合法选择）。"""
+    return int(get_config(conn, key))
+
+
+def clean_prompt(text, *, max_len=4000) -> str:
+    """把用户提示词**洗干净**：丢掉 fish 自己注入的行，压平换行。
+
+    为什么必须洗（设计 §6.4）：SessionStart 注入块会被宿主原样带进下一轮 prompt，
+    于是"按提示词递记忆"会把**我们自己的话**当成用户意图去检索——那是纯噪音，
+    而且会持续自我强化（推的内容变成下一轮的 query）。
+
+    洗法：按行丢弃含 `fsh_` / `【当前状态` / `[fish]` / `登记身份` 的行（
+    `fish_activity.INJECTION_MARKERS` 是**同一份**标记表，prompt hook 也用它快筛），
+    再压平空白。原始 prompt **绝不落盘**（这里只返回处理后的文本，不写日志）。
+    """
+    kept = []
+    for line in str(text or "").splitlines():
+        if any(marker in line for marker in fish_activity.INJECTION_MARKERS):
+            continue
+        kept.append(line.strip())
+    return " ".join(part for part in kept if part)[:max_len]
+
+
+_PROMPT_STOPWORDS = frozenset("""
+的 了 是 在 和 与 请 帮 我们 你们 这个 那个 如何 什么 怎么 一下 继续 下一步
+以及 还有 但是 因为 所以 如果 可以 需要 现在 已经 一个 没有 就是 只是 这样
+""".split())
+_CODE_RE = re.compile(r"[A-Za-z][A-Za-z0-9]{0,19}-\d{6}-\d{2,}")
+_LATIN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-]{2,}")
+_CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
+PROMPT_MAX_TERMS = 12
+
+
+def extract_terms(conn, prompt, *, limit=PROMPT_MAX_TERMS):
+    """提示词 → 检索词（编码 / 项目名 / 关键词 / 中文 2-4 字 n-gram），上限 12 个。
+
+    为什么自己切中文：FTS 的 unicode61 不做中文分词（ADR-005），
+    「撞车检测」整串匹配不到「撞车」。2-4 字 n-gram 是**够用且可解释**的折中：
+    全切 1 字会把"的"也算命中，切太长又会漏。
+    """
+    text = clean_prompt(prompt)
+    terms = []
+
+    def add(term):
+        term = (term or "").strip()
+        if not term or term in terms:
+            return
+        if term.lower() in _PROMPT_STOPWORDS:
+            return
+        terms.append(term)
+
+    for match in _CODE_RE.findall(text):
+        add(match)
+    # 项目名（code_registry 的 prefix 与 namespace，长度 ≥2）
+    for prefix, namespace in conn.execute(
+            "SELECT prefix, namespace FROM code_registry").fetchall():
+        for name in (prefix, namespace):
+            name = (name or "").strip()
+            if len(name) >= 2 and name and name in text:
+                add(name)
+    for word in _LATIN_RE.findall(text):
+        add(word)
+    for run in _CJK_RUN_RE.findall(text):
+        for size in (2, 3, 4):
+            if len(run) < size:
+                continue
+            for start in range(0, min(len(run) - size + 1, 6)):
+                add(run[start:start + size])
+    return terms[:int(limit)]
+
+
+def search_memories_any(conn, terms, *, project=None, limit=8, include_superseded=False):
+    """多关键词检索（编码精确优先 + FTS OR + 按命中词数排序）。
+
+    为什么不用 `search_memories`：它是**单串**入口（用户敲一个词），
+    而提示词是一句话、抽出来的是十几个词。这里按"命中词数"排序：
+    命中 3 个词的条目比命中 1 个的更像"用户在问的那件事"。
+
+    只读、只 active、只 dormant=0 —— 硬过滤写在 SQL 里，不靠调用方记得。
+    """
+    terms = [t for t in (terms or []) if t]
+    if not terms:
+        return []
+    limit = max(1, int(limit))
+    hits = {}                            # code -> 命中的词集合
+
+    for term in terms:
+        for (code,) in conn.execute(
+                "SELECT code FROM code_index WHERE code=?", (term,)).fetchall():
+            hits.setdefault(code, set()).add(term)
+    expr_terms = [t for t in terms if len(t) >= 2 and not _CODE_RE.fullmatch(t)]
+    if expr_terms:
+        # FTS5 的 OR 查询：每个词都加引号（否则 `-`/`:` 会被当运算符）。
+        expr = " OR ".join(f'"{t}"' for t in expr_terms)
+        try:
+            for (code,) in conn.execute(
+                    "SELECT code FROM memory_fts WHERE memory_fts MATCH ? LIMIT 200",
+                    (expr,)).fetchall():
+                hits.setdefault(code, set())
+        except sqlite3.Error:
+            pass                         # 表达式非法 → 只保留编码命中，绝不炸
+    if not hits:
+        return []
+    projects = resolve_project_names(conn, project) if project else []
+    placeholders = ",".join("?" * len(hits))
+    sql = ("SELECT code, title, project, mem_type, tags FROM code_index "
+           "WHERE code IN (" + placeholders + ")")
+    params = list(hits)
+    if not include_superseded:
+        # 硬过滤写在 SQL 里（不是靠调用方记得）：被取代/作废的条目**永远**不进候选。
+        sql += " AND status='active' AND dormant=0"
+    if projects:
+        sql += " AND project IN (" + ",".join("?" * len(projects)) + ")"
+        params.extend(projects)
+    rows = []
+    for code, title, mem_project, mem_type, tags in conn.execute(sql, params).fetchall():
+        text = f"{code} {title or ''} {tags or ''}".lower()
+        matched = {t for t in terms if t.lower() in text} | hits.get(code, set())
+        rows.append((code, title or "", mem_project or "", mem_type or "",
+                     tuple(sorted(matched))))
+    rows.sort(key=lambda r: (-len(r[4]), r[0]))
+    return rows[:limit]
+
+
+def build_prompt_candidates(conn, root, *, prompt, citizen_id=None, session_key=None,
+                            project=None, now=None, limit=3) -> list:
+    """提示词命中的高置信记忆 → 候选（`prompt_related`）。
+
+    打分（设计 §6.4）：
+        1.00 编码精确命中
+      + 0.40 项目名命中且记忆 project 一致
+      + 0.30 × 标题命中的不同词数（≤0.6）
+      + 0.15 仅正文/标签命中
+      （cap 1.0）
+
+    然后 `rel_eff = relevance × (0.5 + 0.5 × freshness.factor)`，
+    门槛 `push.prompt_min_relevance`（默认 0.6），且 `stale` **硬过滤**。
+
+    ⚠️ 传给 `_cand` 时用 `relevance=rel_eff, freshness=None`：
+    折扣只乘一次（设计 §6.5 的"避免双重折扣"）。
+    """
+    if not prompt:
+        return []
+    now_dt = now or datetime.datetime.now(datetime.timezone.utc)
+    try:
+        ensure_fts(conn, root)      # 空索引自愈（幂等）：老库升级后不重建会"静默查不到"
+    except (sqlite3.Error, OSError, TypeError):
+        pass                        # 自愈失败不该让提示词推送整体失败
+    terms = extract_terms(conn, prompt)
+    # P0-1：知识库命中与记忆命中**并行**产——记忆没命中不代表知识库没有
+    # （"做设计时推知识库文章"恰恰常发生在记忆里没有对应条目时）。
+    kb_cands = []
+    try:
+        kb_cands = _kb_push_candidates(conn, root, query=prompt, project=project,
+                                       limit=1, now=now_dt)
+    except Exception:       # noqa: BLE001 —— 知识库候选是增强项
+        pass
+    # T04：语料候选（M3：与 kb 同规格兜底——语料读不到只是少一条候选，
+    # 绝不许把用户消息边界上的 prompt-push 整个打断）
+    try:
+        conv_cands = _conv_push_candidates(conn, root, query=prompt, project=project,
+                                           session_key=session_key, limit=1, now=now_dt)
+    except Exception:       # noqa: BLE001 —— 语料候选是增强项
+        conv_cands = []
+    if not terms:
+        return kb_cands + conv_cands
+    rows = search_memories_any(conn, terms, project=None, limit=max(int(limit) * 4, 12))
+    if not rows:
+        return kb_cands + conv_cands
+    pushed = _recent_pushed_codes(
+        conn, session_key, hours=int(get_config(conn, "push.prompt_exclude_hours")),
+        now=now_dt)
+    title_terms = [t for t in terms if not _CODE_RE.fullmatch(t)]
+    min_rel = float(get_config(conn, "push.prompt_min_relevance"))
+    stale_floor = float(get_config(conn, "push.prompt_stale_floor"))
+    out = []
+    for code, title, mem_project, mem_type, matched in rows:
+        if code in pushed:
+            continue                                  # 24h 内推过
+        if session_key and _seen_in_session(conn, code, session_key):
+            continue                                  # 本会话已读过，不需要再递
+        fresh = memory_freshness(conn, code, now=_utc_str(now_dt))
+        # **唯一**的新鲜度硬门槛就是 `push.prompt_stale_floor`（默认 0.35，与
+        # band 的 stale 阈值同值但可独立调）。刻意**不**再加一条
+        # `band == 'stale'` 的判断：两条门槛同时存在时，调其中一条不生效
+        # （判据会以为门槛坏了），而设计 §6.5 只允许一个。
+        if mem_type in STALE_SENSITIVE_TYPES and fresh["factor"] < stale_floor:
+            continue                                   # 宁可不推，不递可能错的
+        relevance = 0.0
+        if code in matched or code in terms:
+            relevance += 1.0
+        if project and mem_project and mem_project == project:
+            relevance += 0.40
+        title_hits = sum(1 for t in title_terms if t and t in (title or ""))
+        relevance += min(0.30 * title_hits, 0.60)
+        if relevance == 0.0:
+            relevance = 0.15                          # 仅正文/标签命中
+        rel_eff = min(1.0, relevance) * (0.5 + 0.5 * fresh["factor"])
+        if rel_eff < min_rel:
+            continue
+        reason = f"你问的这件事有记忆（{fresh['note'] or '新'}"
+        if fresh["band"] == "aging":
+            reason += "，可能过时"
+        reason += "）"
+        cand = _cand(conn, code, "prompt_related", title=title, reason=reason,
+                     current_project=project, seen=False, key=False, now=now_dt,
+                     relevance=rel_eff, freshness=None, interrupt=0.4)
+        cand["relevance"] = round(rel_eff, 4)
+        cand["freshness"] = {"factor": fresh["factor"], "band": fresh["band"],
+                             "age_days": fresh["age_days"]}
+        out.append(cand)
+    # P0-1：知识库候选与记忆候选同批排序、同一预算（"做设计的 AI 拿到设计文章"）。
+    out.extend(kb_cands)
+    out.extend(conv_cands)          # T04：原话候选同批（同一份预算，不另开一格）
+    out.sort(key=lambda c: (-c["score"], c["code"]))
+    return out[:max(int(limit), 1)]
+
+
+def select_push_candidates(conn, cands, *, limit=4, prefer_kind=None):
     """按分数选，并保证**意外类至少 1 条**（防茧房闸 2）。
 
     只选 score > 0 的——`16` §5.1 的判据就是"收益要大于成本"。
     但注意：**这不等于"沉默最安全"**，因为 score 里已经含了静默降权项
     （被忽略多的候选分低，但不会归零，所以仍有被选中的机会）。
+
+    `prefer_kind`（2026-10-26）：给某一类留**第一格**（如 prompt 时机只递
+    `prompt_related`）。为什么不直接过滤掉别的类：候选池的分档逻辑属于
+    `build_push_candidates`，选择器只做"排序 + 配额"，两处各管一件事。
     """
     cands = [c for c in cands if c["score"] > 0]
     picked, seen_kinds = [], {}
@@ -5891,6 +8763,10 @@ def select_push_candidates(conn, cands, *, limit=4):
     if ser:
         picked.append(ser[0])
         seen_kinds["serendipity"] = 1
+    if prefer_kind:
+        wanted = [c for c in cands if c["kind"] == prefer_kind and c not in picked]
+        if wanted:
+            picked.append(wanted[0])          # 指定类别优先占第一格
     for c in cands:
         if len(picked) >= quota:
             break
@@ -5907,7 +8783,7 @@ def build_push_block(conn, root, *, budget_tokens=None, **kw):
     空就不出现（与 ③④⑤ 同一纪律：不写"暂无候选"这种噪音，噪音会训练 AI 跳过这段）。
     """
     if not get_config(conn, "push.enabled"):
-        return {"text": "", "codes": [], "trimmed": [], "candidates": []}
+        return {"text": "", "codes": [], "trimmed": [], "candidates": [], "omitted": 0}
     budget = int(budget_tokens or get_config(conn, "push.open_budget_tokens"))
     cands = build_push_candidates(conn, root, **kw)
     picked = select_push_candidates(conn, cands)
@@ -5919,15 +8795,59 @@ def build_push_block(conn, root, *, budget_tokens=None, **kw):
             break
         lines.append(line)
     if not lines:
-        return {"text": "", "codes": [], "trimmed": [], "candidates": []}
+        # `omitted`：选出来了但一行都没印（预算为 0 或首行就超）——声明要用它。
+        return {"text": "", "codes": [], "trimmed": [], "candidates": [],
+                "omitted": len(picked)}
     text = _PUSH_TAG + "：\n" + "\n".join(lines) + "\n"
     codes = [ln[2:].split(" ", 1)[0] for ln in lines]
+    # 2026-10-26（FB-02）：`omitted` = 被预算挡在门外的候选条数。旧实现只回
+    # "印了哪几条"，于是"还有 3 条没印"这件事在回包里彻底消失——读者会以为候选就这些。
     return {"text": text, "codes": codes, "trimmed": [],
+            "omitted": max(0, len(picked) - len(lines)),
             "candidates": [{"code": c["code"], "kind": c["kind"], "score": c["score"],
                             "reason": c["reason"]} for c in picked]}
 
 
-def board_block(conn, project=None, limit=5, citizen_id=None):
+def _fold_presence_for_inject(pres, limit=3):
+    """注入包看板段**按公民折叠**：同公民多会话只占一格（后附 `（+N 会话）`）。
+
+    为什么必须折（设计 §4.4 / R4）：注入包看板段有 **3 格硬上限**。会话维度一进来，
+    一个公民的 10 个会话会把别的公民整个挤出注入包——那等于把"看见更多行"做成
+    "看不见别人"，比不修更坏。
+
+    口径：同公民取 `effective_last` 最新的那行做主行（其余字段原样保留，**不编**）；
+    `surface` 取并集前 2 项（读者只需要知道"这块被占了"）；`extra_sessions` 记被折掉的行数。
+    """
+    order, groups = [], {}
+    for row in pres or ():
+        cid = row.get("citizen_id") or ""
+        if cid not in groups:
+            groups[cid] = []
+            order.append(cid)
+        groups[cid].append(row)
+    out = []
+    for cid in order:
+        group = groups[cid]
+        main = max(group, key=lambda r: effective_last(r)) if group else None
+        if main is None:
+            continue
+        folded = dict(main)
+        merged = []
+        for row in group:
+            for item in normalize_surface(row.get("surface")):
+                if item not in merged:
+                    merged.append(item)
+        folded["surface"] = ",".join(merged[:2])
+        folded["extra_sessions"] = max(0, len(group) - 1)
+        folded["sessions_of_citizen"] = len(group)
+        out.append(folded)
+    if limit is not None and int(limit) > 0:
+        return out[:int(limit)]
+    return out
+
+
+def board_block(conn, project=None, limit=5, citizen_id=None, max_tokens=None, stats=None,
+                session_key=None):
     """注入包里的看板段（约 150-200 token）。
 
     三条设计约束（都来自 `09` R5-6 与 §4.6 的三个坑）：
@@ -5937,8 +8857,20 @@ def board_block(conn, project=None, limit=5, citizen_id=None):
     2. **只给最近 5 行动态**：看板是"此刻"，不是"全程"。全给会让注入包变成第二份 daily。
     3. **空看板要明写**：不能留白——留白会让 AI 以为"看板这个功能坏了"，
        而实际上"没人签到"本身就是一条重要信息（未登记 = 未发生）。
+
+    2026-10-26（FB-02）：`max_tokens` = 本段自己的预算上限（由
+    `inject.board_max_ratio` × 整包预算算出）。旧实现**没有上限**：动态一多，
+    整段就膨胀，而整包裁剪只能"整段丢"——于是"看板多了"会连带把别段挤掉，
+    读者却看不出是看板挤的。现在超上限就**逐行截断**（从末尾往回丢），
+    并在段头写 `（已按预算截断）`：**被砍过这件事必须可读**。
+    `stats`（可选字典，出参）回填 `{"lines": 截断前总行数, "truncated": 丢掉的行数,
+    "tokens": 截断后 token}`，供 `meta["truncated"]["board"]` 与包尾声明共用。
     """
     scope, key = ("project", project) if project else ("root", "")
+    if stats is not None:
+        stats.setdefault("lines", 0)
+        stats.setdefault("truncated", 0)
+        stats.setdefault("tokens", 0)
     try:
         board = board_ensure(conn, scope, key)
         pres = board_presence_rows(conn, board)
@@ -5955,30 +8887,57 @@ def board_block(conn, project=None, limit=5, citizen_id=None):
             last_pres = conn.execute(
                 "SELECT COALESCE(MAX(last_seen_at),'') FROM presence WHERE board_id=?",
                 (board["id"],)).fetchone()[0]
-            conn.execute(
-                "INSERT INTO board_seen (board_id,citizen_id,last_post_id,"
-                "last_presence_at,updated_at) VALUES (?,?,?,?,?) "
-                "ON CONFLICT(board_id,citizen_id) DO UPDATE SET "
-                "last_post_id=excluded.last_post_id, "
-                "last_presence_at=excluded.last_presence_at, "
-                "updated_at=excluded.updated_at",
-                (board["id"], citizen_id, int(last_post or 0), last_pres or "",
-                 now_utc()))
+            # P0-3：按**会话**记快照（同公民多会话各记各的，互不吞推送）。
+            # 旧库（未迁移）自动降级两列——写侧唯一分叉点 `_board_seen_write_shape`。
+            has_sk, conflict = _board_seen_write_shape(conn)
+            if has_sk:
+                conn.execute(
+                    "INSERT INTO board_seen (board_id,citizen_id,session_key,last_post_id,"
+                    "last_presence_at,updated_at) VALUES (?,?,?,?,?,?) "
+                    "ON CONFLICT(board_id,citizen_id,session_key) DO UPDATE SET "
+                    "last_post_id=excluded.last_post_id, "
+                    "last_presence_at=excluded.last_presence_at, "
+                    "updated_at=excluded.updated_at",
+                    (board["id"], citizen_id, session_key or "", int(last_post or 0),
+                     last_pres or "", now_utc()))
+            else:
+                conn.execute(
+                    "INSERT INTO board_seen (board_id,citizen_id,last_post_id,"
+                    "last_presence_at,updated_at) VALUES (?,?,?,?,?) "
+                    "ON CONFLICT(board_id,citizen_id) DO UPDATE SET "
+                    "last_post_id=excluded.last_post_id, "
+                    "last_presence_at=excluded.last_presence_at, "
+                    "updated_at=excluded.updated_at",
+                    (board["id"], citizen_id, int(last_post or 0), last_pres or "",
+                     now_utc()))
             conn.commit()
         except Exception:       # noqa: BLE001 —— 记录快照是增强项，不拖垮注入
             pass
     day = _fmt_period(board["period_key"])
+    proj_label = fish_naming.project_label(
+        key if scope == "project" else "",
+        _project_namespace(conn, key) if scope == "project" else None)
     if not pres and not posts:
-        return (f"看板（{day}）：**今天还没有人签到**——未登记 = 未发生。"
-                "你要开工就用 `fish board checkin --doing \"在做什么\"` 登记，"
-                "别人才能判断会不会跟你撞车。")
+        empty = (f"看板（{day}，{proj_label}）：**今天还没有人签到**——未登记 = 未发生。"
+                 "你要开工就用 `fish board checkin --doing \"在做什么\"` 登记，"
+                 "别人才能判断会不会跟你撞车。")
+        if stats is not None:
+            stats["lines"] = 1
+            stats["truncated"] = 0
+            stats["tokens"] = count_tokens(empty)
+        return empty
     # 2026-10-25（`EVAL-261025-09`）：**必须把 surface 带出去**。
     # 旧实现只印 doing，于是"自动注入层恰好缺了唯一有用的字段"——
     # 每个会话都会读到的段落里没有 surface，AI 不主动 board show 就永远
     # 不知道谁占了哪块，又回到"靠自觉"。
+    # 2026-10-26（T03）：改成**两栏**（声明 / 实际）+ 项目名 + 可读名。
     overlaps = board_overlaps(conn, board)
-    head = f"看板（{day}）：{len(pres)} 人在场"
+    # 人数按**公民**去重、会话数另计（"5 人在场"里的"人"不该因为开了两个窗口变成 6）
+    people = len({p.get("citizen_id") for p in pres})
+    head = f"看板（{day}，{proj_label}）：{people} 人在场"
     if pres:
+        if len(pres) > people:
+            head += f"（{len(pres)} 会话）"
         # 排序纪律（2026-10-25 修 · `EVAL-261025-13` 建议 4）：**三级排序**
         #   ① 有效活跃（status != idle）  ② 有重叠  ③ 其余
         #
@@ -5993,50 +8952,405 @@ def board_block(conn, project=None, limit=5, citizen_id=None):
             0 if p["citizen_id"] in overlap_ids else 1,
         ))
         shown = []
-        for p in ordered[:5]:
+        # 注入包每段都要为"AI 会不会读到"付预算：最多 3 格、每格一个**公民**
+        # （同公民多会话在这里折叠，见 `_fold_presence_for_inject`）
+        for p in _fold_presence_for_inject(ordered, limit=3):
             surf = normalize_surface(p["surface"])
-            surf_s = ("｜占 " + "、".join(surf[:2]) + ("…" if len(surf) > 2 else "")
-                      ) if surf else ""
-            mark = "" if p["status"] != "idle" else "（已闲置）"
-            shown.append(f"{who_label(p)}（{p['doing'] or '未写 doing'}{surf_s}）{mark}")
-        head += " —— " + "、".join(shown) + ("…" if len(pres) > 5 else "")
+            declared = ("｜声明 " + "、".join(surf[:2]) + ("…" if len(surf) > 2 else "")
+                        ) if surf else ""
+            actual = _actual_dirs_text(p, limit=1)
+            actual_s = "" if actual == "—" else f"｜实际 {actual}"
+            mark = ""
+            if p["status"] == "left":
+                mark = "（已下板）"
+            elif p["state"] != "active":
+                mark = f"（{_state_suffix(p['state'], p['state_inferred'])}）"
+            auto = "（自动登记）" if _is_auto_doing(p["doing"]) else ""
+            extra = (f"（+{int(p['extra_sessions'])} 会话）"
+                     if int(p.get("extra_sessions") or 0) else "")
+            shown.append(f"{who_label(p)}{auto}{extra}：{p['doing'] or '未写 doing'}"
+                         f"{declared}{actual_s}{mark}")
+        head += " —— " + "、".join(shown) + ("…" if people > 3 else "")
     lines = [head]
+    # 声明 ≠ 实际：**只在真的不一致时**说一句（天天说等于没说）。
+    # 2026-10-26 评审 F2：判定走 `dir_abs`（判定列），声明面按**看板所属项目根**
+    # 解析成绝对再比——展示列 `dir` 是相对写入者基准算的，同名不同处，
+    # 拿它比会让"绝对声明 vs 相对实际"听上去像不一致（假提示）。
+    decl_base = fish_activity.project_base(conn, key) if scope == "project" else None
+    mismatch = [p for p in pres
+                if p["status"] != "left" and p["state"] == "active"
+                and normalize_surface(p["surface"])
+                and (p.get("auto_dirs") or [])
+                and not _surfaces_touch(normalize_surface(p["surface"]),
+                                        [d.get("dir_abs") for d in p["auto_dirs"]],
+                                        base=decl_base)]
+    if mismatch:
+        names = "、".join(who_label(p) for p in mismatch[:2])
+        lines.append(f"（声明≠实际：{names} 的 doing/surface 与实际写的目录不一致"
+                     "——要协调先看「实际」那栏）")
     if overlaps:
         # 重叠是**最该被看见的一句话**，放在动态之前
         lines.append("⚠ 占用面重叠（开工前先协调）：")
         for ov in overlaps[:3]:
-            lines.append(f"  · `{ov['at']}` ← {ov['a']} ↔ {ov['b']}")
+            lines.append(f"  · `{ov['at']}` ← {ov.get('a_label', ov['a'])} ↔ "
+                         f"{ov.get('b_label', ov['b'])}")
         if len(overlaps) > 3:
             lines.append(f"  · …共 {len(overlaps)} 处")
     # 残留行**不默默丢掉**，单独一句轻提示（`EVAL-261025-13` 建议 3）：
     # 换个词、不叫"冲突"——它们既不是冲突，也不该被无痕删除。
     stale = board_stale_rows(conn, board)
     if stale:
-        names = "、".join(s["citizen_id"] for s in stale[:3]) + (
+        names = "、".join((s.get("label") or s["citizen_id"]) for s in stale[:3]) + (
             "…" if len(stale) > 3 else "")
         lines.append(f"（另有 {len(stale)} 行已闲置超时仍声明占用：{names}"
                      "——这些**不算**重叠，别当成冲突）")
     if posts:
         lines.append("最近动态：")
+        post_labels = citizen_labels(conn, [p[0] for p in posts])
         for cid, kind, txt, ts in posts[:limit]:
-            lines.append(f"  · {_hhmm(ts)} {cid} {kind}：{txt}")
+            lines.append(f"  · {_hhmm(ts)} {post_labels.get(cid) or cid} {kind}：{txt}")
     lines.append("（完整看板：`fish board show`）")
+    # 缺可读名：只对**当前会话**提示一次（不刷别人的屏）
+    who = _unnamed_hint(conn, citizen_id)
+    if who:
+        lines.append(who)
     # 跨午夜可见性（`EVAL-261025-11`）：注入包也带一句，否则后半夜开工的人
     # 会把"板上只有我一个人"当成事实。
     prev_note = board_prev_note(conn, board)
     if prev_note:
         lines.append(prev_note)
+    if stats is not None:
+        stats["lines"] = len(lines)
+        stats["truncated"] = 0
+        stats["tokens"] = count_tokens("\n".join(lines))
+    if max_tokens is not None:
+        dropped = 0
+        # 从末尾往回丢，**段头（lines[0]）永不动**：整段的意义都在那一行
+        # （几人、谁、有没有重叠）。丢掉它换回来的预算不抵损失。
+        while len(lines) > 1 and count_tokens("\n".join(lines)) > int(max_tokens):
+            lines.pop()
+            dropped += 1
+        if dropped:
+            lines[0] = lines[0] + "（已按预算截断）"
+            if stats is not None:
+                stats["truncated"] = dropped
+                stats["tokens"] = count_tokens("\n".join(lines))
     return "\n".join(lines)
 
 
+def _project_namespace(conn, project):
+    """项目 → `code_registry.namespace`（只用于展示；查不到返回 None）。"""
+    if not project:
+        return None
+    try:
+        row = conn.execute("SELECT namespace FROM code_registry WHERE prefix=?",
+                           (project,)).fetchone()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
+
+def _surfaces_touch(declared, actual, *, base=None, min_segments=2) -> bool:
+    """声明面与实际**目录**有没有交集（任一命中即算"一致"）。
+
+    ## 判定列纪律（2026-10-26 评审 F2）
+
+    两侧比的都是**路径**，不是展示串：
+
+      · `actual` 必须是 `dir_abs`（判定列），不是 `dir`（展示列）。展示列是相对
+        **写入者基准**算出来的——同名的 `p0` 在不同项目里长得一模一样，拿它比
+        会把"根本没有交集"判成"一致"（跨项目同名目录的假阴性/假阳性都从这里来）；
+      · `declared` 先按 `base`（看板所属项目根）解析成**绝对**，与 `dir_abs` 同基准，
+        再走 `path_hit`（分量边界 + `min_segments` 门槛），绝不退化成字符串前缀；
+      · **基准不可证**（根板/未映射项目：相对面 + 没有 base）时**当"一致"**：
+        宁可少提一句，也不许因为"证明不了"就给一句「声明≠实际」的假话
+        ——假提示一旦出现，这条提示就会被学会忽略。
+
+    其余语义同 `path_hit`（见 `fish_surface.path_hit` 的四步）。
+    """
+    decl = []
+    for item in declared or ():
+        norm = fish_surface.normalize_path(item)
+        if not norm:
+            continue
+        if fish_surface.is_absolute(norm):
+            decl.append(norm)
+            continue
+        resolved = fish_surface.make_abs(norm, base)
+        if resolved and fish_surface.is_absolute(resolved):
+            decl.append(resolved)
+        else:
+            return True          # 有声明面判不了 → 不下结论（宁可不说）
+    acts = [fish_surface.normalize_path(a) for a in (actual or ())]
+    acts = [a for a in acts if a and fish_surface.is_absolute(a)]
+    if not decl or not acts:
+        return True              # 有一侧没有可判定路径 → 不下结论
+    for a in decl:
+        for b in acts:
+            if fish_surface.path_hit(a, b, min_segments=min_segments):
+                return True
+    return False
+
+
+def _surface_overlap_hit(a, b):
+    """「观察到的重叠」的一对是否命中（同基准 → `surface_hit`；跨基准 → `path_hit`）。
+
+    2026-10-26 评审 F2：实际面改用 `dir_abs` 之后，声明面（相对）与它**不同基准**，
+    继续用 `surface_hit` 会让 mixed 组合永远不命中（看着有判定、其实哑掉）；
+    而把相对面当绝对比又会误报。`path_hit` 正是为跨基准保守判定存在的
+    （分量边界 + `min_segments`：1 段面到处同名，不判）。
+    """
+    hit = surface_hit(a, b)
+    if hit:
+        return hit
+    if fish_surface.is_absolute(a) != fish_surface.is_absolute(b):
+        return fish_surface.path_hit(a, b, min_segments=2)
+    return None
+
+
+def _unnamed_hint(conn, citizen_id):
+    """当前会话缺可读名时给一行**可执行**提示（人话 + 具体调用）。
+
+    为什么只对本会话：看板上 44 个历史公民大多没名字，逐行提示等于刷屏；
+    而"我"这一行是唯一现在就能改的（`rename_citizen`）。
+    """
+    if not citizen_id:
+        return ""
+    row = conn.execute("SELECT display_name, host FROM citizens WHERE citizen_id=?",
+                       (citizen_id,)).fetchone()
+    if not row:
+        return ""
+    name, host = (row[0] or "").strip(), (row[1] or "").strip()
+    if name and not fish_naming.is_auto_name(name):
+        return ""
+    current = name or f"（未命名·{host or '未知宿主'}）"
+    return (f"你还没有可读名（当前 `{current}`）。起一次名，看板所有行都会用它："
+            "`rename_citizen(name=\"anyi-studio-主AI\")`。")
+
+
+# ---------------------------------------------- 注入包的"段选择"（FB-02 · 2026-10-26）
+#
+# 预算只回答"总共多少 token"，不回答"这一次要哪几段"。于是出现两类浪费：
+#   · 只想看"我现在在哪"时，候选/看板/L2 一起进来，用预算买噪音；
+#   · 想给某个场景做裁剪（如工具后推送只要态势），只能整包拿、自己再切。
+# 现在 `sections` 直说"我这次要哪几段"。**L0 身份段永远保留**（不可关闭）：
+# 身份不是"可选内容"，它是这个包的立身之本（设计如此，不是省事的默认）。
+INJECTION_SECTIONS = ("status", "board", "rules", "attention", "lessons",
+                      "push", "index", "recent")
+# 受控别名：调用方嘴上说的和内部键名不必一致，但**只认这张表**——
+# 静默接受任意字符串会让"拼错的段名"变成"少了一段且没人报错"。
+_SECTION_ALIASES = {"lesson": "lessons", "l2": "index", "rule": "rules",
+                    "attentions": "attention", "indexes": "index"}
+INJECTION_SECTIONS_NOTE = ("可取值：" + "/".join(INJECTION_SECTIONS)
+                           + "；L0 身份段永远保留（不可关闭）")
+
+# 包尾两行声明的最坏长度（用于预算预留）。**由 `injection_tail_worst()` 现算**，
+# 不再手写一份字符串——2026-10-26 评审 🟠2 的第二半就是"手写常量与实际渲染不同步"：
+# 尾句改成按段动态生成之后，手写常量必然落后（少了段名、少了 L2 那一档），
+# 于是"预留 40 token"变成"实体 90 token"，包静默超预算。
+#
+# 归一纪律：**所有段都在、四类计数都取 4 位数**，那是这两行的最长形态；
+# 真实包尾只会更短，所以"引用它来预留"永远是安全的方向。
+_INJECTION_TAIL_WORST_AS_OF = "2026-10-26T00:00:00Z"
+# 六类计数都必须非零：④该注意什么 / ⑤错题本 是"整段布尔"（它们没有条数可报），
+# 但**只要被裁就要占字**——旧常量漏了这两项，也漏了"段名组合"这一维（见
+# `injection_tail_worst`），于是"最坏 83 token"比真实最长 118 token 还短。
+_INJECTION_TAIL_WORST_COUNTS = {"rules": 9999, "push": 9999, "board": 9999,
+                                "l2": 1, "attention": 1, "lessons": 1}
+
+
+def announce_truncation(counts) -> str:
+    """包尾第一行：这次**砍了什么、砍了几条**（FB-02）。
+
+    为什么非要有这一行：被截断的包与内容本来就少的包**长得一样**。读者据此
+    以为"规矩就这 3 条"而不是"本来 7 条、省了 4 条"，于是漏掉的是他不知道自己
+    缺的那部分。全 0 时写「本次无截断」——**"没有发生"也要说**，否则读者无法
+    区分"没截断"和"没告诉我截没截断"。
+
+    **2026-10-26 修（评审 🟠2-①）**：旧实现只统计 rules / push / board 三类，
+    而 `meta["truncated"]` 里**有** `l2`。预算小到把 L2 整段裁掉时，包尾照样写
+    「本次无截断」——自解释的那一行在说假话，而这正是它存在的唯一理由。
+    两处必须同源（`truncation_counts` 一份计算），所以这里认 `l2` 且**只印非零项**：
+    L2 是"整段有无"、没有条数，印成「L2 索引整段」比编一个数字诚实。
+
+    **2026-10-26 修（复审 🟠N1-①）**：③④⑤ 里只有 ③规矩 有条数，④该注意什么 /
+    ⑤错题本 也被预算整段裁过，却一个字都不报——实测 `sections=['attention','lessons']`
+    + 小预算，两段都被裁掉，尾行照样写「本次无截断」。这两段同样是"整段有无"，
+    所以与 L2 同一档处理：报「整段」，不编条数。
+    """
+    c = {k: int(counts.get(k) or 0)
+         for k in ("rules", "push", "board", "l2", "attention", "lessons")}
+    if not any(c.values()):
+        return "本次无截断"
+    parts = []
+    if c["rules"]:
+        parts.append(f"规矩 {c['rules']} 条")
+    if c["push"]:
+        parts.append(f"候选 {c['push']} 条")
+    if c["board"]:
+        parts.append(f"看板动态 {c['board']} 条")
+    if c["attention"]:
+        parts.append("该注意什么整段")
+    if c["lessons"]:
+        parts.append("错题本整段")
+    if c["l2"]:
+        parts.append("L2 索引整段")
+    return "本次截断：" + " / ".join(parts)
+
+
+# 段名 → 包尾"本包含 …"里给读者看的名字（顺序取 `INJECTION_SECTIONS` 的声明顺序）。
+# L0 不在表里：它**永远在**（不可关闭），所以单独写、不参与拼接。
+_TAIL_SECTION_LABELS = {
+    "status": "L1 状态坐标",
+    "board": "看板",
+    "rules": "规矩",
+    "attention": "该注意什么",
+    "lessons": "错题本",
+    "push": "候选",
+    "index": "L2 索引",
+    "recent": "最近三件事",
+}
+# 全段选择时的**旧措辞**：这句话自 2026-10-26 起被大量判据读过，且它描述的
+# 正是"全段、什么都没丢"的那一种包——改它就等于改一件没坏的东西。
+_TAIL_FULL_CONTAINS = "本包含 L0–L2 与候选"
+
+
+def injection_contains_phrase(sections) -> str:
+    """包尾第二行的「本包含 …」——**按这次真的要了哪几段**生成（评审 🟠2-②）。
+
+    为什么要动态：旧实现写死「本包含 L0–L2 与候选」，于是 `sections=["status"]`
+    的包里只有 L0+L1，尾行仍声称含 L2 与候选——读者据此以为"索引与候选都看过了、
+    只是没有内容"，而真相是**这次没要它们**。自解释行说假话，比不说更坏。
+
+    `sections=None` → 全段（旧行为，措辞也保持旧的那一句）。
+    传进来的集合**应当是本包里真的非空的那几段**：预算把某段整段裁掉之后，
+    "本包含某段"同样是假话（裁掉的段另有 `announce_truncation` 报出来，两行不冲突）。
+    """
+    if sections is None:
+        return _TAIL_FULL_CONTAINS
+    have = set(sections) & set(_TAIL_SECTION_LABELS)
+    if have == set(INJECTION_SECTIONS):
+        return _TAIL_FULL_CONTAINS
+    ordered = [s for s in INJECTION_SECTIONS if s in have]
+    if not ordered:
+        return "本包只含 L0 身份（其余段本次未选或已被预算裁掉）"
+    return "本包含 L0 身份 + " + "、".join(_TAIL_SECTION_LABELS[s] for s in ordered)
+
+
+def injection_tail_text(counts, as_of, sections=None) -> str:
+    """包尾两行：**这次砍了什么**（FB-02）+ **数据截至何时**（FB-16）。
+
+    为什么两行都要：截断声明回答"我看到的完整吗"，as-of 回答"这些是几点的事实"。
+    缺任一条，注入包都会退化成"一段看起来权威、但无法自证时效与完整性的文字"。
+
+    `sections` 传的是**本包实际含有的段**（见 `injection_contains_phrase`）；
+    `None` = 全段（保持旧措辞，既有判据不受影响）。
+    """
+    return (announce_truncation(counts) + "\n"
+            + f"as-of {as_of}（数据截至；{injection_contains_phrase(sections)}）")
+
+
+def injection_tail_worst(as_of=None) -> str:
+    """包尾两行在**最坏情况**下有多长（预算预留用）。
+
+    最坏 = 六类计数都非零（三类 4 位数 + 三段整段标记）× 段名组合里**最长的**
+    那一种。为什么要把 2^8 种组合都枚举一遍（2026-10-26 复审 🟡N3）：
+      · 旧实现只算"全段都在"那**一种**，而全段都在会走**旧措辞**
+        （`本包含 L0–L2 与候选`，恰好是最短的一句）；
+      · 于是"预留 83 token"而真实最长 118 token——裁到 N 之后静默超预算，
+        而"超预算"正是本函数所在的那段代码最该响亮报告的东西。
+    枚举不是抽样：`injection_contains_phrase` 的取值空间就是这 257 种
+    （256 个子集 + `sections=None` 的旧措辞），穷举才配叫"最坏"。
+
+    比较按 `(字符数, token 数)` 取大：判据会按字符断言，预算按 token 记账，
+    两个口径都要被同一份预留盖住（段名都是等长中文，两种口径的中位一致）。
+    """
+    moment = as_of or _INJECTION_TAIL_WORST_AS_OF
+    worst = injection_tail_text(_INJECTION_TAIL_WORST_COUNTS, moment, sections=None)
+    names = list(INJECTION_SECTIONS)
+    for mask in range(1 << len(names)):
+        subset = [n for i, n in enumerate(names) if (mask >> i) & 1]
+        cand = injection_tail_text(_INJECTION_TAIL_WORST_COUNTS, moment, sections=subset)
+        if (len(cand), count_tokens(cand)) > (len(worst), count_tokens(worst)):
+            worst = cand
+    return worst
+
+
+def normalize_injection_sections(sections) -> set:
+    """把 `sections` 入参归一成集合；`None` = 全段（也就是**旧行为**）。
+
+    校验放在这里而不是"用了再说"：拼错的段名必须是**响亮失败**。
+    静默忽略的表现是"包短了一截但没报错"——读者会以为那段本来就没内容。
+    """
+    if sections is None:
+        return set(INJECTION_SECTIONS)
+    if isinstance(sections, str):
+        sections = [sections]
+    out, unknown = set(), []
+    for raw in sections:
+        key = str(raw or "").strip().lower()
+        key = _SECTION_ALIASES.get(key, key)
+        if not key:
+            continue
+        if key in INJECTION_SECTIONS:
+            out.add(key)
+        else:
+            unknown.append(str(raw))
+    if unknown:
+        raise ValueError(f"未知段：{', '.join(unknown)}（{INJECTION_SECTIONS_NOTE}）")
+    return out
+
+
+def normalize_inject_sections_arg(raw, include_board=None):
+    """把 `sections` / `include_board` 归一成 `build_injection_pack` 的 `sections` 入参。
+
+    返回 `None` = 全段（不传就不改变既有行为）；返回列表 = 只要这些段。
+    **这是 MCP 与 CLI 的唯一实现**（2026-10-26 · 评审 🟠3）：MCP 的
+    `_inject_sections_arg` 只是把 dict 拆开喂进来，CLI 的 `inject --sections/--no-board`
+    喂同一条路。两个入口各写一份归一，必然出现"说不要看板、包里有看板"。
+
+    为什么要归一在一个函数里：`sections=["status","board"]` 与 `include_board=false`
+    可以同时出现，两处各自"再处理一下"必然出现自相矛盾的结果（比如包里还有看板）。
+    `include_board` 是 `sections` 的便捷写法（`false` = 去掉 board），
+    保留它是因为不少调用方只想"别看板"，不该被迫写 8 个段名。
+    `include_board=true` 不往 `sections` 里加 board：它只是"没在排除"，
+    与"显式要 board"不是同一句话。
+    """
+    if raw is None:
+        if include_board is False:
+            return [s for s in INJECTION_SECTIONS if s != "board"]
+        return None
+    if isinstance(raw, str):
+        # CLI 形态：`--sections status,board` / `--sections "status board"`。
+        # 逗号与空白都当分隔符（命令行里两种写法都自然），空片段丢掉。
+        raw = [piece for piece in re.split(r"[,\s]+", raw) if piece]
+    if not isinstance(raw, (list, tuple)):
+        raise ValueError(f"sections 必须是数组（{INJECTION_SECTIONS_NOTE}）")
+    # 归一化放在**边界**（这里）：拼错的段名要在调用时就响亮失败，
+    # 而不是静默少一段——"包里短了一截但没报错"是最难查的那种坏。
+    want = normalize_injection_sections(
+        [str(s).strip() for s in raw if str(s or "").strip()])
+    if include_board is False:
+        want.discard("board")
+    return sorted(want)
+
+
 def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=None,
-                         session_actor=None):
+                         session_actor=None, sections=None, session_key=None):
     """生成「权威当下」：L0 身份 + L1 状态 + ③规矩 + ④该注意什么 + L2 索引，硬预算裁剪。
 
     返回 (pack_text, meta)。
-    裁剪顺序（2026-10-24 起）：L2 → ④该注意什么 → ③规矩 → L1 条目 → L0 铁律 → L1。
-    为什么这个顺序：索引（L2）最可弃（recall/索引命令随时补回）；注意事项是**临时的**，
+    裁剪顺序（2026-10-24 起）：候选 → L2 → ④该注意什么 → ⑤错题本 → ③规矩
+    → 看板 → L1 条目 → L0 铁律 → L1。
+    为什么这个顺序：候选/索引最可弃（recall/索引命令随时补回）；注意事项是**临时的**，
     规矩是**长期的**——临时的比长期的更该让位；身份铁律与身份行最后才动（身份永不舍弃）。
+
+    2026-10-26（FB-02 / FB-16）四处补充：
+      · `sections`：只构建列出的段（`None` = 全段 = 旧行为），**L0 永不可关**；
+      · 规矩段与看板段各自有上限（配置 `inject.rules_per_source` /
+        `inject.board_max_ratio`），且**超了就声明**（段头 / 包尾两处都能看见）；
+      · 包尾两行交代"这次砍了什么"与"数据截至什么时候"（`as_of`）；
+      · `meta["truncated"]` 与那两行用**同一份计算**——声明与 meta 不一致比不声明更坏。
 
     `session_actor` 只影响 ④ 段的 C 类（"别处读过但你没看"要拿**本会话**去比）。
     缺省时按自报名环境变量（`FISH_SESSION_ACTOR`，其次 `FISH_ACTOR`）兜底，再不行
@@ -6053,6 +9367,7 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
     """
     budget = int(budget or get_config(conn, "inject.budget_tokens"))
     root_s = str(root)
+    want = normalize_injection_sections(sections)
 
     # ---- L0 身份（主人 / 行动者 必须分开）----
     owner_id = resolve_owner(conn)
@@ -6139,13 +9454,19 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
         "SELECT COUNT(*) FROM code_index WHERE dormant=1 AND status='active'").fetchone()[0]
 
     def render_l1():
-        lines = [l1_head] if l1_head else []
-        if other_projects:
-            lines.append("同时在其他项目：" + " / ".join(other_projects))
-        if recent:
+        # `status` = 坐标（当前项目 / 同时在其他项目 / 休眠计数）；
+        # `recent` = L1 的"最近三件事"条目。两段分开选的理由：坐标是"我在哪"，
+        # 条目是"这里有什么"——后者才是可省的那一半（要内容可以 recall）。
+        lines = []
+        if "status" in want:
+            if l1_head:
+                lines.append(l1_head)
+            if other_projects:
+                lines.append("同时在其他项目：" + " / ".join(other_projects))
+        if "recent" in want and recent:
             lines.append("最近三件事：")
             lines += [f"- {c} {t}" for c, t in recent]
-        if dormant_n:
+        if "status" in want and dormant_n:
             lines.append(f"另有 {dormant_n} 条已休眠（可 recall 唤醒）")
         return ("\n".join(lines) + "\n") if lines else ""
 
@@ -6176,6 +9497,10 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
     l2_lines.append("【操作指引】记→remember ｜ 查→recall/resolve_code ｜ "
                     "上下文→neighbors ｜ 状态→inject（勿直接读写 data/ 或 sqlite）")
     l2 = ("\n".join(l2_lines) + "\n") if l2_lines else ""
+    l2_built = bool(l2)         # 供"L2 是被裁掉还是本来就没有"的声明区分（见 truncation_counts）
+    if "index" not in want:
+        # L2 是**整段**可弃（没有"条目"可部分保留）：预算裁剪链里它也是第一个被丢的。
+        l2 = ""
 
     # ---- ③ 规矩 / ④ 该注意什么 / ⑤ 错题本 ----
     # 三段都可能为空——**空就不出现**，不写"暂无规矩"这种噪音（噪音会训练 AI 跳过这一段）。
@@ -6204,10 +9529,21 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
     push = build_push_block(
         conn, root, project=proj_name, citizen_id=citizen_id,
         session_actor=(session_actor or "").strip() or env_session_alias(),
-        exclude=set(rules["codes"]) | set(attention["codes"]) | set(lesson["codes"]))
-    rules_text, attention_text, lesson_text = (
-        rules["text"], attention["text"], lesson["text"])
-    push_text = push["text"]
+        # 只排除**这次真的会展示**的段：`sections` 只要了 push 时，③④⑤ 不进包，
+        # 若仍按它们排除，等于把"没展示的记忆"当成"已展示"——那些条目就此消失，
+        # 且没有任何一处会说出来。排除的语义是"别重复展示"，不是"别看"。
+        exclude=((set(rules["codes"]) if "rules" in want else set())
+                 | (set(attention["codes"]) if "attention" in want else set())
+                 | (set(lesson["codes"]) if "lessons" in want else set())))
+    # ---- 段选择（FB-02）----
+    # 只在这**一处**生效：前面各段照常构建，装配点按 `want` 统一置空。
+    # 为什么不提前短路：段与段之间有依赖（候选的 `exclude` 要拿 ③④⑤ 已印的编码），
+    # 提前 return 会让"排除了谁"取决于本次选了哪些段——同一份数据在不同 `sections`
+    # 下推出不同候选，那是比"多算几毫秒"贵得多的错误。
+    rules_text = rules["text"] if "rules" in want else ""
+    attention_text = attention["text"] if "attention" in want else ""
+    lesson_text = lesson["text"] if "lessons" in want else ""
+    push_text = push["text"] if "push" in want else ""
 
     # ---- 组装 + 裁剪 ----
     # 裁剪顺序（2026-10-25 起）：**候选** → L2 → ④该注意什么 → ⑤错题本 → ③规矩
@@ -6221,12 +9557,67 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
     # ---- 看板段（2026-10-25 · P1-b D 批）----
     # 位置纪律：紧跟 L1（坐标）之后、③规矩之前——**它是"当前态势"，与坐标同属"此刻"**。
     # 只给最近一级看板（项目级优先）：三级全推会重复（`09` R5-6）。
-    board_text = board_block(conn, proj_name, citizen_id=citizen_id) or ""
+    #
+    # 2026-10-26（FB-02）：本段现在有自己的上限 = 整包预算 × `inject.board_max_ratio`
+    # （默认 0.25）。旧实现无上限，看板一长就只能整段丢，而整段丢的代价是
+    # "时效性最强的那块直接消失"——比"少几行动态"贵得多。
+    board_ratio = get_config(conn, "inject.board_max_ratio")
+    try:
+        board_ratio = min(max(float(board_ratio), 0.0), 1.0)
+    except (TypeError, ValueError):
+        board_ratio = BOARD_MAX_RATIO
+    board_stats = {}
+    board_text = board_block(conn, proj_name, citizen_id=citizen_id,
+                             session_key=session_key,
+                             max_tokens=int(budget * board_ratio),
+                             stats=board_stats) or ""
+    if "board" not in want:
+        board_text = ""
+    # 包尾两行声明的预算预留（FB-02 / FB-16）：包尾是**新增内容**，必须算进预算，
+    # 否则"裁到 900"之后再追加 40 token，包就悄悄超了——而"超了"正是本函数最该
+    # 响亮报告的东西。按**最坏情况**估（四类计数都写成 4 位数、全段都列进来），
+    # 比实际长几 token 是安全的方向：宁可少留一点内容，不许超预算。
+    # 2026-10-26（评审 🟠2-③）：最坏长度改为**现算** `injection_tail_worst()`——
+    # 尾句改成按段动态生成后，手写常量与实体渲染必然不同步，预留会失效且无人报错。
+    budget_orig, budget = budget, max(1, budget - count_tokens(injection_tail_worst()))
 
     def total():
         return (count_tokens(l0) + count_tokens(l1) + count_tokens(rules_text)
                 + count_tokens(attention_text) + count_tokens(lesson_text)
                 + count_tokens(push_text) + count_tokens(l2) + count_tokens(board_text))
+
+    def truncation_counts():
+        """各段"被省略多少条"——包尾声明与 `meta["truncated"]` **共用这一份**计算。
+
+        为什么不各算一份：声明说"候选 3 条"而 meta 说 2 条，比不声明更坏
+        （读者不知道该信哪个，于是两个都不信）。
+        段被整段裁掉时算"它本来有多少"：那才是"你没看到的部分"的诚实大小。
+        """
+        rules_x = 0
+        if "rules" in want:
+            rules_printed = len(rules["codes"]) if rules_text else 0
+            rules_x = max(0, int(rules.get("total") or 0) - rules_printed)
+        push_y = 0
+        if "push" in want:
+            push_total = len(push["candidates"]) + int(push.get("omitted") or 0)
+            push_y = max(0, push_total - (len(push["candidates"]) if push_text else 0))
+        board_z = 0
+        if "board" in want:
+            board_z = int(board_stats.get("truncated") or 0)
+            if not board_text:
+                board_z = max(board_z, int(board_stats.get("lines") or 0))
+        # L2 没有"条目"（2026-10-25 起它只给计数与入口），所以只能按整段记 0/1。
+        # 只有"本来有、被裁掉了"才算 1——本来就没有（`l2_built` 为假）不是裁剪。
+        l2_w = 1 if (l2_built and not l2 and "index" in want) else 0
+        # ④⑤ 与 L2 同一档（2026-10-26 复审 🟠N1-①）：这两段没有"条数"可报，
+        # 但"本来有、被预算整段裁掉"必须算截断——否则尾行会在包里明明缺两段时
+        # 说「本次无截断」，而这一行存在的唯一理由就是回答"我看到的完整吗"。
+        attention_w = 1 if ("attention" in want and attention["text"]
+                            and not attention_text) else 0
+        lesson_w = 1 if ("lessons" in want and lesson["text"]
+                         and not lesson_text) else 0
+        return {"rules": rules_x, "push": push_y, "board": board_z, "l2": l2_w,
+                "attention": attention_w, "lessons": lesson_w}
 
     # 注入风格决定开头（可配置：gentle / strong）
     style = get_config(conn, "inject.style")
@@ -6284,22 +9675,62 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
     if total() > budget and l1:
         l1 = ""
         trimmed.append("L1")
-    final = total()
-    over_budget = final > budget
-    if over_budget:
-        # 响亮失败：最小注入包仍超预算时，不假装成功
-        trimmed.append(f"仍超预算({final}>{budget})")
 
-    pack = (l0 + ("\n" + l1 if l1 else "")
+    # ---- 包尾声明（FB-02 截断 / FB-16 as-of）----
+    # 放在 `strip()` 之后的**最后两行**：MCP 会在它之后追加 `<!-- tokens/budget -->`，
+    # 所以这两行天然是"包正文的结尾"——读者读到最后一句话就能知道
+    # "这份包完不完整、截至什么时候"。
+    as_of = now_utc()
+    truncation = truncation_counts()
+    # 2026-10-26（复审 🟠N1-②）：尾句「本包含 …」必须按**这个包里真的有什么**生成，
+    # 不能按"本次要了哪几段"（旧实现传的是 `sorted(want)`）。实测反例：
+    # `sections=['attention','lessons']` + 小预算 → 两段都被裁掉（`trimmed` 里明明
+    # 写着），尾句仍声称含「该注意什么、错题本」——读者据此以为那两段是空的，
+    # 而真相是它们被预算拿走了。自解释行说假话，比不说更坏。
+    #
+    # 判"在不在"用**渲染结果**（空串 = 不在），不用"有没有被裁"：
+    #   · 被预算裁掉的 → 渲染结果为空 → 不在，尾句不提（另有 `announce_truncation` 报）；
+    #   · 本来就没有内容 → 同样不在，尾句也不提（它确实不在包里，这是事实不是缺陷）。
+    delivered = set()
+    if "status" in want and l1:
+        delivered.add("status")
+    if "recent" in want and recent and l1:
+        delivered.add("recent")
+    for _key, _text in (("board", board_text), ("rules", rules_text),
+                        ("attention", attention_text), ("lessons", lesson_text),
+                        ("push", push_text), ("index", l2)):
+        if _text:
+            delivered.add(_key)
+    # 全段请求 + 预算一个段都没裁 → 沿用旧措辞（`本包含 L0–L2 与候选`）。
+    # 为什么留这个例外：那句旧措辞说在**范围**上（要了全段、机器没拿走任何一段），
+    # 而且它是 2026-10-26 之前所有判据读的那一句——改它就等于改一件没坏的东西。
+    # 一旦有段被预算拿掉，范围就不再成立，尾句必须收紧到实际交付的段。
+    _budget_cut = any(t in trimmed for t in ("候选", "L2", "注意事项", "错题本",
+                                             "规矩", "看板", "L1条目", "L0铁律", "L1"))
+    if not _budget_cut and want == set(INJECTION_SECTIONS):
+        tail_sections = None
+    else:
+        tail_sections = sorted(delivered)
+    tail = injection_tail_text(truncation, as_of, sections=tail_sections)
+    body = (l0 + ("\n" + l1 if l1 else "")
             + ("\n" + board_text if board_text else "")
             + ("\n" + rules_text if rules_text else "")
             + ("\n" + attention_text if attention_text else "")
             + ("\n" + lesson_text if lesson_text else "")
             + ("\n" + push_text if push_text else "")
-            + ("\n" + l2 if l2 else "")).strip() + "\n"
+            + ("\n" + l2 if l2 else "")).strip()
+    pack = (body + "\n" + tail).strip() + "\n"
+    # 超预算的判据用**调用方给的**预算（`budget_orig`）：包尾预留只是内部记账，
+    # 不该让"900 的预算"在外面看起来像"870"。
+    final = count_tokens(pack)
+    over_budget = final > budget_orig
+    if over_budget:
+        # 响亮失败：最小注入包仍超预算时，不假装成功
+        trimmed.append(f"仍超预算({final}>{budget_orig})")
+
     meta = {
-        "tokens": count_tokens(pack),
-        "budget": budget,
+        "tokens": final,
+        "budget": budget_orig,
         "over_budget": over_budget,
         "layers": {"L0": count_tokens(l0), "L1": count_tokens(l1),
                    "board": count_tokens(board_text),
@@ -6309,6 +9740,19 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
                    "push": count_tokens(push_text),
                    "L2": count_tokens(l2)},
         "trimmed": trimmed,
+        # 2026-10-26（FB-02）：各段**被省略的条数**，与包尾那行声明同源同值。
+        # `l2` 只可能是 0/1（整段有无），因为 L2 没有"条目"这个概念；
+        # `attention` / `lessons` 同样是 0/1（复审 🟠N1-①：这两段也没有"条数"
+        # 可报，只有"整段还在不在"）——把 0/1 当"条数"读会得出"裁掉了 1 条"，
+        # 所以键名与口径都写在这里，调用方不必猜。
+        "truncated": truncation,
+        # 2026-10-26（FB-16）：本包的数据截止时刻（= 构建时刻，`now_utc()`）。
+        # 注入包是"当下"的快照，没有时刻就无法判断它是不是过期了——
+        # 与包尾 `as-of` 行同值（同一变量，不做二次取值，避免跨秒漂移）。
+        "as_of": as_of,
+        # 本次要了哪几段（`sections=None` 时是全段）。调用方据此判断
+        # "某段为空"是"没有内容"还是"这次没要它"——两者在文本上长得一样。
+        "sections": sorted(want),
         # L1「当前项目」的判定事实（R1 根治）：名字 / 来源 / 同时服务的其他项目。
         # source='inferred' = 走了"最近更新"兜底（输出里已标注这是推断）；
         # source='undeclared' = 没有任何证据（输出里明说未声明）。调用方不得再"补成"
@@ -6316,8 +9760,9 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
         "project": proj_name,
         "project_source": proj_source,
         "other_projects": list(other_projects),
-        # 供调用方刷新衰减：注入包展示过的记忆 = 被看见
-        "recent_codes": [c for c, _ in recent],
+        # 供调用方刷新衰减：注入包展示过的记忆 = 被看见。
+        # 没要 `recent` 段时为空——"没展示"不该被记成"被看见"（那会让采纳率虚高）。
+        "recent_codes": [c for c, _ in recent] if "recent" in want else [],
         # L2 自 2026-10-25 起**不再展示具体编码**（研判见 `31` §2：编码是坐标不是信息），
         # 故这里恒为空。保留这个键是 meta 契约的一部分（调用方按固定形状读）。
         # 这不是"少记了一层"：原来 L2 印的只是编码、没印标题，AI 并未真看见内容；
@@ -6354,13 +9799,46 @@ def cmd_inject(args):
         # 把「没有行动者」说成了「没登记」——它是个可能错误的归因，
         # 而且指的修法（设 FISH_ACTOR）对 MCP 面根本无效（那是进程级变量）。
         # 改成中性描述 + **两条可执行路径**。
-        print("本次未确定行动者（未给 --citizen，且 FISH_ACTOR 与 config.actor_name 都没配）。\n"
+        # 2026-10-26（复审 ⚪N6）：解析链已含 `FISH_SESSION_TOKEN`（env 凭证），
+        # 所以这句话现在只在"名字、配置、凭证三样都没有"时出现——提示同步补上凭证那一路。
+        print("本次未确定行动者（未给 --citizen；FISH_ACTOR / config.actor_name / "
+              "FISH_SESSION_TOKEN 都没能给出一个公民）。\n"
               "　· 已登记过 → `fish inject --citizen <你的 citizen_id>`\n"
-              "　· 还没登记 → 先 `fish citizen-add <名字>` 或调 MCP 的 register")
+              "　· 还没有凭证 → `fish session start --project <项目>` 签发一条"
+              "（或 `fish citizen-add <名字>`）")
         conn.close()
         return
+    # 2026-10-26（评审 🟠3）：`--sections` / `--no-board` 与 MCP 的 `sections` /
+    # `include_board` 同口径（归一在同一函数里，见 `normalize_inject_sections_arg`）。
+    # 缺省（两个都不给）= 全段 = 旧行为，一个字节都不变。
+    try:
+        want = normalize_inject_sections_arg(getattr(args, "sections", None),
+                                             False if getattr(args, "no_board", False)
+                                             else None)
+    except ValueError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        conn.close()
+        sys.exit(2)
     pack, meta = build_injection_pack(conn, Path(args.root), cid, args.budget,
-                                      project=args.project, cwd=args.cwd)
+                                      project=args.project, cwd=args.cwd,
+                                      sections=want)
+    # 2026-10-26（T03）：`--auto-presence` 只在**显式传**时写（WorkBuddy 会话开场用）。
+    # MCP 的 `tool_inject` 刻意不写：每次 inject 都刷在场，等于"打开看板就算上班"。
+    # ⚠️ 自动签到绝不能往 stdout 打字：`inject --json` 的 stdout 是契约面，
+    #     WorkBuddy hook 直接 `json.loads` 它。
+    if getattr(args, "auto_presence", False):
+        try:
+            # 2026-10-26（撞车自撞修复 T02）：会话键优先取 `--session-key`，
+            # 其次取环境变量 `FISH_SESSION_KEY`（与 `board checkin` 同一条回落链）。
+            # WorkBuddy hook 会显式传 `codebuddy:<session_id>`。
+            _auto_checkin_after_start(
+                conn, {"citizen_id": cid,
+                       "projects": [meta.get("project")] if meta.get("project") else [],
+                       "session_key": (getattr(args, "session_key", None)
+                                       or os.environ.get("FISH_SESSION_KEY"))},
+                getattr(args, "cwd", None))
+        except (sqlite3.Error, ValueError):
+            pass
     if args.json:
         print(json.dumps({"pack": pack, **meta}, ensure_ascii=False, indent=1))
     else:
@@ -6678,6 +10156,11 @@ def _print_session_start(res):
     print(f"issued_at: {res['issued_at']}")
     print(f"expires_at: {res['expires_at'] or '永久'}")
     print(f"citizen: {'新建' if res['created'] else '复用'}")
+    # FB-08：同名在用公民 → 一行提示（不拦截、不合并，只让人看见）。
+    # 位置在 `citizen:` 之后、"档期"之前：读者刚看完"建的还是复用的"，紧接着就是
+    # "其实还有另一个同名的人"。
+    for it in res.get("name_conflicts") or []:
+        print(same_name_notice(it["citizen_id"], it["kind"]))
     if res["rotated"]:
         # 字段行保持"可直接解析"（只有数字），解释另起一行——输出是契约，别让 prose 混进字段。
         print(f"rotated: {res['rotated']}")
@@ -6810,7 +10293,89 @@ def cmd_session_start(args):
         pass          # 映射表还没建（极旧库）时不阻断签发
 
     _print_session_start(res)
+    # 2026-10-26（T03）：会话开场**自动签到**（用户拍板「自动行算登记」）。
+    # 三条纪律：① stdout 一个字节都不许动（hook 按 `key: value` 解析）；
+    # ② 失败静默（会话启动不能被看板拖垮）；③ 多个项目逐个签，最多 3 个；
+    # 一个项目都没有时签根板（"我今天有活动"这件事本身有价值）。
+    _auto_checkin_after_start(conn, res, getattr(args, "cwd", None))
     conn.close()
+
+
+def _auto_checkin_after_start(conn, res, cwd=None, *, session_key=None):
+    """`session start` 之后自动签到（失败静默，**不写 stdout**）。
+
+    ## 2026-10-26（QA Round 1 · E2）：签到之后顺手重渲染看板**文件**
+
+    签到只改 `presence` 表，而 `projects/<项目>/看板-*.md` 是**渲染产物**。不重渲染，
+    文件就永远停在「在场（0 人）」，而 `board show` / DB 已经是 1 人——同一份事实
+    两个读数，读文件的人（人、别的 AI、外部评审）会以为没人开工。QA 就是这么抓到的。
+
+    为什么在这里做（而不是采集快路径）：会话开始一次，代价可接受；而
+    `handle_post_tool_use` 是**每次工具调用**都跑，在那儿加文件写 + 根板聚合会明显加 IO。
+
+    为什么不在 `fish_session_hook.py` 再起一个进程：那要多付一次解释器启动，
+    而且拿不到"刚签到的是哪块板"；`board_render()` 是子板刷新的唯一出口，
+    根板由它内部处理（`scope != 'root'` 时刷一次），**这里不再重复调根板**。
+    """
+    if not get_config(conn, "board.auto_presence"):
+        return []
+    root = conn_data_dir(conn)
+    projects = [p for p in (res.get("projects") or []) if p][:3] or [None]
+    # 2026-10-26（撞车自撞修复 T02）：`session_key` 参数**优先**于 `res` 里的会话键
+    # ——`inject --auto-presence` 拿不到 `session start` 的返回值，只能从 CLI/env 传。
+    sk = (session_key or res.get("session_key") or "")
+    done = []
+    for project in projects:
+        try:
+            out = board_auto_checkin(
+                conn, res["citizen_id"], project=project,
+                session_key=(sk or None), source="session_start")
+            done.append((project, out.get("created"), out.get("skipped")))
+            _render_board_quietly(conn, root, out)
+        except (sqlite3.Error, ValueError, KeyError):
+            continue
+    # 顺手刷一次快照：让**声明面**在第一次写之前就进快照（否则第一小时的空窗期里
+    # PreToolUse 只能看到空的自己）。失败静默。
+    try:
+        fish_activity.build_snapshot(
+            conn, out_path=Path(root) / fish_activity.SNAPSHOT_RELPATH,
+            window_min=int(get_config(conn, "board.overlap_window_min")))
+    except (sqlite3.Error, ValueError, OSError):
+        pass
+    return done
+
+
+def _render_board_quietly(conn, root, checkin) -> bool:
+    """自动签到之后重渲染那块看板文件（**失败静默**），返回是否真的渲染了。
+
+    两条边界：
+      · 只在这回**真动了行**（`created` / `refreshed`）时渲染——没动就没变化，
+        多写一遍文件纯属浪费；
+      · 根板不在这里调：`board_render()` 末尾已经会刷一次根板（`scope != 'root'`），
+        再加一次就是"二次渲染"。
+    """
+    result = checkin if isinstance(checkin, dict) else {}
+    board = result.get("board")
+    if not isinstance(board, dict) or not board.get("path"):
+        return False
+    if not (result.get("created") or result.get("refreshed")):
+        return False
+    try:
+        board_render(conn, Path(root), board)
+        return True
+    except Exception:      # noqa: BLE001 —— 看板渲染是展示层，失败绝不能拖垮会话启动
+        return False
+
+
+def conn_data_dir(conn) -> str:
+    """连接指向的 data 目录（`fish_activity` 的审计/快照都挂在它下面）。"""
+    try:
+        for row in conn.execute("PRAGMA database_list").fetchall():
+            if row[1] == "main" and row[2]:
+                return str(Path(row[2]).parent)
+    except sqlite3.Error:
+        pass
+    return str(DEFAULT_ROOT)
 
 
 def cmd_session_status(args):
@@ -7187,12 +10752,166 @@ def cmd_push(args):
     try:
         if args.action == "stats":
             print(format_push_stats(push_stats(conn, days=args.days)))
+        elif args.action == "sweep":
+            n = close_stale_pushes(conn)
+            print(f"推送结果收口：{n} 条判为 ignored（窗口 "
+                  f"{push_outcome_window_hours(conn)} 小时；判定只写 reaction，不写 reacted_at）")
         else:                                   # status
             print("push.enabled = %s" % bool(get_config(conn, "push.enabled")))
             for k in ("push.serendipity_ratio", "push.open_budget_tokens",
                       "push.after_tool_budget_tokens", "push.situational_budget_tokens",
                       "push.after_tool_every_n_calls", "push.gap_window_days"):
                 print("  %-34s %s" % (k, get_config(conn, k)))
+    finally:
+        conn.close()
+
+
+def cmd_corpus(args):
+    """语料层的 CLI 薄壳（M8）：动作/渲染/报错全在 `fish_corpus.run_command`。
+
+    留在这里的只有"开主库连接 + 注入解析器"这件事：`resolve_project_by_cwd` /
+    `list_workspace_candidates` / `fish_activity.resolve_citizen` / `mark_push_accepted`
+    都要读**主库**，而语料模块按判据 J2 不许 import fish——注入之后，语料层只认
+    "回调给什么"，不认识主库（副作用是它也天然可测：测试给假解析器）。
+
+    ⚠️ 两个连接，别混：主库连接**只**用来喂解析器（projects/公民/候选/推送回填），
+    语料库连接由门面自己开（主库上没有 corpus_* 表，D01）。
+    """
+    root = Path(args.root)
+    conn = connect(root)
+    conn.executescript(SCHEMA)
+    migrate(conn)
+    try:
+        return fish_corpus.run_command(args, resolvers={
+            "project_of": lambda cwd: resolve_project_by_cwd(conn, cwd),
+            "candidates_of": lambda cwd: list_workspace_candidates(conn, cwd),
+            "citizen_of": lambda key: fish_activity.resolve_citizen(conn, key),
+            "mark_accepted": lambda codes, key: mark_push_accepted(
+                conn, codes, session_key=key),
+            # A①：帧上限的配置键读侧。语料层不许 import 主库（J2），只能注入。
+            "config_of": lambda key: get_config(conn, key),
+        })
+    finally:
+        conn.close()
+
+
+def cmd_activity(args):
+    """动作流的 CLI（`stats` 读数 / `prune` 清理）。**不占 MCP 工具位**（设计 §10.4）。
+
+    为什么给 CLI 而不是 MCP 工具：动作流是**审计数据**，看它的是人（跑日报、查误报），
+    不是模型每次对话都要调的东西；而 MCP 工具数已到用户设的上限。
+    """
+    conn = connect(Path(args.root))
+    conn.executescript(SCHEMA)
+    migrate(conn)
+    try:
+        if args.action == "prune":
+            days = args.days if args.days is not None else int(
+                get_config(conn, "activity.retention_days"))
+            removed = fish_activity.prune(conn, days=days)
+            print(f"动作流清理：删除 {removed} 行（保留 {days} 天）"
+                  + ("（0 = 不清理）" if int(days) <= 0 else ""))
+            return
+        days = args.days if args.days is not None else 1
+        data_dir = Path(args.root)
+        st = fish_activity.stats(conn, days=days,
+                                 asks_path=data_dir / fish_activity.ASKS_RELPATH)
+        print(f"动作流（近 {st['days']} 天）")
+        print(f"  总行数   {st['rows']}（写 {st['write_rows']} / 执行 {st['exec_rows']}）")
+        print(f"  会话数   {st['sessions']}    宿主：{', '.join(st['hosts']) or '—'}")
+        print(f"  撞车询问 {st['asked']} 条（误报审计看 {fish_activity.ASKS_RELPATH}）")
+        if st["top_dirs"]:
+            print("  高频目录（写）：")
+            for name, count in st["top_dirs"][:8]:
+                print(f"    {count:>4}  {name}")
+        if st["by_hour"]:
+            busiest = sorted(st["by_hour"], key=lambda kv: -kv[1])[:3]
+            print("  写动作最多的小时（本地）："
+                  + "、".join(f"{hour:02d}点 {count}" for hour, count in busiest))
+    finally:
+        conn.close()
+
+
+def cmd_prompt_push(args):
+    """**提示词时机**的递送（UserPromptSubmit hook 的子进程入口）。
+
+    输入：stdin 上的 hook payload（`{"session_id","cwd","prompt",...}`）。
+    输出：**要递给模型的纯文本**（可以是空串——那就什么都不输出）。
+
+    六条否定条件（任一即不推，设计 §6.4）：
+      `push.enabled`/`push.prompt_enabled` 关；无身份；prompt 洗成空；
+      同一 prompt（hook 侧已挡，这里再算一次作为双保险）；
+      候选为空；候选全是 24h 内推过的。
+
+    只递**标题 + 编码 + 一句理由**，不递正文：模型要正文自己 `read_body`
+    （那一步同时回填 accepted，采纳率才算得出来）。
+    """
+    host = getattr(args, "host", "dsh") or "dsh"
+    raw = ""
+    try:
+        raw = sys.stdin.read()
+    except Exception:      # noqa: BLE001 —— 读不到 stdin 就当没发生
+        return
+    try:
+        payload = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        return
+    if not isinstance(payload, dict):
+        return
+    conn = connect(Path(args.root))
+    conn.executescript(SCHEMA)
+    migrate(conn)
+    try:
+        if not get_config(conn, "push.enabled") or not get_config(conn, "push.prompt_enabled"):
+            return
+        session_key = fish_activity.make_session_key(host, payload.get("session_id"))
+        if not session_key:
+            return
+        citizen_id = fish_activity.resolve_citizen(conn, session_key)
+        project = None
+        cwd = payload.get("cwd") or ""
+        if cwd:
+            try:
+                project = resolve_project_by_cwd(conn, cwd)
+            except sqlite3.Error:
+                project = None
+        prompt = clean_prompt(payload.get("prompt") or "")
+        if len(prompt) < 4:
+            return
+        now_dt = datetime.datetime.now(datetime.timezone.utc)
+        cands = build_prompt_candidates(
+            conn, Path(args.root), prompt=prompt, citizen_id=citizen_id,
+            session_key=session_key, project=project, now=now_dt,
+            limit=int(get_config(conn, "push.prompt_max_items")) or 2)
+        picked = select_push_candidates(
+            conn, cands, limit=int(get_config(conn, "push.prompt_max_items")) or 2,
+            prefer_kind="prompt_related")
+        if not picked:
+            return
+        budget = int(get_config(conn, "push.prompt_budget_tokens")) or 120
+        lines = []
+        for c in picked:
+            line = (f"- {c['code']} {_clip_chars(c['title'], ATTENTION_TITLE_MAX_CHARS)}"
+                    f"（{c['reason']}）")
+            if count_tokens("\n".join(lines + [line])) > budget:
+                break
+            lines.append(line)
+        if not lines:
+            return
+        text = ("（fish 记忆：你这句话问到的东西已存过，直接看不要重新问）\n"
+                + "\n".join(lines) + "\n")
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        codes = [ln[2:].split(" ", 1)[0] for ln in lines]
+        try:
+            append_push_log(conn, codes, channel="prompt", citizen_id=citizen_id,
+                            session_key=session_key, project=project,
+                            candidate_id=codes[0] if codes else None,
+                            budget_tokens=budget)
+        except (sqlite3.Error, ValueError):
+            pass                     # 记账失败不影响这次递送
+    except (sqlite3.Error, ValueError):
+        return
     finally:
         conn.close()
 
@@ -7234,6 +10953,13 @@ def cmd_healthcheck(args):
     if bad_owner:
         print(f"  ⚠ owner 不是有效公民 {len(bad_owner)} 条：{', '.join(bad_owner[:5])}"
               f"（跑 fish rebuild 可归一到系统主人）")
+    try:                            # 语料层（T03）：库不存在 → 空读数（"没采过"不是"坏了"）
+        cst = fish_corpus.stats(root=root)
+        print(f"  语料 {cst['segments']} 段 / 会话 {cst['sessions']} / 降级 {len(cst['degraded'])}"
+              + (f"  ⚠ 停滞 {cst['alarm']}（连续 {cst['stall']['zero_streak']} 轮 0 新增）"
+                 if cst.get("alarm") else ""))
+    except Exception:               # noqa: BLE001 —— 语料体检失败不该拖垮主库体检
+        pass
     conn.close()
 
 
@@ -7723,15 +11449,44 @@ def board_period(period_key=None) -> str:
 
 
 def board_relpath(scope, scope_key, period_key) -> str:
-    """渲染文件的相对路径。**唯一入口**（同 body_relpath 的纪律：两处各拼一次必然漂移）。"""
+    """看板渲染文件的相对路径。**唯一入口**（同 body_relpath 的纪律：两处各拼一次必然漂移）。
+
+    ## 2026-10-26 口径变更（裁决 C3）：`boards.path` 从"相对 data_root"改为"相对 fish-home"
+
+    | scope   | 旧 path                            | 新 path                                  | 深度 |
+    |---------|------------------------------------|------------------------------------------|------|
+    | root    | `看板-261026.md`                    | `00-首页/看板-261026.md`                  | 2    |
+    | project | `projects/<项目>/看板-261025.md`     | `10-项目库/<项目>/看板-261025.md`          | 3    |
+    | branch  | `boards/branch/<k>/看板-261025.md`   | `10-项目库/_分支-<k>/看板-261025.md`       | 3    |
+
+    ## 为什么分支是 `_分支-<k>` 一级而不是 `_分支/<k>` 两级
+
+    PRD §5.4 写的是 `10-项目库/_分支/<k>/看板-….md`，相对 `home_root` 是 **4 层**——
+    直接撞 HOME-1 的"任何文件深度 ≤3"，于是 `layout verify` 会把自己刚渲染出来的
+    分支看板判成 `depth_exceeded`。两条信息量相同（`<k>` 就是分支名），
+    但深度是**机器可判**的，命名只是可读性偏好 → 判据优先。
+    实测生产库 `scope='branch'` 是 0 行，这个修改不迁移任何既有数据。
+    """
     name = f"看板-{period_key}.md"
     if scope == "root":
-        return name
+        return f"00-首页/{name}"
     if scope == "project":
-        return f"projects/{scope_key}/{name}"
+        return f"10-项目库/{scope_key}/{name}"
     if scope == "branch":
-        return f"boards/branch/{scope_key}/{name}"
+        return f"10-项目库/_分支-{scope_key}/{name}"
     raise ValueError(f"未知 scope：{scope!r}（可用：{', '.join(BOARD_SCOPES)}）")
+
+
+def board_out_path(data_root, board, *, home_root=None) -> Path:
+    """看板渲染的**唯一落点入口**（§6.2）：`<home_root>/<board['path']>`。
+
+    为什么要有这个函数而不让调用方自己拼：`boards.path` 的语义是"相对 fish-home"，
+    任何一处自己写 `root / path` 都会把旧的"相对 data_root"语义偷偷带回来
+    （`test_board*` 的三处断言就是这么红的）。测试也用它定位产物——
+    "钉落点"和"读产物"用同一个入口，才不会各钉各的。
+    """
+    home = Path(home_root) if home_root else resolve_home_root(Path(data_root))
+    return home / board["path"]
 
 
 def board_ensure(conn, scope, scope_key="", period_key=None):
@@ -7763,15 +11518,65 @@ def board_ensure(conn, scope, scope_key="", period_key=None):
             "created_at": now, "closed_at": None}
 
 
+def _ensure_boards_home_paths(conn, *, degraded=None):
+    """幂等：把 `boards.path` 归一到"相对 fish-home"的口径（裁决 C3 / §2.4）。
+
+    判据式实现（不扒 `sqlite_master.sql`、不做字符串手术）：**用 `board_relpath` 重算，
+    对比才改**。两条理由：
+      ① `board_relpath` 是唯一入口，与 `board_ensure` 同源——迁移和写入不可能漂开；
+      ② 重复执行零写入（第二次 SELECT 出来全部 already_ok），
+         所以挂在 `migrate()` 链尾不会每次都制造 WAL 变更。
+
+    为什么不用 `REPLACE(path,'projects/','10-项目库/')`：字符串手术对 `scope_key` 里
+    含 `projects/` 的数据会改错；PRD 的 branch 分支表达式里出现两次 `scope_key`，
+    `scope_key` 一变就错位。而 `scope='branch'` 在生产库是 0 行——**从未被执行过的
+    分支里的 bug 会一直潜伏到第一次有人开分支看板**（架构设计 A21/A29）。
+
+    ## 未知 scope（2026-10-26 第二轮 R17 · 评审 🟡-2）
+
+    原 docstring 自相矛盾（"一行不碰" vs "抛 ValueError 让人看见"），实际是后者：
+    而本函数挂在 `migrate()` 链尾、`migrate()` 被**每条命令**（含 hook）调用 →
+    **一行脏数据就能让全系统起不来**。
+    现在的口径：**跳过该行**，把原因写进调用方传入的 `degraded` 列表（渲染时可见），
+    绝不静默——"看得见"由 degraded 段承担，不由"炸掉整条链"承担。
+    返回本次改了几行——供 `layout render` / 交付报告引用，不写库。
+    """
+    changed = []
+    rows = conn.execute(
+        "SELECT id, scope, scope_key, period_key, path FROM boards").fetchall()
+    for row in rows:
+        try:
+            want = board_relpath(row[1], row[2], row[3])
+        except ValueError as exc:
+            if degraded is not None:
+                degraded.append({"source": f"boards#{row[0]}",
+                                 "reason": f"未知 scope（跳过该行）：{exc}"})
+            continue
+        if row[4] != want:
+            conn.execute("UPDATE boards SET path=? WHERE id=?", (want, row[0]))
+            changed.append({"id": row[0], "from": row[4], "to": want})
+    conn.commit()
+    return changed
+
+
 def board_checkin(conn, citizen_id, doing="", surface="", scope="project",
-                  scope_key="", period_key=None, agent_id=None, status="active"):
+                  scope_key="", period_key=None, agent_id=None, status="active",
+                  *, session_key=""):
     """签到：登记"我来了、我在做什么、我占了什么面"，返回看板行。
 
-    **只写自己行**（`(board_id, citizen_id)` 主键 upsert）——这是并发协议，不是礼貌。
-    写前不需要读整块板：upsert 本身是原子的，`first_seen_at` 用 COALESCE 保住首签时间。
+    **只写自己行**——2026-10-26 起"自己"的精度是 `(board_id, citizen_id, session_key)`
+    （撞车自撞修复 T01 · 设计 45 §2.1）：同一公民的两个会话各占一行，`doing` 不再互相
+    覆盖。upsert 本身是原子的，`first_seen_at` 由 INSERT 一次定死、DO UPDATE 不碰它，
+    所以重复签到保住首签时间。
 
     为什么 `doing` 必填（哪怕只给空字符串也记一行）：看板的核心价值就是
     **别人靠这一句判断"我会不会跟它撞车"**。没有 doing 的在场行等于没签到。
+
+    ## `session_key`（仅关键字、默认 `''`）
+
+    `''` = 无会话归属（CLI 手工签到 / 无凭证路径）。此时行为与今天**逐字节相同**：
+    同一 `(board, citizen)` 反复签到仍只有一行——既有 70 处调用点一个都不用改。
+    写侧形态由 `_presence_write_shape` 单点决定（三列主键 / 两列降级），本函数不猜。
     """
     board = board_ensure(conn, scope, scope_key, period_key)
     if board["status"] == "closed":
@@ -7779,15 +11584,143 @@ def board_checkin(conn, citizen_id, doing="", surface="", scope="project",
     now = now_utc()
     doing = (doing or "").strip()[:BOARD_DOING_MAX]
     surface = (surface or "").strip()
-    conn.execute(
-        "INSERT INTO presence (board_id, citizen_id, agent_id, status, doing, surface, "
-        "first_seen_at, last_seen_at) VALUES (?,?,?,?,?,?,?,?) "
-        "ON CONFLICT(board_id, citizen_id) DO UPDATE SET "
-        "  agent_id=excluded.agent_id, status=excluded.status, doing=excluded.doing, "
-        "  surface=excluded.surface, last_seen_at=excluded.last_seen_at",
-        (board["id"], citizen_id, agent_id, status, doing, surface, now, now))
+    sk = (session_key or "").strip()
+    with_session, conflict = _presence_write_shape(conn)
+    if with_session:
+        conn.execute(
+            "INSERT INTO presence (board_id, citizen_id, session_key, agent_id, status, "
+            "doing, surface, first_seen_at, last_seen_at) VALUES (?,?,?,?,?,?,?,?,?) "
+            f"ON CONFLICT({conflict}) DO UPDATE SET "
+            "  agent_id=excluded.agent_id, status=excluded.status, doing=excluded.doing, "
+            "  surface=excluded.surface, last_seen_at=excluded.last_seen_at, "
+            # 2026-10-26（T03）：**手工 checkin = 意图行**，所以清掉 `auto_source`。
+            # 自动刷新只写 auto_* 三列、绝不碰 doing——「手工行不被自动刷新覆盖」
+            # 这条红线靠"doing 是否是自动占位"再兜一层（见 `_is_auto_doing`）。
+            "  auto_source=NULL",
+            (board["id"], citizen_id, sk, agent_id or sk or None, status, doing, surface,
+             now, now))
+    else:
+        # 两列主键（迁移未跑 / 故障降级）：**与今天逐字节相同**，且不写 session_key 列
+        # （那列可能压根不存在）。这是故障兜底，不是第二套语义。
+        conn.execute(
+            "INSERT INTO presence (board_id, citizen_id, agent_id, status, doing, surface, "
+            "first_seen_at, last_seen_at) VALUES (?,?,?,?,?,?,?,?) "
+            f"ON CONFLICT({conflict}) DO UPDATE SET "
+            "  agent_id=excluded.agent_id, status=excluded.status, doing=excluded.doing, "
+            "  surface=excluded.surface, last_seen_at=excluded.last_seen_at, "
+            "  auto_source=NULL",
+            (board["id"], citizen_id, agent_id or sk or None, status, doing, surface,
+             now, now))
     conn.commit()
     return board
+
+
+_AUTO_DOING_MARK = "自动登记"
+
+
+def _is_auto_doing(doing) -> bool:
+    """这一行的 `doing` 是不是**自动占位**（而不是谁主动声明的一句话）。"""
+    return _AUTO_DOING_MARK in (doing or "")
+
+
+def _auto_doing_text(source) -> str:
+    """自动登记的占位文案：**把来源写进去**，读者一眼看得出这不是谁的主张。"""
+    return {
+        "session_start": "（自动登记：会话开始，还没说在做什么）",
+        "session_inject": "（自动登记：会话开始，还没说在做什么）",
+        "remember": "（自动登记：正在写记忆）",
+    }.get(source or "", "（自动登记）")
+
+
+def board_auto_checkin(conn, citizen_id, *, project=None, session_key=None,
+                       source="session_start", period_key=None) -> dict:
+    """**自动签到**：SessionStart / 写记忆时把这一行建出来或刷新（用户 2026-10-26 拍板）。
+
+    ## 为什么要有它
+
+    > 很多人不 checkin 不是因为不愿意，是**记不住**。如果 `remember` 或写入时
+    > 能自动带一条极简 presence（甚至只是"某公民今天有活动"），看板就不会是 0 人。
+    > —— `EVAL-261025-16` 建议 3
+
+    用户 2026-10-26 进一步拍板：**「自动行」算登记**。所以它不只是兜底，
+    而是"开工即可见"的默认路径；软门（`board_checkin_or_remind`）据它判"已登记"。
+
+    ## 四条红线
+
+    1. **不覆盖人的意图**：只有 `doing` 是空或**自动占位**时才改写它；
+       手工写的一句话永不被自动刷新冲掉（覆盖 = 把"我在做 X"改成"自动登记" = 毁信息）。
+    2. **不编造占用面**：`surface` 留空。编造的 surface 会制造假重叠，
+       而重叠警告一旦掺假就会被学会忽略（`EVAL-261025-13` 的教训）。
+    3. **来源可解释**：`auto_source` 记 `session_start` / `remember` / `activity`，
+       第 3 条值由采集层写（`fish_activity.refresh_presence_cache`）。
+    4. **失败不拖垮调用方**：会话启动不能被看板拖垮，所以调用方一律 try/except。
+
+    返回 `{board, created, refreshed, skipped}`；`skipped` 非空表示这次没动（附原因）。
+    """
+    if not get_config(conn, "board.auto_presence"):
+        return {"created": False, "refreshed": False, "skipped": "board.auto_presence=false"}
+    scope, key = ("project", project) if project else ("root", "")
+    try:
+        board = board_ensure(conn, scope, key, period_key)
+        if board["status"] == "closed":
+            return {"board": board, "created": False, "refreshed": False,
+                    "skipped": "看板已归档"}
+        now = now_utc()
+        sk = (session_key or "").strip()
+        with_session, conflict = _presence_write_shape(conn)
+        if with_session and not sk:
+            # **无会话键的自动行不许制造影子行**：该公民在本板**只有一行**时落到那一行。
+            # 现场：MCP 的 `board checkin` 现在会写会话键，而 `remember` 的兜底行若落到
+            # `''`，同一公民就多出一条「自动登记」影子行——看板上看见两行，其中一行的
+            # doing 是假的。有 ≥2 行时才写 `''`（那才是诚实的"不知道是哪个窗口"）。
+            existing = conn.execute(
+                "SELECT session_key FROM presence WHERE board_id=? AND citizen_id=?",
+                (board["id"], citizen_id)).fetchall()
+            if len(existing) == 1:
+                sk = str(existing[0][0] or "")
+        # 2026-10-26（撞车自撞修复 T02）：自动行也按**会话**定位。
+        # 旧实现只按 `(board, citizen)` 找行，于是同公民第 2 个会话的 `doing`
+        # 会直接改写第 1 个会话的自动占位——正是设计 P1/P5 那两个病根。
+        where = "board_id=? AND citizen_id=?" + (" AND session_key=?" if with_session else "")
+        key_params = (board["id"], citizen_id) + ((sk,) if with_session else ())
+        row = conn.execute(
+            f"SELECT doing, auto_source FROM presence WHERE {where}", key_params).fetchone()
+        if row is None:
+            cols = ["board_id", "citizen_id"]
+            values = [board["id"], citizen_id]
+            if with_session:
+                cols.append("session_key")
+                values.append(sk)
+            cols += ["agent_id", "status", "doing", "surface", "first_seen_at",
+                     "last_seen_at", "auto_surface", "auto_seen_at", "auto_source"]
+            values += [sk or None, "active", _auto_doing_text(source), "", now, now, "",
+                       now, source]
+            conn.execute(
+                f"INSERT INTO presence ({', '.join(cols)}) VALUES "
+                f"({','.join('?' * len(cols))}) ON CONFLICT({conflict}) DO NOTHING",
+                tuple(values))
+            conn.commit()
+            return {"board": board, "created": True, "refreshed": False, "skipped": None}
+        doing, auto_source = row[0] or "", row[1] or ""
+        if _is_auto_doing(doing) or not doing.strip():
+            conn.execute(
+                "UPDATE presence SET last_seen_at=?, auto_seen_at=?, auto_source=?, "
+                f"doing=? WHERE {where}",
+                (now, now, source, _auto_doing_text(source)) + key_params)
+        else:
+            # 手工行：只刷自动时间与来源，**不动 doing / surface / last_seen_at**
+            conn.execute(
+                "UPDATE presence SET auto_seen_at=?, auto_source=? "
+                f"WHERE {where}", (now, source) + key_params)
+        conn.execute(
+            f"UPDATE presence SET agent_id=? WHERE {where} "
+            "AND agent_id IS NULL AND ? IS NOT NULL",
+            (sk or None,) + key_params + (sk or None,))
+        conn.commit()
+        return {"board": board, "created": False, "refreshed": True, "skipped": None}
+    except (sqlite3.Error, ValueError) as exc:
+        return {"created": False, "refreshed": False,
+                "skipped": f"{type(exc).__name__}: {exc}"}
 
 
 def board_post(conn, board, citizen_id, kind, text):
@@ -7832,78 +11765,64 @@ def board_checkin_or_remind(conn, citizen_id, project=None):
     → 真正实现时间窗，并把两种语义**分开说**（后者比前者更有用、也不像训话）：
       · 没行       → "你还没签到"
       · 有行但超窗 → "你的 doing 已 N 分钟没更新"
+
+    ## 2026-10-26（T03）③ 自动行算登记
+
+    用户拍板「看板自动行算登记」，所以：
+      · 有自动行（SessionStart/写记忆建的）且**新鲜** → `(True, None)`，不再说"你还没签到"；
+      · 自动行但**过旧** → 仍返回 `False` 且提示里保留「分钟没更新」字样（兼容既有判据），
+        再补一句「这是自动登记，补一句 doing 别人才能判断撞车」——
+        它不是否定"算登记"，只是让 `doing` 有价值（占位文案判断不了撞车）。
+
+    判定基准用 `effective_last = max(last_seen_at, auto_seen_at)`（见 `effective_last`）：
+    一个正在连续写代码的会话，不该因为"没重跑 checkin"被判成没更新。
     """
     now = datetime.datetime.now(datetime.timezone.utc)
     rows = conn.execute(
-        "SELECT p.last_seen_at, p.doing, b.scope, b.scope_key "
+        "SELECT p.last_seen_at, p.auto_seen_at, p.doing, b.scope, b.scope_key "
         "FROM presence p JOIN boards b ON b.id = p.board_id "
         "WHERE p.citizen_id=? AND b.period_key=? AND p.status != 'left'",
         (citizen_id, board_period())).fetchall()
     if not rows:
-        return False, ("你还没签到——看板上没有你的行。"
+        return False, ("你还没签到——看板上没有你的行（也还没有自动登记）。"
                        f"用 `fish board checkin --doing \"在做什么\" --project {project or '(根)'}` 登记，"
                        "别人才能判断会不会跟你撞车。")
 
     best = None                       # (minutes, doing, scope, scope_key)
-    for last, doing, sc, sk in rows:
-        mins = 0
-        if last:
-            try:
-                t = datetime.datetime.strptime(
-                    last, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)
-                mins = int((now - t).total_seconds() // 60)
-            except ValueError:
-                mins = 0              # 时间戳坏了 → 当刚签过（宁可少提醒）
+    for last, auto, doing, sc, sk in rows:
+        eff = max(last or "", auto or "")
+        t = parse_utc(eff)
+        mins = 0 if t is None else max(int((now - t).total_seconds() // 60), 0)
         if best is None or mins < best[0]:
             best = (mins, doing or "", sc, sk)
     mins, doing, sc, sk = best
     if mins <= BOARD_PRESENCE_IDLE_SECONDS // 60:
         return True, None
     where = ("根看板" if sc == "root" else f"{sc}:{sk}")
+    tail = ("如果还在做同一件事，重跑一次 checkin 刷新一下；"
+            "做完了就用 `board(action=\"post\", kind=\"done\", text=\"…\")` 标掉——"
+            "否则看板会一直显示一件早就做完的事。")
+    if _is_auto_doing(doing):
+        return False, (
+            f"你的 doing 已 {mins} 分钟没更新（{where} 上只有自动登记「{doing}」）。"
+            "**这是自动登记，不算你的声明**——补一句 doing，别人才能判断会不会撞车。"
+            + tail)
     return False, (
-        f"你的 doing 已 {mins} 分钟没更新（{where} 上写的是「{doing or '未写'}」）。"
-        "如果还在做同一件事，重跑一次 checkin 刷新一下；"
-        "做完了就用 `board(action=\"post\", kind=\"done\", text=\"…\")` 标掉——"
-        "否则看板会一直显示一件早就做完的事。")
+        f"你的 doing 已 {mins} 分钟没更新（{where} 上写的是「{doing or '未写'}」）。" + tail)
 
 
-def board_auto_presence(conn, citizen_id, project=None):
-    """`remember` 时的**兜底 presence**：让看板不再"0 人"。
+def board_auto_presence(conn, citizen_id, project=None, *, session_key=""):
+    """`remember` 时的**兜底 presence**：委托 `board_auto_checkin(source='remember')`。
 
-    ## 为什么要有它（`EVAL-261025-16` 建议 3）
+    2026-10-26（T03）：本函数原来是"只在无行时 INSERT"的独立实现；现在自动签到
+    与它是同一件事（区别只有 `doing` 的来源标注与 `auto_source` 记账），
+    所以**合流**——两条路径各写一份必然漂（这正是本项目反复付学费的那类问题）。
 
-    > 很多人不 checkin 不是因为不愿意，是**记不住**。如果 `remember` 或写入时
-    > 能自动带一条极简 presence（甚至只是"某公民今天有活动"），看板就不会是 0 人。
-
-    ## 三条红线（把它做对，而不是做成"幽灵行"）
-
-    1. **只在无行时写**（`ON CONFLICT DO NOTHING`）——
-       **绝不覆盖别人声明的 `doing`**。覆盖等于把"我刚在做 X"改成"自动登记"，那是毁信息
-    2. **`doing` 明确标注来源**：`（自动登记：正在写记忆）`。
-       让人一眼看出这不是谁主动声明的，避免把自动行当成真实意图
-    3. **`surface` 留空**——**不编造占用面**。
-       编造的 surface 会制造假重叠，而重叠警告一旦掺假就会被学会忽略
-       （那正是 `EVAL-261025-13` 刚教过我们的）
-
-    ## 返回值
-
-    `True` = 这次真的插了一条；`False` = 已有人在（没动）。
+    返回语义保持旧契约：`True` = 这次新建了一行；`False` = 已有行（只刷新或没动）。
     """
-    scope, key = ("project", project) if project else ("root", "")
-    try:
-        board = board_ensure(conn, scope, key)
-        if board["status"] == "closed":
-            return False
-        cur = conn.execute(
-            "INSERT INTO presence (board_id, citizen_id, agent_id, status, doing, "
-            "surface, first_seen_at, last_seen_at) VALUES (?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(board_id, citizen_id) DO NOTHING",
-            (board["id"], citizen_id, None, "active",
-             "（自动登记：正在写记忆）", "", now_utc(), now_utc()))
-        conn.commit()
-        return bool(cur.rowcount)
-    except (sqlite3.Error, ValueError):
-        return False          # 兜底是增强项，失败不该把 remember 打挂
+    res = board_auto_checkin(conn, citizen_id, project=project,
+                             session_key=(session_key or None), source="remember")
+    return bool(res.get("created"))
 
 
 def _fmt_period(pk) -> str:
@@ -7932,66 +11851,87 @@ def _hhmm(ts) -> str:
 # 而「防撞车是这个功能存在的唯一理由」（工具描述原话），所以这是功能核心缺失，
 # 不是体验瑕疵——它给人一个**假的安全感**，比没有更糟。
 
-def who_label(row) -> str:
-    """把一个在场行渲染成**人能认的标签**：`名字（短 id）`。
+def citizen_labels(conn, citizen_ids, *, scope_key=None) -> dict:
+    """一批公民 → **可读标签**（`{citizen_id: label}`）。人类面的唯一取名入口。
 
-    2026-10-25（`EVAL-261025-16`）：入场表原来只有 ULID，人认不出是谁。
-    规则：
-      · 有 `display_name` → `codebuddy-8a83（17929164）`
-        （名字优先，但**保留短 id**——同名时仍能区分，且不妨碍照它去查库）
-      · 没有名字（老数据 / 匿名）→ 只用短 id，不编造
-    为什么保留短 id 而不是只留名字：看板的核心动作是"找到那个人去协调"，
-    而 ULID 是唯一不会撞的键；只留名字会在重名时失效。
+    ## 为什么必须集中（设计 §6.3）
+
+    看板渲染、动态行、重叠警告、残留行、根板汇总、注入包、MCP `board show` —— 7 处
+    都在印名字。以前它们各印各的（多数直接印 26 位 ULID），于是"看板上认不出是谁"。
+
+    ## 三条规则（`fish_naming.disambiguate` 是唯一实现）
+
+      · 有 `display_name` → 原样；
+      · 没有 → `未命名·<host>`（**绝不返回 citizen_id 片段**）；
+      · 重名 → `名字·<host>`；host 也重 → `名字·<host>#2`（按 created_at 稳定排序）。
+
+    `scope_key` 目前不参与取名（项目名在标题/注入头上出现一次即可）。
+    参数留着是有意的：将来若要做"同名不同项目"的消歧，入口已经在这里了，
+    不必再去改 7 个渲染点。
+    """
+    _ = scope_key                       # 见 docstring：项目名不参与取名
+    ids = [str(c) for c in (citizen_ids or ()) if c]
+    if not ids:
+        return {}
+    out = {}
+    # SQLite 的变量上限是 999：按 500 个一批查，够用且不必担心边界。
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        rows = conn.execute(
+            "SELECT citizen_id, display_name, host, created_at FROM citizens "
+            "WHERE citizen_id IN (" + ",".join("?" * len(chunk)) + ")", chunk).fetchall()
+        out.update(fish_naming.disambiguate(
+            [{"citizen_id": r[0], "display_name": r[1], "host": r[2], "created_at": r[3]}
+             for r in rows]))
+    for cid in ids:
+        out.setdefault(cid, fish_naming.base_label("", "", cid))
+    return out
+
+
+def who_label(row, *, with_id: bool = False) -> str:
+    """把一个在场/动态行渲染成**人能认的标签**（2026-10-26 契约变更）。
+
+    ## 契约（用户 2026-10-26 拍板：不要 ULID）
+
+      · 有名字 → `anyi-studio-主AI`
+      · 没名字 → `未命名·dsh`（host 也空 → `未命名`）
+      · 重名 → 由 `citizen_labels` 消歧成 `名字·host` / `名字·host#2`
+      · **任何人类可读面都不出现 26 位公民 ID**；要 ID 请传 `with_id=True`
+        （机器视图/调试专用，看板/注入包一律不传）。
+
+    ## 这是**有意的破坏性变更**
+
+    旧实现是 `名字（短 id）`、无名字时只给短 id，`test_board_feedback3` U1 三条
+    钉着那个行为。用户拍板后改契约 → 那三条判据**一起改**（不是放宽），
+    并用变异自证证明"改回短 id 就红"（设计 §5.7 契约变更清单）。
     """
     try:
         cid = row["citizen_id"] if isinstance(row, dict) else row[0]
         name = (row.get("display_name") if isinstance(row, dict) else None) or ""
+        host = (row.get("host") if isinstance(row, dict) else None) or ""
+        precomputed = (row.get("label") if isinstance(row, dict) else None) or ""
     except (KeyError, IndexError, TypeError):
         return str(row)
     if cid == "ASSUMED":
         return "（simulate 假设的人）"
-    short = cid[:8] if cid else "?"
-    return f"{name}（{short}）" if name else short
+    # 行里已经带了**消歧后的标签**时直接用（`board_presence_rows` 会批量算好）。
+    # 为什么要走这条路：重名消歧需要**整行集合**（谁和谁同名），单行内部算不出来；
+    # 批量算一次比每个渲染点各算一次更准，也不会出现"看板消歧了、注入包没消歧"。
+    if precomputed:
+        return precomputed if not with_id else f"{precomputed}（{(cid or '?')[:8]}）"
+    label = fish_naming.base_label(name, host, cid)
+    if with_id:
+        short = (cid or "?")[:8]
+        return f"{label}（{short}）"
+    return label
 
 
-_SURFACE_SEP = re.compile(r"[,，;；\n]")
-
-
-def normalize_surface(surface) -> list:
-    """把 `surface` 归一化成**排序去重的前缀列表**。
-
-    规则（`EVAL-261025-09` 建议 3）：小写、正斜杠、去首尾空白、去尾斜杠、去重排序。
-    为什么必须归一化：`p0/fish.py` 与 `p0/fish.py `（尾空格）现在算两回事，
-    而两侧一旦漂了无人发现——那正是"声明了但防不住"的最隐蔽形态。
-    """
-    out = []
-    for part in _SURFACE_SEP.split(surface or ""):
-        s = (part or "").strip().replace("\\", "/").lower().rstrip("/")
-        if s and s not in out:
-            out.append(s)
-    return sorted(out)
-
-
-def surface_hit(a, b):
-    """两个归一化前缀是否**命中**（含目录前缀语义），命中返回共同前缀。
-
-    为什么不是简单相等（`EVAL-261025-09` 建议 4）：
-    声明 `backend/routes` 应能命中 `backend/routes/tasks.py`。
-    要求调用方列全所有文件是做不到的——**列全本身很容易漏**，
-    而漏掉的恰好是"我以为没人在动"的那块。
-
-    边界纪律：按**路径分量**判前缀，不做字符串前缀——
-    `a/b` 不该命中 `a/bc`（那是两条不同的路，字符串前缀会误报）。
-    """
-    if not a or not b:
-        return None
-    if a == b:
-        return a
-    if b.startswith(a + "/"):
-        return a
-    if a.startswith(b + "/"):
-        return b
-    return None
+# 2026-10-26（hooks 深度利用 T01）：`normalize_surface` / `surface_hit` 已抽到
+# `fish_surface.py`，本文件在顶部 `from fish_surface import ...` 原样再导出。
+# 为什么抽走：这两个函数是**占用面判定的唯一实现**，而 hook（PreToolUse/PostToolUse）
+# 不能 import fish（400ms）。抽成小模块后，hook 与 fish 共用同一份判定，
+# 「板上一套前缀判定、ask 又一套」这个病从结构上消失。
+# 现有 24 处调用（fish/CLI/MCP/测试）**一个都不用改**——名字还在，语义逐字不变。
 
 
 def board_overlaps(conn, board, *, window_min=None) -> list:
@@ -8029,24 +11969,28 @@ def board_overlaps(conn, board, *, window_min=None) -> list:
         if p["status"] == "left":
             continue                      # 明确下板的人：不算重叠
         fresh = True
-        if p["last_seen_at"]:
-            try:
-                t = datetime.datetime.strptime(
-                    p["last_seen_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
-                        tzinfo=datetime.timezone.utc)
+        eff = effective_last(p)            # 2026-10-26：基准改为「声明 ∪ 实际」
+        if eff:
+            t = parse_utc(eff)
+            if t is not None:
                 fresh = (now - t).total_seconds() <= window * 60
-            except ValueError:
-                fresh = True              # 时间戳坏了 → 宁可算它有效（不静默漏报）
+            # parse 失败 → 保持 fresh=True（宁可算它有效，不静默漏报）
         if not fresh:
             continue
-        people.append({"citizen_id": p["citizen_id"], "doing": p["doing"],
-                       "surface": normalize_surface(p["surface"])})
+        people.append({"citizen_id": p["citizen_id"],
+                       "session_key": p.get("session_key") or "",
+                       "doing": p["doing"],
+                       "label": who_label(p), "surface": normalize_surface(p["surface"])})
 
     out = []
     seen = set()
     for i in range(len(people)):
         for j in range(i + 1, len(people)):
             a, b = people[i], people[j]
+            # 同一行**不会**出现两次（presence 主键是 `(board, citizen, session)`），
+            # 但读侧降级/手工数据都可能造出重复键——先挡住，免得报"自己跟自己撞"。
+            if (a["citizen_id"], a["session_key"]) == (b["citizen_id"], b["session_key"]):
+                continue
             for pa in a["surface"]:
                 for pb in b["surface"]:
                     hit = surface_hit(pa, pb)
@@ -8056,12 +12000,96 @@ def board_overlaps(conn, board, *, window_min=None) -> list:
                         # 都是 `p0`——不去重就会把同一条重叠打印两遍
                         # （2026-10-25 端到端实测抓到）。对读者来说"说了两遍"
                         # 等于"有两处冲突"，那是错误信息。
-                        key = (a["citizen_id"], b["citizen_id"], hit)
+                        # 2026-10-26：去重键加**会话键**——同公民两个会话各算一条参与者
+                        # （它们的声明面可能相同，但"该找谁"是两个不同的窗口）。
+                        key = (a["citizen_id"], a["session_key"],
+                               b["citizen_id"], b["session_key"], hit)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        # `a`/`b` 保留**公民 ID**：机器调用与旧测试按 ID 比对，
+                        # 追加 `a_label`/`b_label` 给人类面（设计 §5.7 契约变更）；
+                        # `a_session`/`b_session`/`same_citizen` 是 2026-10-26 的加法。
+                        out.append({"a": a["citizen_id"], "b": b["citizen_id"],
+                                    "a_label": a["label"], "b_label": b["label"],
+                                    "at": hit,
+                                    "a_session": a["session_key"],
+                                    "b_session": b["session_key"],
+                                    "same_citizen": a["citizen_id"] == b["citizen_id"]})
+    return out
+
+
+def board_observed_overlaps(conn, board, *, window_min=None) -> list:
+    """**观察到的**重叠（声明面 ∪ 实际面）——推断，与"声明重叠"分开展示。
+
+    为什么必须分开（设计 §6.2 / T03 要点 5）：声明是人的意图，实际是发生的事实。
+    把两者混成一句"占用面重叠"，读者就分不清"该去找谁协调"还是"要不要提醒某人更新 doing"。
+    这一节的名字里就有「推断」两个字，正是为了不把事实当声明。
+
+    判定用 `fish_surface.surface_hit` / `path_hit`（同一套前缀语义），**不引入第二套规则**。
+    返回 `[{"a","b","a_label","b_label","at","kind"}]`，`kind`∈{declared,actual,mixed}。
+
+    ## 2026-10-26 评审 F2：实际面取 `dir_abs`（判定列），不取 `dir`（展示列）
+
+    展示列 `dir` 是**相对写入者基准**算出来的：两个人在不同项目里各写一个 `p0`，
+    `dir` 都是 `'p0'` → 这一节会报一条「推断重叠」，而事实是两块不相干的地方。
+    判定统一用 `dir_abs`（`dir_of(path_abs)`，永远绝对）。
+
+    两侧基准不同时（声明相对、实际绝对）走 `_surface_overlap_hit` → `path_hit`：
+    mixed 组合靠它维持判定能力，同时 1 段面仍被 `min_segments` 挡住。
+    """
+    window = int(window_min if window_min is not None
+                 else get_config(conn, "board.collision_window_min"))
+    now = datetime.datetime.now(datetime.timezone.utc)
+    people = []
+    for p in board_presence_rows(conn, board):
+        if p["status"] == "left":
+            continue
+        declared = normalize_surface(p["surface"])
+        # 只收证明得了绝对路径的目录（判定列）；证明不了的不进判定（不编）
+        actual = [d["dir_abs"] for d in (p.get("auto_dirs") or []) if d.get("dir_abs")]
+        fresh = False
+        for ts in (p.get("last_seen_at"), p.get("auto_seen_at")):
+            t = parse_utc(ts)
+            if t is not None and (now - t).total_seconds() <= window * 60:
+                fresh = True
+        if not fresh and not actual:
+            continue
+        people.append({"citizen_id": p["citizen_id"],
+                       "session_key": p.get("session_key") or "",
+                       "label": who_label(p),
+                       "declared": declared, "actual": normalize_surface(",".join(actual))})
+
+    out, seen = [], set()
+    for i in range(len(people)):
+        for j in range(i + 1, len(people)):
+            a, b = people[i], people[j]
+            # 防御式跳过（设计 §3.5 的第 3 条）：`(cid, sk)` 相同就是同一个参与方。
+            # 现在结构上不可能发生（一行/会话），但把"声明/实际"拆成两行的那天就会，
+            # 成本 2 行，防的是回归。
+            if (a["citizen_id"], a["session_key"]) == (b["citizen_id"], b["session_key"]):
+                continue
+            for kind, pa_list, pb_list in (
+                    ("declared", a["declared"], b["declared"]),
+                    ("actual", a["actual"], b["actual"]),
+                    ("mixed", a["declared"], b["actual"]),
+                    ("mixed", a["actual"], b["declared"])):
+                for pa in pa_list:
+                    for pb in pb_list:
+                        hit = _surface_overlap_hit(pa, pb)
+                        if not hit:
+                            continue
+                        key = (a["citizen_id"], a["session_key"],
+                               b["citizen_id"], b["session_key"], hit, kind)
                         if key in seen:
                             continue
                         seen.add(key)
                         out.append({"a": a["citizen_id"], "b": b["citizen_id"],
-                                    "at": hit})
+                                    "a_label": a["label"], "b_label": b["label"],
+                                    "at": hit, "kind": kind,
+                                    "a_session": a["session_key"],
+                                    "b_session": b["session_key"],
+                                    "same_citizen": a["citizen_id"] == b["citizen_id"]})
     return out
 
 
@@ -8101,14 +12129,11 @@ def board_simulate(conn, board, surface, *, exclude_citizen=None,
         if exclude_citizen and p["citizen_id"] == exclude_citizen:
             continue
         fresh = True
-        if p["last_seen_at"]:
-            try:
-                t = datetime.datetime.strptime(
-                    p["last_seen_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
-                        tzinfo=datetime.timezone.utc)
+        eff = effective_last(p)
+        if eff:
+            t = parse_utc(eff)
+            if t is not None:
                 fresh = (now - t).total_seconds() <= window * 60
-            except ValueError:
-                fresh = True
         if fresh:
             others.append({**p, "fresh": True})
     if assume_surface:
@@ -8142,17 +12167,16 @@ def board_stale_rows(conn, board, *, window_min=None) -> list:
     now = datetime.datetime.now(datetime.timezone.utc)
     stale = []
     for p in board_presence_rows(conn, board):
-        if p["status"] == "left" or not p["last_seen_at"]:
+        if p["status"] == "left":
             continue
-        try:
-            t = datetime.datetime.strptime(
-                p["last_seen_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
-                    tzinfo=datetime.timezone.utc)
-        except ValueError:
+        eff = effective_last(p)
+        t = parse_utc(eff)
+        if t is None:
             continue
         mins = int((now - t).total_seconds() // 60)
         if mins > window:
-            stale.append({"citizen_id": p["citizen_id"], "doing": p["doing"],
+            stale.append({"citizen_id": p["citizen_id"], "label": who_label(p),
+                          "doing": p["doing"],
                           "surface": normalize_surface(p["surface"]),
                           "minutes": mins})
     return stale
@@ -8188,44 +12212,194 @@ def board_prev_note(conn, board, limit=3) -> str:
         "WHERE board_id=? ORDER BY id DESC LIMIT ?", (row[0], limit)).fetchall()
     if not posts:
         return ""
+    labels = citizen_labels(conn, [p[0] for p in posts])
     lines = [f"（昨日板 {_fmt_period(prev)} 仍开着，最后 {len(posts)} 条——"
              "跨午夜开工的话先看这里：）"]
     for cid, kind, txt, ts in reversed(posts):
-        lines.append(f"  · {_hhmm(ts)} {cid} {kind}：{txt[:60]}")
+        lines.append(f"  · {_hhmm(ts)} {labels.get(cid) or cid} {kind}：{txt[:60]}")
     return "\n".join(lines)
 
 
+def effective_last(row) -> str:
+    """一行的**有效最后活跃时间** = `max(last_seen_at, auto_seen_at, last_action_at)`。
+
+    为什么要它（设计 §6.2）：手工签到的 `last_seen_at` 只在人 checkin 时刷新，
+    而写动作会持续刷新 `auto_seen_at`（缓存，节流 20s）与 `last_action_at`（事实）。
+    同一个"30 分钟没动 = idle"的判定，用哪个时间当基准，结论完全不同——
+    一个在连续写代码的会话不该被标成 offline。
+
+    为什么把**事实表**的 `last_action_at` 也算进来：缓存是节流的（可能落后 20s）
+    且可能被清空；**真相在 `tool_activity`**。无自动数据（旧行）时它就是
+    `last_seen_at`，与旧行为逐字一致。
+    """
+    if not isinstance(row, dict):
+        return ""
+    return max(row.get("last_seen_at") or "", row.get("auto_seen_at") or "",
+               row.get("last_action_at") or "")
+
+
+def _age_minutes(ts) -> "float | None":
+    """UTC ISO → 距今分钟数（负数截 0）；解析不了返回 None（**不假装刚签过**）。"""
+    parsed = parse_utc(ts)
+    if parsed is None:
+        return None
+    now = datetime.datetime.now(datetime.timezone.utc)
+    return max(int((now - parsed).total_seconds() // 60), 0)
+
+
+def _collapse_presence_raw(rows):
+    """把同公民的多个会话行折成一行（`board.presence_session_rows=false` 的止血档）。
+
+    返回 `(折叠后行, {citizen_id: 折叠前会话数})`。
+
+    口径：`max(last_seen_at, auto_seen_at)` 最新的那行做主行——**只用于展示/判定读侧**，
+    库里的会话行一条都不删（把配置改回 true 就恢复，秒级可回）。
+
+    为什么在**取名字之前**折：折叠后再算标签，`session_labels` 看到"该公民只有 1 个会话"
+    → 自动不追加 `·dsh#xxxx`，于是渲染/`board_overlaps`/`board show` 一起回到今天的样子
+    ——一个开关管三处，不会出现"看板折了、show 没折"的分裂。
+    """
+    counts, order, best = {}, [], {}
+    for row in rows:
+        cid = row[1]
+        counts[cid] = counts.get(cid, 0) + 1
+        if cid not in best:
+            order.append(cid)
+            best[cid] = row
+            continue
+        if max(row[6] or "", row[11] or "") > max(best[cid][6] or "", best[cid][11] or ""):
+            best[cid] = row
+    return [best[cid] for cid in order], counts
+
+
 def board_presence_rows(conn, board):
-    """在场表：谁在这块板上、在做什么。
+    """在场表：谁在这块板上、声明在做什么、**实际在动什么**。
 
     `status` 的 **idle 是渲染时算的**，不写库：写库需要定时任务，
     而"30 分钟没动"这种判断随时可以重算——把可重算的派生态写进库，
     只会制造"库里的值和真实情况不一致"的新问题。
+
+    ## 2026-10-26（T03）新增字段，一条都不改旧语义
+
+      · `host` / `auto_surface` / `auto_seen_at` / `auto_source`（自动占用的缓存）；
+      · `auto_dirs`：自动面的读时聚合（`[{dir,dir_abs,count,last}]`，来自 `tool_activity`；
+        `dir` 是**展示**列（相对写入者基准）、`dir_abs` 是**判定**列（`dir_of(path_abs)`，
+        评审 L1 修复：判定只认它）；
+      · `action_count` / `last_action_at`：本板周期内该公民的写动作总数与最近一次；
+      · `state`：`active | idle | offline | left` 四档（`status` 仍是旧三值）；
+      · `state_inferred`：state 是**推断**出来的（超时/自动时间），不是人的声明。
+
+    为什么 `status` 不动：`board_overlaps`/`board_stale_rows`/看板渲染/既有测试
+    全部按 active|idle|left 判断；把四档塞进 status 会一夜之间改掉所有语义。
+    四档放在 `state` 里，是**新增**而不是替换。
     """
     now = datetime.datetime.now(datetime.timezone.utc)
+    active_window = int(get_config(conn, "board.active_window_sec"))
+    window_min = int(get_config(conn, "activity.aggregate_window_min"))
     out = []
+    # 自动面聚合只算一次（不要每行查一次库）。两份：公民级（兼容档）+ 会话级（精确档）
+    try:
+        auto_map = fish_activity.auto_surfaces(conn, window_min=window_min)
+    except sqlite3.Error:
+        auto_map = {}
+    try:
+        auto_by_session = fish_activity.auto_surfaces_by_session(
+            conn, window_min=window_min)
+    except sqlite3.Error:
+        auto_by_session = {}
     # 2026-10-25（`EVAL-261025-16`）：**joins citizens 拿可读名**。
-    # 之前只显示 ULID（如 `17929164334384A67C1B1F95C4`），而 `whoami` 里它叫
-    # `codebuddy-8a83d218-8b2`——人每次都要拿 ULID 去对照才知道是谁。
-    for r in conn.execute(
-            "SELECT p.citizen_id, p.agent_id, p.status, p.doing, p.surface, "
-            "p.last_seen_at, c.display_name, c.kind "
-            "FROM presence p LEFT JOIN citizens c ON c.citizen_id = p.citizen_id "
-            "WHERE p.board_id=? ORDER BY p.last_seen_at DESC", (board["id"],)):
-        cid, agent, st, doing, surface, last, dname, ckind = r
+    # 2026-10-26 追加 `host`（重名消歧要用）与 `created_at`（消歧顺序要稳定）。
+    # 2026-10-26（撞车自撞修复）：多取 `p.session_key`——列不在时读 `''`，
+    # 于是"迁移未跑"的库仍然可读（设计 §2.1.1 的读侧兜底）。
+    sk_col = "p.session_key" if _presence_has_session(conn) else "''"
+    # ⚠ 这条 SQL 必须保持**一个字符串常量**（用 `.format` 而不是 `+` 拼）：仓库里有
+    # 三处判据按"常量以 SQL 关键字开头且提到 citizens"机械清点 citizens 读点
+    # （`test_identity_p1a::citizens_sql_by_function` / `test_activity` 的同款扫描）。
+    # 拆成拼接后这个读点会从清单里消失——护栏看不见它，才是最坏的"改绿"。
+    raw = conn.execute(
+        "SELECT {sk}, p.citizen_id, p.agent_id, p.status, p.doing, p.surface, "
+        "p.last_seen_at, c.display_name, c.kind, c.host, "
+        "p.auto_surface, p.auto_seen_at, p.auto_source, c.created_at "
+        "FROM presence p LEFT JOIN citizens c ON c.citizen_id = p.citizen_id "
+        "WHERE p.board_id=? ORDER BY p.last_seen_at DESC".format(sk=sk_col),
+        (board["id"],)).fetchall()
+    # 读侧降级（§6.3）：false = 按公民折叠回"一行/公民"（止血档；库里一条不删）
+    folded_sessions = {}
+    if not get_config(conn, "board.presence_session_rows"):
+        raw, folded_sessions = _collapse_presence_raw(raw)
+    # 会话键先**解析**再取名：F1（列优先 + 旧列兜底）会改键，标签集合必须用同一个键，
+    # 否则"列为空、agent_id 形如会话键"的行会查不到标签，人类面掉成 `未命名`。
+    resolved = [fish_activity.entry_session_key(r[0], r[2]) for r in raw]
+    labels = fish_naming.session_labels(
+        [{"citizen_id": r[1], "session_key": resolved[i][0], "display_name": r[7],
+          "host": r[9], "created_at": r[13]} for i, r in enumerate(raw)])
+    for r, (sk, sk_src) in zip(raw, resolved):
+        (session_col, cid, agent, st, doing, surface, last, dname, ckind, chost,
+         auto_surface, auto_seen, auto_source, _created) = r
+        # 实际面按会话取（三档渐进，F2）：有会话键就只认自己那个会话
+        info = fish_activity.presence_auto_info(cid, sk, auto_by_session, auto_map)
+        auto_dirs = list(info.get("dirs") or [])
+        action_count = int(info.get("count") or 0)
+        last_action = info.get("last") or auto_seen or ""
+        # 有效最后活跃 = 声明 ∪ 缓存 ∪ **事实**（真相在 tool_activity，见 effective_last）
+        eff = max(last or "", auto_seen or "", last_action or "")
         idle = False
-        if last:
-            try:
-                t = datetime.datetime.strptime(last, "%Y-%m-%dT%H:%M:%SZ").replace(
-                    tzinfo=datetime.timezone.utc)
+        if eff:
+            t = parse_utc(eff)
+            if t is not None:
                 idle = (now - t).total_seconds() > BOARD_PRESENCE_IDLE_SECONDS
-            except ValueError:
-                pass
-        out.append({"citizen_id": cid, "agent_id": agent,
-                    "display_name": dname or "", "kind": ckind or "",
-                    "status": "idle" if (idle and st == "active") else st,
-                    "doing": doing or "", "surface": surface or "", "last_seen_at": last})
+        status = "idle" if (idle and st == "active") else st
+        out.append({
+            "citizen_id": cid,
+            "session_key": sk,
+            "session_key_source": sk_src,
+            "session_short": fish_naming.session_short(sk),
+            "agent_id": agent,
+            "display_name": dname or "", "kind": ckind or "", "host": chost or "",
+            "label": labels.get((cid, sk)) or fish_naming.base_label(dname, chost, cid),
+            "status": status,
+            "doing": doing or "", "surface": surface or "", "last_seen_at": last,
+            "auto_surface": auto_surface or "", "auto_seen_at": auto_seen or "",
+            "auto_source": auto_source or "",
+            "auto_dirs": auto_dirs, "action_count": action_count,
+            "last_action_at": last_action,
+            "state": _presence_state(status, eff, now, active_window),
+            "state_inferred": status != "left",
+        })
+    # 同公民在本板的会话数（机器字段；渲染侧据它决定"要不要出会话后缀"）
+    counts = {}
+    for row in out:
+        counts[row["citizen_id"]] = counts.get(row["citizen_id"], 0) + 1
+    for row in out:
+        row["sessions_of_citizen"] = max(counts.get(row["citizen_id"], 1),
+                                        int(folded_sessions.get(row["citizen_id"]) or 0))
     return out
+
+
+def _presence_state(status, eff_last, now, active_window_sec=300) -> str:
+    """四档推断：`left` / `active`（≤5 分钟）/ `idle`（≤30 分钟）/ `offline`。
+
+    为什么 active 的窗口（5 分钟）比 idle（30 分钟）窄：**在动**比**在不在**更严格。
+    为什么 `offline` 只是推断：没有 SessionEnd 事件可听（设计 §7），
+    所以"人走了"只能由时间推出来——**推断必须标注**，不能把超时当事实。
+    """
+    if status == "left":
+        return "left"
+    minutes = _age_minutes(eff_last)
+    if minutes is None:
+        return "active"                    # 时间戳坏了 → 宁可当在（不静默隐藏）
+    if minutes * 60 <= max(int(active_window_sec), 1):
+        return "active"
+    if minutes * 60 <= BOARD_PRESENCE_IDLE_SECONDS:
+        return "idle"
+    return "offline"
+
+
+def _state_suffix(state, inferred) -> str:
+    """看板/注入包里的状态文案：**推断必须标注**（`idle（推断）`）。"""
+    if state in ("left", "active"):
+        return state
+    return f"{state}（推断）" if inferred else state
 
 
 def board_post_rows(conn, board, limit=BOARD_POSTS_PER_FILE):
@@ -8235,8 +12409,198 @@ def board_post_rows(conn, board, limit=BOARD_POSTS_PER_FILE):
         "WHERE board_id=? ORDER BY id DESC LIMIT ?", (board["id"], limit)).fetchall()
 
 
+# 「实际在动」列的两句文案（FB-06）。空值为什么不能写 `—`：`—` 会被读成
+# "这个人没在动"，而纯 MCP 宿主**结构上**就没有活动数据（没有 PostToolUse hook
+# 就没有 `tool_activity` 行）。空值必须自己解释自己，并且把依赖条件写在同一格里。
+NO_ACTIVITY_TEXT = "无活动数据（依赖宿主 hook）"
+ACTIVITY_COLUMN_NOTE = "活动列来自 PostToolUse hook；纯 MCP 宿主（无 hook）不会有活动数据。"
+
+
+def _actual_dirs_text(p, limit=2) -> str:
+    """「实际在动」一格的文案：`p0（12 次写，21:03）`；多目录最多 2 个 + `…`。
+
+    无数据 → `NO_ACTIVITY_TEXT`（FB-06）：这一格是**事实**，没数据就说没数据，
+    不许用一个破折号让人自己猜是"没动"还是"没观测"。
+    """
+    dirs = p.get("auto_dirs") or []
+    if not dirs:
+        return NO_ACTIVITY_TEXT
+    parts = []
+    for item in dirs[:limit]:
+        parts.append(f"{item['dir']}（{item['count']} 次写，{_hhmm(item.get('last'))}）")
+    text = "、".join(parts)
+    if len(dirs) > limit:
+        text += "…"
+    return text
+
+
+# ---------------------------------------------------- 在动但未签到（FB-14 · 2026-10-26）
+# 用户报的现象：「AI 明明在开发，看板却说离线」。生产库只读实证的根因：
+# 会话 `dsh:b92c164c…` 有 64 条 `tool_activity`（一直在写 `fish-devA/p0/fish.py`），
+# 但它的 presence 落在「未分类」板，项目板上没有它的行 —— 而旧渲染**只读 presence**。
+#
+# 这一节补的就是那个盲区：把 `tool_activity` 聚合成**会话级**的行印出来。
+# 三条纪律（写死在文案与代码里，不是风格问题）：
+#   1. **是推断，不是签到** —— 标题与行文必须标「推断」；不能让人误以为是声明；
+#   2. **只读** —— 不写 presence / 不写 events（推断不许变成事实）；
+#   3. **不重复** —— 已经在该板在场表里的会话（按 citizen_id 或 agent_id/会话键）排除掉。
+UNCHECKED_HEADING = "### 在动但未在本板登记（推断：来自 tool_activity）"
+UNCHECKED_EMPTY = "_（无）_"
+UNCHECKED_UNKNOWN_CITIZEN = "（未识别）"
+UNCHECKED_NOTE = ("这一节是**推断**：来自 `tool_activity` 的写动作，**不是签到**——"
+                  "会话确实在动，但它没有声明在做什么，所以不能据它判断会不会与你撞车。")
+# 2026-10-26（评审 ⚪15）：标题从「在动但未签到」改成「在动但**未在本板登记**」。
+# 旧措辞错一档：生产库实测 29 个会话都在「未分类」板自动签到过——它们**签过到**，
+# 只是没签在**这块板**上。说成"未签到"就是把"签在别的板"误报成"漏签"，
+# 于是读者去催一个已经按协议办过事的人。这一句负责把那一档说清楚。
+UNCHECKED_SCOPE_NOTE = ("说明：**未在本板签到 ≠ 没签到**——可能签在别的板"
+                        "（例如「未分类」板）；这里是按本板在场表做的差集推断。")
+
+
+def board_unchecked_sessions(conn, board, presence=None) -> dict:
+    """「在动但未签到」：会话级读时聚合，并排除已签到的会话。
+
+    返回 `{"window_min", "project", "sessions", "raw", "checked", "error"}`：
+
+      · `sessions`：过滤后的会话行（`fish_activity.activity_sessions` 的原样结构）；
+      · `raw`：窗口内该项目的**会话总数**（过滤前）——用来区分
+        "观测不到（没有活动数据）"与"都已签到（在场表里）"，这两种"空"的
+        含义完全不同，混成一句"无"就是在骗读者；
+      · `checked`：被排除掉的会话数。
+
+    ## 排除为什么同时看 citizen_id 与 agent_id
+
+    `presence` 的主键是 `(board_id, citizen_id)`，签到行的 `agent_id` 可能存会话键
+    （`board_auto_checkin(session_key=...)` 就是），也可能为空（手工 checkin 不传）。
+    只看其中一边都会漏：只看 citizen 会漏"agent 已登记但 citizen 记录不同步"，
+    只看 agent 会把手工签到行的会话又列一遍。
+
+    ## 只对**项目板**生效
+
+    根板/开发树板的 `scope_key` 不是项目名（根板是空串、开发树是分支名），
+    拿它去查 `tool_activity.project` 只会混算出别的项目的会话。所以非 project
+    scope 一律返回空结果——**宁可不显示，也不显示错的**。
+    """
+    project = board.get("scope_key") if board.get("scope") == "project" else ""
+    window_min = int(get_config(conn, "activity.aggregate_window_min"))
+    result = {"window_min": window_min, "project": project or None,
+              "sessions": [], "raw": 0, "checked": 0, "error": None}
+    if not project:
+        return result
+    try:
+        raw = fish_activity.activity_sessions(conn, project=project,
+                                              window_min=window_min)
+    except (sqlite3.Error, ValueError) as exc:
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        return result
+    result["raw"] = len(raw)
+    pres = board_presence_rows(conn, board) if presence is None else presence
+    # 2026-10-26（撞车自撞修复 T03）：排除口径从"公民或 agent_id"改成**两级**：
+    #
+    #   ① **会话级**（主口径）：这个 `session_key` 已经在场表里出现过 → 它签过了。
+    #      判的是"会话"，不是"主权"：同一会话键即使被记在另一个公民名下，
+    #      它仍然是同一个窗口（D2 的第二种形态就是"会话键记在 agent_id 上"）。
+    #   ② **公民级**（只对 `session_key=''` 的行）：这类行**没有会话归属**
+    #      （"这个人签过了，但不知道是哪个窗口签的"），保守地不把它名下的会话列出来。
+    #      有会话键的行**绝不**这样覆盖别人——那正是旧实现漏列同公民另一会话的病根（S22）。
+    checked_sessions = set()
+    citizen_level = set()
+    for p in pres:
+        cid = p.get("citizen_id")
+        sk = p.get("session_key") or ""
+        if sk:
+            checked_sessions.add(sk)
+        elif cid:
+            citizen_level.add(cid)
+    kept = [s for s in raw
+            if (s.get("session_key") or "") not in checked_sessions
+            and s.get("citizen_id") not in citizen_level]
+    result["sessions"] = kept
+    result["checked"] = len(raw) - len(kept)
+    return result
+
+
+def _unchecked_dirs_text(session, limit=3) -> str:
+    """「在动目录」一格：`p0（12 次）、fish-devA/p0（3 次）`；无目录 → `—`。"""
+    dirs = session.get("dirs") or []
+    if not dirs:
+        return "—"
+    parts = [f"{d['dir']}（{int(d['count'])} 次）" for d in dirs[:limit]]
+    if len(dirs) > limit:
+        parts.append("…")
+    return "、".join(parts)
+
+
+def render_unchecked_section(conn, board, pres) -> list:
+    """渲染「在动但未签到」一节，返回 markdown 行（不出现时返回 `[]`）。
+
+    ## 什么时候出这一节（三条，缺一条就会重新变成 FB-14）
+
+      1. 本板在场表**非空** → 出（哪怕结果是 `_（无）_`：读者需要知道"看过、没有"）；
+      2. 在场表为空，但项目里有窗口内活动 → 出（**这正是最该被看见的那一屏**）；
+      3. 两者皆空（空看板）→ **什么都不加**（用户明确要求：空看板保持原样）。
+
+    ## 为什么"空"也要写清楚原因
+
+    `_（无）_` 后面必须跟一句括号说明：是"没有活动数据（纯 MCP 宿主没有 hook）"、
+    "都已签到"、还是"读失败"。只印一个"无"，读者会当成"没人在动"——
+    而这三件事的处置完全不同。
+    """
+    data = board_unchecked_sessions(conn, board, pres)
+    sessions = data["sessions"]
+    if not pres and not data["raw"] and not data.get("error"):
+        return []                                  # 空看板：保持原样
+    lines = ["", f"{UNCHECKED_HEADING} · 窗口 {data['window_min']} 分钟", "",
+             UNCHECKED_SCOPE_NOTE, ""]
+    if sessions:
+        labels = citizen_labels(conn, [s["citizen_id"] for s in sessions
+                                       if s.get("citizen_id")])
+        lines += ["| 会话 | 公民 | 在动目录 | 写次数 | 最近 |", "|---|---|---|---|---|"]
+        for s in sessions:
+            cid = s.get("citizen_id")
+            who = (labels.get(cid) if cid else "") or UNCHECKED_UNKNOWN_CITIZEN
+            # 2026-10-26 QA F2：人类面**不出现完整会话键**（设计 §4.1 判据 S18 后半）。
+            # 用与看板/注入包同一个 `session_short`（单点）；完整键只在机器面
+            # （`board show --json` / `board_unchecked_sessions` 的返回里）保留。
+            sk_text = (fish_naming.session_short(s.get("session_key"))
+                       or fish_naming.NO_SESSION_SHORT)
+            lines.append(
+                f"| {sk_text} | {who} | {_unchecked_dirs_text(s)} "
+                f"| {int(s.get('writes') or 0)} | {_hhmm(s.get('last_seen'))} |")
+        lines += ["", UNCHECKED_NOTE]
+        return lines
+    if data.get("error"):
+        why = f"活动数据读取失败（{data['error']}）"
+    elif data["raw"]:
+        why = "窗口内的会话都已签过到（见上面的在场表）"
+    else:
+        why = "窗口内没有观测到写动作（纯 MCP 宿主没有 hook 就不会有活动数据）"
+    lines.append(f"{UNCHECKED_EMPTY}（{why}；窗口 {data['window_min']} 分钟）")
+    return lines
+
+
+def _presence_heading(pres) -> str:
+    """「在场」标题：单会话公民 → `在场（N 人）`（与今天逐字节相同）；
+    有公民多会话 → `在场（N 人 · M 会话）`（一列一行，M 才是有意义的规模读数）。
+    """
+    people = len({p.get("citizen_id") for p in pres})
+    if len(pres) > people:
+        return f"## 在场（{people} 人 · {len(pres)} 会话）"
+    return f"## 在场（{people} 人）"
+
+
 def _render_one(conn, board, posts, heading_suffix=""):
-    """渲染一块板的 markdown 正文（不含容量判断）。"""
+    """渲染一块板的 markdown 正文（不含容量判断）。
+
+    ## 2026-10-26（T03）列结构变更（`09` 契约）
+
+    `会话 | 状态 | 声明在做 | 实际在动 | 最后活跃`
+
+      · 「声明在做」= 手工 doing（自动行显示 `（自动登记：…）` 并标 `自动`）；
+      · 「实际在动」= `tool_activity` 读时聚合（**事实**），没数据就是 `—`；
+      · 「状态」四档 `active/idle/offline/left`，非 left/active 一律带 `（推断）`；
+      · **会话列只出可读名**（`who_label`），26 位 ULID 一个都不出现。
+    """
     scope_label = {"root": "fish 全局", "project": board["scope_key"] or "?",
                    "branch": f"开发树 {board['scope_key']}"}[board["scope"]]
     pres = board_presence_rows(conn, board)
@@ -8247,18 +12611,36 @@ def _render_one(conn, board, posts, heading_suffix=""):
         "> 真相在 `boards` / `presence` / `board_posts` 三张表；删了本文件不影响正确性，重跑即重建。",
         f"> 状态：{board['status']}" + (f" ｜ 归档于 {board['closed_at']}" if board["closed_at"] else ""),
         "",
-        f"## 在场（{len(pres)} 人）",
+        _presence_heading(pres),
         "",
     ]
     if pres:
-        lines += ["| 会话 | 状态 | 在做什么 | 占用面 | 最后活跃 |", "|---|---|---|---|---|"]
+        lines += ["| 会话 | 状态 | 声明在做 | 实际在动 | 最后活跃 |",
+                  "|---|---|---|---|---|"]
         for p in pres:
             doing = (p["doing"] or "—").replace("|", "\\|")
-            surf = (p["surface"] or "—").replace("|", "\\|")
-            lines.append(f"| {who_label(p)} | {p['status']} | {doing} | `{surf}` "
-                         f"| {_hhmm(p['last_seen_at'])} |")
+            if _is_auto_doing(p["doing"]):
+                doing += " `自动`"
+            # 声明面放进「声明在做」这一格（**不丢信息**）：它回答"声明要动哪块"，
+            # 而「实际在动」是事实。设计给的 5 列里没有单独的 surface 列，
+            # 但把 surface 从看板上抹掉等于让"谁占了哪块"只能去重叠段里找——
+            # 而重叠段只在对撞时出现（只有一个人时它永远是空的）。
+            surf = normalize_surface(p["surface"])
+            if surf:
+                doing += "（占 " + "、".join(surf[:2]) + ("…" if len(surf) > 2 else "") + "）"
+            actual = _actual_dirs_text(p).replace("|", "\\|")
+            state = _state_suffix(p["state"], p["state_inferred"])
+            lines.append(f"| {who_label(p)} | {state} | {doing} | {actual} "
+                         f"| {_hhmm(effective_last(p))} |")
     else:
         lines.append("_（还没有人签到——**未登记 = 未发生**）_")
+    # 表下方的一行说明（FB-06）：列头里放不下"这一列依赖什么"，而那句话正是
+    # "为什么这里全是「无活动数据」"的答案。有表才写——没有表时说明也没有对象。
+    if pres:
+        lines += ["", ACTIVITY_COLUMN_NOTE]
+
+    # 在动但未签到（FB-14 · 2026-10-26）：**推断**，只读 `tool_activity`；空看板不加空节。
+    lines += render_unchecked_section(conn, board, pres)
 
     # 占用面重叠警告（2026-10-25 · `EVAL-261025-09`）：
     # 这是把"声明"变成"防线"的那一步。在此之前 surface 只是被存起来，
@@ -8267,21 +12649,34 @@ def _render_one(conn, board, posts, heading_suffix=""):
     if overlaps:
         lines += ["", "### ⚠ 占用面重叠（开工前先协调）", ""]
         for ov in overlaps[:10]:
-            lines.append(f"- `{ov['at']}` ← {ov['a']} ↔ {ov['b']}")
+            lines.append(f"- `{ov['at']}` ← {ov.get('a_label', ov['a'])} ↔ "
+                         f"{ov.get('b_label', ov['b'])}")
         if len(overlaps) > 10:
             lines.append(f"- …共 {len(overlaps)} 处重叠")
+    # 观察到的重叠（声明 ∪ 实际）：推断，单独一节，避免把事实当声明
+    observed = board_observed_overlaps(conn, board)
+    if observed:
+        lines += ["", "### 观察到的重叠（推断：声明面 ∪ 实际在动）", ""]
+        for ov in observed[:6]:
+            kind = {"declared": "双方声明", "actual": "双方实际在写",
+                    "mixed": "一方声明/一方实际"}.get(ov["kind"], ov["kind"])
+            lines.append(f"- `{ov['at']}` ← {ov['a_label']} ↔ {ov['b_label']}（{kind}）")
+        if len(observed) > 6:
+            lines.append(f"- …共 {len(observed)} 处（含推断）")
     # 残留行（已闲置超时但仍声明占用）：不叫"冲突"，也不无痕删除
     stale = board_stale_rows(conn, board)
     if stale:
         lines += ["", f"### 已闲置但仍声明占用（{len(stale)} 行，**不算重叠**）", ""]
         for s in stale[:10]:
-            lines.append(f"- {s['citizen_id']}（{s['minutes']} 分钟未动，"
-                         f"doing「{s['doing']}」）")
+            lines.append(f"- {s.get('label') or s['citizen_id']}"
+                         f"（{s['minutes']} 分钟未动，doing「{s['doing']}」）")
 
     lines += ["", f"## 今日动态（{len(posts)} 条，最新在上）", ""]
     if posts:
+        # 动态行的名字也走 citizen_labels（一次批量取名，避免逐条查库）
+        post_labels = citizen_labels(conn, [p[0] for p in posts])
         for cid, kind, text, ts in posts:
-            lines.append(f"- **{_hhmm(ts)}** {cid} · {kind}：{text}")
+            lines.append(f"- **{_hhmm(ts)}** {post_labels.get(cid) or cid} · {kind}：{text}")
     else:
         lines.append("_（今天还没有动态）_")
     # 跨午夜可见性（`EVAL-261025-11`）：昨天那块板还开着就提一句
@@ -8309,8 +12704,14 @@ def _pack_by_bytes(conn, board, posts, budget):
     return kept, []
 
 
-def board_render_root(conn, root, period_key=None):
+def board_render_root(conn, root, period_key=None, *, home_root=None):
     """把今天所有**有效**子板聚合成根板（全局视图）。
+
+    ## 落点（2026-10-26 · 裁决 C3）
+
+    `root` 仍是 **data_root**（调用方一个字不用改，§6.2）；文件写到
+    `board_out_path(root, board)` = `<home_root>/<board['path']>`。
+    新增的 `home_root` 是**仅关键字**参数，缺省自动解析（`resolve_home_root`）。
 
     ## 三条设计约束（用户 2026-10-25 明确要求）
 
@@ -8343,7 +12744,8 @@ def board_render_root(conn, root, period_key=None):
         f"## 今日有效看板（{len(rows)} 块）",
         "",
     ]
-    total_people = 0
+    total_people = 0        # 按**公民**去重（"几个人在动"）
+    total_sessions = 0      # 人次（"有几个窗口在动"）——会话维度之后这两个数不一样了
     if rows:
         lines += ["| 看板 | 在场 | 在做什么 | 最新动态 |", "|---|---|---|---|"]
         for bid, scope, key, _st in rows:
@@ -8354,20 +12756,26 @@ def board_render_root(conn, root, period_key=None):
             posts = conn.execute(
                 "SELECT kind, text, created_at FROM board_posts "
                 "WHERE board_id=? ORDER BY id DESC LIMIT 1", (bid,)).fetchone()
-            total_people += len(pres)
-            who = "、".join(p["citizen_id"] for p in pres[:2]) + (
+            people = len({p.get("citizen_id") for p in pres})
+            total_people += people
+            total_sessions += len(pres)
+            who = "、".join(who_label(p) for p in pres[:2]) + (
                 "…" if len(pres) > 2 else "") if pres else "—"
             label = key if scope == "project" else f"{scope}:{key}"
             doing = (pres[0]["doing"] if pres else "") or "—"
             last = f"{_hhmm(posts[2])} {posts[0]}：{posts[1][:24]}" if posts else "—"
-            lines.append(f"| `{label}` | {len(pres)} 人（{who}） | {doing} | {last} |")
+            # 会话数只在**真的多于人数**时出现：单会话场景的文本与今天逐字节相同
+            bulk = f"（{len(pres)} 会话）" if len(pres) > people else ""
+            lines.append(f"| `{label}` | {people} 人{bulk}（{who}） | {doing} | {last} |")
     else:
         lines.append("_（今天还没有任何项目开工——**未登记 = 未发生**）_")
-    lines += ["", f"合计：{len(rows)} 块有效看板，{total_people} 人次在场。", ""]
+    lines += ["", f"合计：{len(rows)} 块有效看板，{total_people} 人在场"
+                  f"（{total_sessions} 人次）。", ""]
 
     board = board_ensure(conn, "root", "", pk)
     text = "\n".join(lines)
-    p = Path(root) / board["path"]
+    home = Path(home_root) if home_root else resolve_home_root(Path(root), conn=conn)
+    p = board_out_path(root, board, home_root=home)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text, encoding="utf-8")
     return board["path"], len(text.encode("utf-8")), len(rows)
@@ -8409,16 +12817,27 @@ def board_sweep(conn, root=None, days=None):
         closed.append({"id": bid, "scope": scope, "scope_key": key, "period_key": pk})
     conn.commit()
     # 归档会改变"有效看板"集合 → 根板跟着刷
+    # S9（第四轮 · 评审 🟡-N8）：与 `board_render` 同款——失败**不打断 sweep**（根板是聚合
+    # 视图），但必须对调用方可见（stderr）。原来这里是 `except Exception: pass`，
+    # "根板停在昨天"这件事对渲染者完全不可见，属于上轮 R19 漏掉的同类。
     if root is not None and closed:
         try:
             board_render_root(conn, root)
-        except Exception:      # noqa: BLE001 —— 根板是聚合视图，失败不该阻断 sweep
-            pass
+        except Exception as exc:            # noqa: BLE001 —— 见上：不阻断 sweep，但不许静默
+            print(f"警告：根板刷新失败（归档已完成 {len(closed)} 块）：{_exc_text(exc)}",
+                  file=sys.stderr)
     return {"swept": len(closed), "cutoff": cutoff, "closed": closed}
 
 
-def board_render(conn, root, board):
+def board_render(conn, root, board, *, home_root=None):
     """把看板渲染成文件，返回 `(相对路径, 字节数, 是否切分)`。
+
+    ## 落点（2026-10-26 · 裁决 C3）
+
+    `root` 仍是 **data_root**（7 个位置调用 + mcp_server 的 2 处一个字不用改）；
+    文件写到 `board_out_path(root, board)` —— 即 `<home_root>/<board['path']>`。
+    为什么签名"不改、语义改内部"：467 个既有测试与 `mcp_server.py` 都是位置调用，
+    改参数顺序会把一次"落点迁移"变成"全库调用面迁移"（§6.2）。
 
     **容量纪律（硬）**：单文件 32KB。超了按字节预算切开——
     最新的那份写主文件 `看板-YYYYMMDD.md`，更早的写 `看板-YYYYMMDD-<n>.md`，
@@ -8426,6 +12845,7 @@ def board_render(conn, root, board):
     （10 天 114 条 → 396KB → 超读取上限），这个判据不许放松。
     """
     root = Path(root)
+    home = Path(home_root) if home_root else resolve_home_root(root, conn=conn)
     posts = board_post_rows(conn, board, limit=BOARD_POSTS_PER_FILE)
     presence_only = len(_render_one(conn, board, []).encode("utf-8"))
     # 主文件预算 = 上限 - 在场表基线 - 指针句余量
@@ -8434,7 +12854,7 @@ def board_render(conn, root, board):
 
     shard_paths = []
     if rest:
-        # 分片：同样按字节装，每片一个 `-<n>` 后缀
+        # 分片：同样按字节装，每片一个 `-<n>` 后缀（相对路径拼接，与 home 无关）
         shard_no, cur = 1, rest
         while cur:
             part, cur = _pack_by_bytes(conn, board, cur, budget)
@@ -8442,7 +12862,7 @@ def board_render(conn, root, board):
                 part, cur = cur[:1], cur[1:]
             shard = dict(board)
             shard["path"] = board["path"][:-3] + f"-{shard_no}.md"
-            p = root / shard["path"]
+            p = board_out_path(root, shard, home_root=home)
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(_render_one(conn, shard, part, f"（更早第 {shard_no} 片）"),
                          encoding="utf-8")
@@ -8454,19 +12874,23 @@ def board_render(conn, root, board):
         suffix = (f"（只列最新；更早有 {len(shard_paths)} 片："
                   + "、".join(os.path.basename(x) for x in shard_paths) + "）")
     text = _render_one(conn, board, kept, suffix)
-    p = root / board["path"]
+    p = board_out_path(root, board, home_root=home)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(text, encoding="utf-8")
 
     # 2026-10-25（用户要求）：**随子板刷新而刷新根板**。
     # 挂在这里是刻意的——`board_render` 是子板刷新的**唯一出口**
     # （签到 / 发动态 / 手动 render 三条路都经过它），挂别处就一定会漏掉几条。
-    # 用 try 兜住：根板是**聚合视图**，它失败不该拖垮子板那次渲染。
+    #
+    # 2026-10-26 第二轮（R19 · 评审 🟡-4）：根板失败**不再被 `except: pass` 吞掉**。
+    # 根板是聚合视图，失败不该拖垮子板那次渲染（所以仍不抛），但"根板停在昨天"
+    # 这件事必须对渲染者可见——否则渲染看起来成功、看板其实是旧的。
     if board.get("scope") != "root":
         try:
-            board_render_root(conn, root, board["period_key"])
-        except Exception:       # noqa: BLE001 —— 见上
-            pass
+            board_render_root(conn, root, board["period_key"], home_root=home)
+        except Exception as exc:            # noqa: BLE001 —— 见上：不拖垮子板，但不许静默
+            print(f"警告：根板刷新失败（子板已写）：{_exc_text(exc)}",
+                  file=sys.stderr)
 
     return board["path"], len(text.encode("utf-8")), bool(shard_paths)
 
@@ -8547,11 +12971,16 @@ def cmd_board(args):
                       file=sys.stderr)
                 return 2
             st = getattr(args, "status", "active") or "active"
+            # 2026-10-26（撞车自撞修复 T02）：终端里没有 token 上下文，所以会话键
+            # 走 `--session-key` / env `FISH_SESSION_KEY`。`--agent` 语义不变：
+            # 只在没给 agent_id 时由 `board_checkin` 回落到会话键。
+            sk = (getattr(args, "session_key", None)
+                  or os.environ.get("FISH_SESSION_KEY") or "").strip()
             board = board_checkin(conn, citizen, doing=doing,
                                   surface=getattr(args, "surface", "") or "",
                                   scope=scope, scope_key=key,
                                   agent_id=getattr(args, "agent", None),
-                                  status=st)
+                                  status=st, session_key=sk)
             board_post(conn, board, citizen, "checkin" if st == "active" else "left",
                        doing)
             path, size, split = board_render(conn, root, board)
@@ -8571,6 +13000,29 @@ def cmd_board(args):
             return 0
 
         if act == "render":
+            # `--all`（2026-10-26 新增）：按 boards 表渲染**全部**看板。
+            # 为什么需要它：`board_render` 只渲染一块板，而 `boards.path` 迁移后
+            # 验收要求"迁移后 `fish board render` 仍能重建全部看板文件"（PRD §5.4 判据）。
+            # 没有这个入口，"重建全部"只能靠调用方遍历表——那正是判据与实现分离要避免的。
+            if getattr(args, "render_all", False):
+                rows = conn.execute(
+                    "SELECT id, scope, scope_key, period_key, path, status, created_at, "
+                    "closed_at FROM boards ORDER BY scope, scope_key, period_key"
+                ).fetchall()
+                if not rows:
+                    print("没有可渲染的看板（boards 为空）")
+                    return 0
+                keys = ("id", "scope", "scope_key", "period_key", "path", "status",
+                        "created_at", "closed_at")
+                total = 0
+                for row in rows:
+                    board = dict(zip(keys, row))
+                    path, size, split = board_render(conn, root, board)
+                    total += size
+                    print(f"{path}\t{size} B" + ("（已切分）" if split else ""))
+                print(f"共渲染 {len(rows)} 块看板，合计 {total} B")
+                print(f"落点：{resolve_home_root(root, conn=conn)}")
+                return 0
             board = board_ensure(conn, scope, key)
             path, size, split = board_render(conn, root, board)
             print(f"{path}\t{size} B" + ("（已切分）" if split else ""))
@@ -8583,13 +13035,1792 @@ def cmd_board(args):
 
         # show（默认）
         info = board_show(conn, scope, key)
+        if getattr(args, "as_json", False):
+            # 机器视图：**保留 ID**（它就是主键），另带会话字段。
+            # 人类面（上面的 markdown）反过来——永不含 26 位公民 ID。
+            print(json.dumps({
+                "board": info["board"],
+                "presence": info["presence"],
+                "posts": [{"citizen_id": p[0], "kind": p[1], "text": p[2],
+                           "created_at": p[3]} for p in info["posts"]],
+            }, ensure_ascii=False, indent=1))
+            return 0
         print(_render_one(conn, info["board"], info["posts"]))
         return 0
     finally:
         conn.close()
 
 
+# ══════════════════════════════════════ B1/B2/B3：门面 · 状态表 · 知识库
+# 依据：`docs/架构设计-B1B2B3-v0.1.md` §3.4 / §5.1 / §5.4 / §5.7 / §7.3。
+# 分区（与 §1.3 ⑤ 的子段一一对应）：
+#   5.1 路径与根解析 / 原子写 / 摘要 / 错误模型    ← 本段（T01）
+#   5.2 门面渲染（layout）                          ← T02
+#   5.3 项目状态表（project status）                ← T03
+#   5.4 知识库（kb）                                ← T04
+# 纪律：新增代码只追加，不改既有段落；新增参数一律仅关键字（K10）。
+
+# ---------------------------------------------------------------- 5.1 共用底座
+
+def _path_inside(child, parent) -> bool:
+    r"""路径包含判断的 Windows 正确版（K8）：realpath + normcase + commonpath。
+
+    为什么禁止 `str.startswith`：`E:\\Obsidian\\安逸知识库-evil` 会被
+    `startswith("E:\\Obsidian\\安逸知识库")` 判成"在库里"——这是假前缀漏洞（PRD §7.1 已识别，
+    裁决 §四.7 明确禁止）。`commonpath` 按**路径段**比，`\` 与 `/`、大小写、
+    junction 别名都先归一，才是"谁真的在谁里面"。
+
+    不同盘符时 `commonpath` 抛 `ValueError` → 一律判"不在里面"（跨盘不可能是子路径）。
+    """
+    try:
+        c = os.path.normcase(os.path.realpath(str(child)))
+        p = os.path.normcase(os.path.realpath(str(parent)))
+        return os.path.commonpath([c, p]) == p
+    except (ValueError, OSError):
+        return False
+
+
+def _home_guard_dirs():
+    """R14 的"绝不允许"清单：盘根 + 系统目录 + 用户家目录根（按环境变量取，取不到就跳过）。
+
+    `mode`：系统目录用 `inside`（写在 `C:\\Windows\\…` 下面同样是事故），
+    用户家目录只用 `equals`——家目录**根**不许用，但"家目录下的某个子目录"属于
+    "非标准但可授权"（那是人自己的目录，不该被硬禁）。
+    """
+    guards = []
+    for key in ("WINDIR", "SystemRoot", "ProgramFiles", "ProgramFiles(x86)",
+                "ProgramW6432"):
+        raw = os.environ.get(key)
+        if raw:
+            guards.append((f"系统目录 {key}", Path(raw), "inside"))
+    try:
+        guards.append(("用户家目录根", Path.home(), "equals"))
+    except (KeyError, RuntimeError):        # 无 HOME/USERPROFILE 的环境
+        pass
+    return guards
+
+
+def _guard_home_location(home, *, project_zone, allow_external=False):
+    """R14（安全 F13）：显式 `--home` / `layout.home_root` 的落点校验。
+
+    两道：
+      ① **硬禁**：盘根（`C:\\` 这种）、`%WINDIR%` / `%ProgramFiles%`、用户家目录根。
+         这些位置"写进去看起来也成功"，坏起来是系统级事故。
+      ② **非标准位置需显式开关**：不在项目根那一片（`project_zone`）的路径要
+         `--allow-external-home`——指错一个字符不该悄悄换掉整座门面的落点。
+    """
+    home = Path(home)
+    anchor = Path(home.anchor) if home.anchor else None
+    if anchor is not None and home == anchor:
+        raise RuntimeError(
+            f"门面根不能是盘根：home={home}。请给一个具体目录"
+            f"（标准位置：{Path(project_zone) / HOME_DIRNAME}）。")
+    for label, path, mode in _home_guard_dirs():
+        hit = (home == path) if mode == "equals" else _path_inside(home, path)
+        if hit:
+            raise RuntimeError(
+                f"门面根不能是{label}：home={home}（{path}）。"
+                f"请换 --home 到项目根附近（标准位置：{Path(project_zone) / HOME_DIRNAME}）。")
+    if not _path_inside(home, project_zone):
+        if not allow_external:
+            raise RuntimeError(
+                f"门面根不在项目目录内：home={home}，项目目录={project_zone}。"
+                "确需写到别处请显式加 `--allow-external-home`。")
+
+
+def resolve_home_root(data_root, *, override=None, conn=None,
+                      allow_external_home=False):
+    r"""门面根解析（§1.4）。四档，顺序固定，每档都可解释（档位越高优先）。
+
+    ⓪ `override`（CLI `--home`）——绝对路径；相对路径按 `data_root` 解析
+    ① `config layout.home_root`——同上（需要传 `conn`；给"换布局"与"故意指错"两个用途）
+    ② 标准布局：`data_root.name == 'data'` 且 `data_root.parent.name == 'p0'`
+       → `data_root.parent.parent / 'fish-home'`（= <项目根>/fish-home，裁决 Q3）
+    ③ 兜底：`data_root.parent / 'fish-home'`（= data_root 的**兄弟**目录）
+
+    ## 为什么规则 ② 不是唯一规则
+
+    真实布局是 `<项目根>/p0/data`：`data_root.parent` 是 `p0`，直接用它会得到
+    `p0/fish-home`——违反裁决 Q3（门面必须与 `p0/` 同级）。
+
+    ## 为什么规则 ③ 是 `parent` 而不是 `parent.parent`
+
+    实测 26 个测试文件的临时根都是 `Path(mkdtemp()) / "data"`（如 test_board / test_root_board），
+    `parent.parent` 会写到系统临时目录根上，直接毁掉隔离性；而 `parent` 是
+    `<tmp>/fish-home`，既有 teardown（`rmtree(self.root.parent)`）会把它一起清掉。
+    **"home 落在会被清理的那一层"是规则 ③ 的唯一理由**——下一批改 teardown 时别误改。
+
+    ## 四条断言（写在代码里，不是写在文档里）
+
+    - `home_root` 解析后**不得等于或位于 `data_root` 内**（HOME-6 的第一道闸）；
+    - `home_root` 不得位于任何已登记 vault 内（否则门面会污染知识库）；
+      ↑ 2026-10-26 第二轮追加两条（R14 · 安全 F13）：
+    - **硬禁**：盘根、`%WINDIR%`、`%ProgramFiles%`（含 x86/ProgramW6432）、用户家目录根
+      ——`--home C:\Windows` 会往系统目录写 20 个 md，这是误操作面，不是能力；
+    - **非标准位置需显式开关**：不在项目根那一片的路径必须 `--allow-external-home`。
+      否则"指错一个字符"就换了一个落点，而渲染看起来一切正常。
+    """
+    data_root = Path(data_root)
+    # 先归一成绝对路径再套规则：`Path("data").parent.parent` 还是 `"."`，
+    # 相对路径会让规则②算出 `p0/fish-home`（而不是与 p0 同级的 `fish-home`）。
+    # 这不是"顺手 resolve"，是规则本身要求"看名字"必须在绝对路径上看。
+    base = Path(os.path.realpath(str(data_root)))
+    explicit = None                          # "是否显式指定了 home"（R14 的分支依据）
+    raw = None
+    if override not in (None, ""):
+        raw = Path(override)
+        explicit = "override"
+    elif conn is not None:
+        try:
+            cfg = (get_config(conn, "layout.home_root") or "").strip()
+        except (KeyError, sqlite3.Error):
+            cfg = ""
+        if cfg:
+            raw = Path(cfg)
+            explicit = "config"
+
+    # 规则②/③的"标准落点"始终先算出来：它是 R14 判断"这个位置算不算标准"的基准。
+    if base.name == "data" and base.parent.name == "p0":
+        default_home = base.parent.parent / HOME_DIRNAME
+        project_zone = base.parent.parent
+    else:
+        default_home = base.parent / HOME_DIRNAME
+        project_zone = base.parent
+
+    if raw is None:
+        home = default_home
+    else:
+        # 相对 `--home` 按 **data_root.parent** 解析。
+        # 设计原文写的是"按 data_root 解析"，但那条与本函数末尾"home 不得位于 data_root 内"
+        # 的断言自相矛盾（相对路径必然落进 data_root，于是这个开关永远不可用）。
+        # 以断言为准（HOME-6 是硬约束）；相对路径取项目根侧，得到的仍是"p0 的邻居"那一层。
+        home = raw if raw.is_absolute() else base.parent / raw
+
+    try:
+        home = home.resolve()
+    except OSError:                     # 3.11 的非严格 resolve 仍可能撞 OSError（环/权限）
+        home = Path(os.path.abspath(str(home)))
+    real_data = base
+
+    if home == real_data or _path_inside(home, real_data):
+        raise RuntimeError(
+            f"门面根不能等于或位于 data_root 内：home={home}，data_root={real_data}。"
+            "门面是投影，写进真相根就不再是投影（HOME-6）。")
+
+    if explicit:
+        _guard_home_location(home, project_zone=project_zone,
+                             allow_external=allow_external_home)
+
+    if conn is not None:
+        try:
+            vaults = conn.execute("SELECT name, path FROM kb_vault").fetchall()
+        except sqlite3.Error:
+            vaults = []
+        for vname, vpath in vaults:
+            if vpath and _path_inside(home, Path(vpath)):
+                raise RuntimeError(
+                    f"门面根不能位于已登记的知识库内：home={home}，"
+                    f"vault={vname}（{vpath}）。请换 --home 或调整 layout.home_root。")
+    return home
+
+def _parse_as_of(raw=None):
+    """解析 `--as-of`：接受 `...Z` / `...+08:00` / 无时区（按本地时区补）。
+
+    为什么不让 argparse 直接 `type=datetime.fromisoformat`：它的报错形态与
+    其它用法错误不同（会抛 Traceback），而契约要求"解析失败 → exit 2"。
+    这里统一抛 `ValueError`，由 CLI 层转成 `SystemExit(2)`。
+    """
+    if raw in (None, ""):
+        return datetime.datetime.now().astimezone()
+    s = str(raw).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(s)
+    except ValueError as exc:
+        raise ValueError(
+            f"--as-of 无法解析：{raw!r}（示例：2026-10-26T00:00:00+08:00 或 "
+            "2026-10-26T00:00:00Z）") from exc
+    if dt.tzinfo is None:
+        dt = dt.astimezone()          # 无时区 = 本地时区（不是 UTC，见 iso_local 的说明）
+    return dt
+
+
+def _parse_as_of_arg(raw=None):
+    """CLI 侧包装：解析失败打印一行并 `SystemExit(2)`（用法错误，不是域错误）。"""
+    try:
+        return _parse_as_of(raw)
+    except ValueError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def _as_of_utc_z(dt) -> str:
+    """as-of → 数据库时间戳口径（UTC + `Z`）：用于 `recorded_at <= ?` 这类比较。"""
+    return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ---------------------------------------------------------------- 5.2 门面（B1）
+# HOME-1~9 的判据面全在这里：`render_layout` 只写 `fish-home/**`，
+# `verify_layout` 只读、逐条给 code。两条纪律贯穿本段：
+#   ① 一切时间走 `as_of`（同一 as-of 两次渲染逐字节全等）——不许在产物里写 `now()`；
+#   ② 一切落盘走 `_layout_write`（越界/写进 data_root 直接 raise，而不是"小心一点"）。
+
+# 正文文件名形态（HOME-3 的第一重判据）：`编码__标题.md` 或 `编码.md`。
+# 与 body_relpath 的实际命名同源；复制后改名的情况由 sha256 交集兜住（第二重判据）。
+MEMORY_BODY_NAME_RE = re.compile(
+    r"^[A-Z\u4e00-\u9fff]{2,8}-\d{6}-\d{2,3}(__.+)?\.md$")
+
+_MD_LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+[\"'][^\"']*[\"'])?\)")
+_AS_OF_RE = re.compile(r"as-of\s+([0-9T:\-+\.Z]+)")
+
+
+def layout_paths(home_root) -> dict:
+    """门面路径集合（唯一拼路径的地方，render/verify 共用，避免两处各拼一次）。"""
+    home = Path(home_root)
+    top = {name: home / name for name in LAYOUT_TOP}
+    return {
+        "home": home,
+        "top": top,
+        "status_table": home / LAYOUT_STATUS_TABLE,
+        "memory": top[LAYOUT_MEMORY_DIR],
+        # 注意：索引文件名按 as_of 的月份决定；这里给"当前月"的默认值仅为形状完整，
+        # 真正渲染用 `_memory_index_relpath(as_of)`（as-of 冻结时不能用 now 的月份）。
+        "index_current": top[LAYOUT_MEMORY_DIR] / f"索引-{datetime.datetime.now():%Y-%m}.md",
+        "recent": top[LAYOUT_MEMORY_DIR] / "最近.md",
+        "vaults": top["30-知识库"] / "vaults.md",
+        "system": {
+            "identity": top[LAYOUT_SYSTEM_DIR] / "IDENTITY.md",
+            "capabilities": top[LAYOUT_SYSTEM_DIR] / "CAPABILITIES.md",
+            "manifest": top[LAYOUT_SYSTEM_DIR] / "渲染清单.md",
+        },
+    }
+
+
+def _memory_index_relpath(as_of) -> str:
+    return f"{LAYOUT_MEMORY_DIR}/索引-{as_of.strftime('%Y-%m')}.md"
+
+def _cell(value) -> str:
+    """表格单元格消毒：`|` 会破表、换行会断行；None 显示空（由调用方决定用哪个 `—`）。"""
+    if value is None:
+        return ""
+    return str(value).replace("|", "\\|").replace("\r", " ").replace("\n", " ").strip()
+
+
+def _read_text(path) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
+def _file_fingerprint(path):
+    """`{"bytes","sha256"}`；读不到返回 None（清单里留给调用方决定怎么标）。"""
+    path = Path(path)
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    return {"bytes": len(data), "sha256": kb_sha256_bytes(data)}
+
+
+def _scan_credentials(text: str) -> list:
+    """凭证形态扫描（HOME-8）：返回命中的正则（空列表 = 干净）。"""
+    return [pat for pat in CREDENTIAL_PATTERNS if re.search(pat, text or "")]
+
+
+def _readme_missing_elements(text: str) -> list:
+    """README 四要素缺失清单（空列表 = 全中）。判据只认这四组关键词。"""
+    missing = []
+    for marker in README_SECTION_MARKERS:
+        if not re.search(rf"^##\s*{re.escape(marker)}\s*$", text or "", re.MULTILINE):
+            missing.append(f"## {marker}")
+    if README_NEGATIVE_WORD not in (text or ""):
+        missing.append(f"“{README_NEGATIVE_WORD}”说明")
+    for marker in README_STAMP_MARKERS:
+        if marker not in (text or ""):
+            missing.append(marker)
+    return missing
+
+
+def _layout_only_set(only):
+    """函数层 `only` 归一（CLI 本批不暴露 `--only`，但签名预留，见 §3.4）。"""
+    if only is None:
+        return None
+    items = [only] if isinstance(only, str) else list(only)
+    clean = {str(x).strip().strip("/\\") for x in items if str(x).strip()}
+    if not clean:
+        return None
+    unknown = clean - set(LAYOUT_TOP)
+    if unknown:
+        raise ValueError(f"only 只接受 {LAYOUT_TOP}，收到未知项：{sorted(unknown)}")
+    return clean
+
+
+def _degraded_section(source, exc) -> str:
+    """HOME-9 的固定段：数据源读不到时**明说**，不许渲染空白文件、不许静默 0。"""
+    return "\n".join([
+        f"## 数据源不可用：{source}",
+        "",
+        f"原因：`{_exc_text(exc)}`",
+        "",
+        "本页**不是空文件**：缺失的内容就是读不到的那部分投影，不按 0 处理。",
+        "修法：确认 `data_root/index.sqlite` 可读且表存在，然后重跑 "
+        "`fish layout render --all`。",
+    ])
+
+
+def _layout_write(home_root, relpath, text, *, data_root) -> dict:
+    """门面写盘的**唯一入口**（§6.4 三重保证的代码层）。
+
+    三条断言：① relpath 必须是相对路径、且不含 `..`（不接受盘符/UNC/绝对路径）；
+    ② 解析后必须在 `home_root` 内（`commonpath`，不是 `startswith`）；
+    ③ **必须**不在 `data_root` 内——门面是投影，写回真相根就不再是投影（HOME-6）。
+
+    ## 2026-10-26 第二轮（R16 · 评审 🟡-1）：`data_root` 改成**必有**参数
+
+    它原来是可选参数（`data_root=None`），于是 9 个调用点里有 6 个没传 → 第三条断言
+    在那些路径上**整段跳过**（README / 记忆索引 / 最近 / vaults 投影 / 两处降级分支）。
+    设计说"所有门面写盘都过这条闸"，实现只过了 1/3——现在缺参数会在调用点当场 `TypeError`，
+    "漏传一处"变成"写不出来"，而不是"悄悄少一道闸"。
+    """
+    if data_root is None:
+        raise RuntimeError("门面写盘必须给 data_root（第三条断言需要它，R16）")
+    home = Path(home_root)
+    rel = Path(str(relpath))
+    if rel.is_absolute() or str(relpath).startswith(("\\\\", "//")):
+        raise RuntimeError(f"门面写盘只接受相对路径：{relpath!r}")
+    if any(part == ".." for part in rel.parts):
+        raise RuntimeError(f"门面写盘路径不得含 `..`：{relpath!r}")
+    target = home / rel
+    if not _path_inside(target, home):
+        raise RuntimeError(f"门面写盘越界：{target} 不在 {home} 内")
+    if _path_inside(target, data_root):
+        raise RuntimeError(f"门面写盘禁止写进 data_root：{target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    data = (text if text.endswith("\n") else text + "\n").encode("utf-8")
+    target.write_bytes(data)
+    return {"path": rel.as_posix(), "bytes": len(data),
+            "sha256": kb_sha256_bytes(data)}
+
+
+_LAYOUT_README_SPEC = {
+    "00-首页": {
+        "what": "fish 的门面首页：一句话看懂三库（记忆 / 知识库 / 项目）在哪、自己该去哪里。",
+        "can": "沿本目录进入 `10-项目库` / `20-记忆库` / `30-知识库` / `90-系统`；"
+               "项目状态一屏表在 [项目状态表](../10-项目库/项目状态表.md)。",
+        "cannot": "在这里写正文、改索引、放凭证——门面全是投影，手改会被下一次渲染覆盖。",
+        "who": "`fish layout render --all`（fish 代码）；"
+               "人只改 `data_root` 里的正文与知识库原目录。",
+    },
+    "10-项目库": {
+        "what": "每个项目一个目录：当日看板（`看板-<YYMMDD>.md`）+ 一张项目状态表。",
+        "can": "打开项目目录里的看板看「此刻谁在动哪块」；"
+               "`项目状态表.md` 汇总所有项目的状态 / 最近活跃 / 看板入口 / 主责 AI / 未了事项。",
+        "cannot": "在这里写记忆正文（正文唯一副本在 `data_root/projects/<项目>/`）；"
+                  "看板也不在这里手写——它由 `fish board render` 生成。",
+        "who": "`fish board render`（看板）与 `fish layout render --all`（状态表），都是 fish 代码。",
+    },
+    "20-记忆库": {
+        "what": "记忆的**索引**：本月索引（`索引-YYYY-MM.md`）与最近 30 条（`最近.md`）。"
+                "正文不在这里。",
+        "can": "按编码 / 标题找到正文相对路径，再去 `data_root` 打开正文。",
+        "cannot": "放正文副本——任何 `编码__标题.md` 形态的文件、"
+                  "或与 `data_root/projects/**` 内容相同的 md，都会被 `fish layout verify` 判红。",
+        "who": "`fish layout render --all` 从 `code_index` 渲染；人不需要手改。",
+    },
+    "30-知识库": {
+        "what": "已登记知识库（Obsidian vault）的清单与最近扫描读数。",
+        "can": "看有哪些 vault、路径、读写模式、忽略规则；用 `fish kb ...` 阅读与（显式授权时）写入。",
+        "cannot": "把知识库内容复制进来——vault 原地不动，永不搬进 `fish-home`。",
+        "who": "`fish layout render --all`（读 `kb_vault`）；登记入口是 `fish kb vault add`。",
+    },
+    "90-系统": {
+        "what": "系统页：身份（IDENTITY）、能力（CAPABILITIES）、渲染清单（本目录的产物清单）。",
+        "can": "确认当前是谁在写、哪些能力已接入、这份门面包含哪些文件。",
+        "cannot": "出现任何凭证形态——`fsh_` 前缀、`token` 赋值形态、私钥头都会被"
+                  "渲染期自检与 verify 判红。",
+        "who": "`fish layout render --all`；`渲染清单.md` 是自描述的产物清单。",
+    },
+}
+
+
+def _readme_text(top_name, as_of) -> str:
+    spec = _LAYOUT_README_SPEC[top_name]
+    lines = [
+        f"# {top_name} · README",
+        "",
+        "## 这是什么",
+        "",
+        spec["what"],
+        "",
+        "## 能做什么",
+        "",
+        spec["can"],
+        "",
+        f"**{README_NEGATIVE_WORD}**做的事：{spec['cannot']}",
+        "",
+        "## 谁在写",
+        "",
+        spec["who"],
+        "",
+        f"生成时刻：{iso_local(as_of)}（as-of 冻结时间；同一 as-of 重渲染逐字节一致）",
+        "",
+        "> 手改会被覆盖：本文件由 `fish layout render --all` 生成。要保留你的修改，",
+        "> 请改源数据，或先备份再用 `--force-readme` 覆盖。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def render_readme(home_root, top_name, *, as_of, force=False, data_root):
+    """渲染一个一级目录的 README；已存在且未 `force` → 返回 `None`（不覆盖，裁决 C5）。
+
+    `data_root` 是**必有**参数（R16）：`_layout_write` 的第三条断言靠它，
+    不给就等于让这条写盘路径少一道闸。
+    """
+    if top_name not in LAYOUT_TOP:
+        raise ValueError(f"未知一级目录：{top_name!r}（可用：{', '.join(LAYOUT_TOP)}）")
+    home = Path(home_root)
+    rel = f"{top_name}/README.md"
+    if (home / rel).exists() and not force:
+        return None
+    return _layout_write(home, rel, _readme_text(top_name, as_of), data_root=data_root)
+
+
+def _short_citizen_id(citizen_id) -> str:
+    """公民 id → 可读短 id（R1：归属列优先 display_name，取不到才回落到它）。
+
+    为什么截到 12 再补 `…`：完整 ULID 是 26 字符，一列就把整行宽度吃掉；
+    12 位足够在同一份索引里互相区分（判据按"不同人不同串"断言，不按具体长度）。
+    """
+    s = str(citizen_id or "").strip()
+    if not s:
+        return ""
+    return s if len(s) <= 12 else s[:12] + "…"
+
+
+def render_memory_index(conn, home_root, *, as_of, data_root) -> dict:
+    """`20-记忆库/索引-YYYY-MM.md`：**只列索引，不写正文副本**（HOME-3）。
+
+    ## 2026-10-26 R1 修订（主理人裁决；原因是实测文件 65 KB / 246 行）
+
+    1. **归属列**：完整 citizen ULID → 可读 `display_name`（查不到才回落短 id）。
+       一行 26 字符的 ULID 对人不构成信息，而人读索引时第一个问题就是"这是谁写的"。
+    2. **标题列**：截到 `LAYOUT_INDEX_TITLE_MAX_CHARS`（48）字，超出加 `…`。
+       只截索引，**正文标题一字不改**（真相在 code_index / 正文文件里）。
+    3. **正文相对路径列保留**（HOME-3 要求：它是"去 data_root 找正文"的唯一指针）。
+    4. **文件预算 128 KB**（`LAYOUT_INDEX_MAX_BYTES`）：超出时**按行截断并脚注明示**，
+       不静默丢行。原 PRD §6.3 的 32 KB 是看板口径（看板文件曾因 396 KB 而读不动），
+       索引不进注入上下文、按月分片，故按裁决放宽（偏离记录见 docs/偏离记录-*.md）。
+    """
+    home = Path(home_root)
+    month = as_of.strftime("%Y-%m")
+    rel = _memory_index_relpath(as_of)
+    head = [
+        f"# 记忆索引 · {month}",
+        "",
+        f"> 生成器：`fish layout render --all` ｜ as-of {iso_local(as_of)}",
+        "> 这里**只有索引**：正文唯一副本在 `data_root/projects/**`（最后一列是相对路径）。",
+        "> 按 `code_index.recorded_at` 的月份投影；同月内按编码排序（确定性）。",
+        f"> 文件预算：上限 {LAYOUT_INDEX_MAX_BYTES // 1024} KB（超限按行截断并在页脚明示）；"
+        f"标题列截到 {LAYOUT_INDEX_TITLE_MAX_CHARS} 字。",
+        "",
+    ]
+    try:
+        rows = conn.execute(
+            "SELECT code, title, owner, status, file_path FROM code_index "
+            "WHERE substr(recorded_at,1,7)=? AND recorded_at<=? ORDER BY code",
+            (month, _as_of_utc_z(as_of))).fetchall()
+    except sqlite3.Error as exc:
+        text = "\n".join(head + ["", _degraded_section("code_index", exc), ""])
+        res = _layout_write(home, rel, text, data_root=data_root)
+        res["degraded"] = True
+        return res
+
+    table_head = ["| 编码 | 标题 | 归属 | 状态 | 正文相对路径 |", "|---|---|---|---|---|"]
+    names = {}                     # owner → 显示名（同一份索引里逐行查同一批公民是浪费）
+
+    def _owner_label(owner) -> str:
+        key = str(owner or "").strip()
+        if not key:
+            return "—"
+        if key not in names:
+            try:
+                display = _display_name_of(conn, key)
+            except sqlite3.Error:
+                display = None
+            names[key] = (display or "").strip() or _short_citizen_id(key)
+        return names[key]
+
+    body = []
+    for code, title, owner, status, file_path in rows:
+        body.append(
+            f"| `{_cell(code)}` | {_cell(_clip_chars(title or '', LAYOUT_INDEX_TITLE_MAX_CHARS)) or '—'} "
+            f"| {_cell(_owner_label(owner)) or '—'} "
+            f"| {_cell(status) or '—'} | `{_cell(file_path) or '—'}` |")
+
+    # 预算：按 UTF-8 字节逐行累加，留出脚注与合计行的余量（不写完再截，避免"自以为写全了"）。
+    reserve = 600
+    used = sum(len(x.encode("utf-8")) + 1 for x in head + table_head) + reserve
+    kept = []
+    for line in body:
+        cost = len(line.encode("utf-8")) + 1
+        if used + cost > LAYOUT_INDEX_MAX_BYTES:
+            break
+        kept.append(line)
+        used += cost
+    dropped = len(body) - len(kept)
+
+    lines = head + table_head
+    if kept:
+        lines += kept
+    else:
+        lines.append("| — | （本月 `recorded_at` 无记录，或已达文件预算） | — | — | — |")
+    lines += ["", f"合计：{len(rows)} 条" +
+              (f"（本页显示 {len(kept)} 条，余 {dropped} 条未列出——已达 "
+               f"{LAYOUT_INDEX_MAX_BYTES // 1024} KB 上限）" if dropped else "。")]
+    if dropped:
+        lines += [
+            "",
+            f"> 截断说明：本页按 {LAYOUT_INDEX_MAX_BYTES // 1024} KB 硬上限截断，"
+            f"省略 {dropped} 条（不静默丢：原始 246 行规模的月份也会触发这里）。",
+            "> 看其余条目：`fish recall <关键词>`，或按编码在 `data_root/projects/**` 找正文。",
+        ]
+    lines += [""]
+    return _layout_write(home, rel, "\n".join(lines), data_root=data_root)
+
+
+def render_memory_recent(conn, home_root, *, as_of, limit=30, data_root) -> dict:
+    """`20-记忆库/最近.md`：as-of 之前最近 N 条（默认 30），同样只列索引。"""
+    home = Path(home_root)
+    rel = f"{LAYOUT_MEMORY_DIR}/最近.md"
+    head = [
+        f"# 最近记忆 · {limit} 条",
+        "",
+        f"> 生成器：`fish layout render --all` ｜ as-of {iso_local(as_of)}",
+        "> 只列索引；正文在 `data_root/projects/**`，本页不含任何正文副本。",
+        "",
+    ]
+    try:
+        rows = conn.execute(
+            "SELECT recorded_at, code, title, owner, file_path FROM code_index "
+            "WHERE recorded_at<=? ORDER BY recorded_at DESC, code DESC LIMIT ?",
+            (_as_of_utc_z(as_of), int(limit))).fetchall()
+    except sqlite3.Error as exc:
+        text = "\n".join(head + ["", _degraded_section("code_index", exc), ""])
+        res = _layout_write(home, rel, text, data_root=data_root)
+        res["degraded"] = True
+        return res
+    lines = head + ["| 记录时间 | 编码 | 标题 | 归属 | 正文相对路径 |",
+                    "|---|---|---|---|---|"]
+    if rows:
+        for recorded_at, code, title, owner, file_path in rows:
+            lines.append(
+                f"| {_cell(recorded_at) or '—'} | `{_cell(code)}` | {_cell(title) or '—'} "
+                f"| {_cell(owner) or '—'} | `{_cell(file_path) or '—'}` |")
+    else:
+        lines.append("| — | — | （还没有记忆） | — | — |")
+    lines += ["", f"合计：{len(rows)} 条（上限 {limit}）。", ""]
+    return _layout_write(home, rel, "\n".join(lines), data_root=data_root)
+
+
+def _vaults_projection(conn, *, as_of) -> dict:
+    """`30-知识库/vaults.md` 的文本投影（`kb_vault` 读不到 → 固定降级段）。"""
+    head = [
+        "# 知识库登记（vaults）",
+        "",
+        f"> 生成器：`fish layout render --all` ｜ as-of {iso_local(as_of)}",
+        "> vault 原地不动：这里只有登记信息与最近扫描读数，没有任何内容副本。",
+        "",
+    ]
+    try:
+        rows = conn.execute(
+            "SELECT name, path, mode, ignore_globs, last_scan_at, last_scan_files, "
+            "last_scan_notes, last_scan_bytes FROM kb_vault "
+            "WHERE status='active' ORDER BY is_default DESC, name").fetchall()
+    except sqlite3.Error as exc:
+        return {"rows": [], "degraded": True,
+                "text": "\n".join(head + ["", _degraded_section("kb_vault", exc), ""])}
+    lines = head + ["| 名字 | 路径（原样） | 模式 | 忽略规则 | 最近扫描 | 文件 / 笔记 / 字节 |",
+                    "|---|---|---|---|---|---|"]
+    if rows:
+        for name, path, mode, ig, scanned_at, files, notes, nbytes in rows:
+            lines.append(
+                f"| {_cell(name)} | `{_cell(path)}` | {_cell(mode)} | `{_cell(ig)}` "
+                f"| {_cell(scanned_at) or '—（未扫描）'} "
+                f"| {files if files is not None else '—'} / "
+                f"{notes if notes is not None else '—'} / "
+                f"{nbytes if nbytes is not None else '—'} |")
+    else:
+        lines.append("| — | （还没有登记任何知识库） | — | — | — | — |")
+    lines += ["", "登记入口：`fish kb vault add --name <名字> --path <绝对路径> --mode ro|rw`。", ""]
+    return {"rows": [dict(name=r[0], path=r[1], mode=r[2], ignore_globs=r[3],
+                          last_scan_at=r[4], files=r[5], notes=r[6], bytes=r[7])
+                     for r in rows],
+            "degraded": False, "text": "\n".join(lines)}
+
+
+def _render_vaults(conn, home_root, *, as_of, data_root) -> dict:
+    proj = _vaults_projection(conn, as_of=as_of)
+    res = _layout_write(home_root, "30-知识库/vaults.md", proj["text"],
+                        data_root=data_root)
+    if proj["degraded"]:
+        res["degraded"] = True
+    return res
+
+
+def _layout_owner_and_counts(conn):
+    """IDENTITY 页的数据：系统主人 + 规模读数。返回 `(owner, counts, error)`。
+
+    **主人走既有读点**（`resolve_owner` + `_display_name_of`），不在这里新写一条
+    `SELECT ... FROM citizens`：`test_identity_p1a::test_G_existing_queries_untouched`
+    规定"任何**新增**函数里的 citizens 语句必须显式声明"，而本批不允许改那个测试文件。
+    复用既有函数既满足纪律，也避免门面与 whoami 对"谁是主人"给出两种答案。
+    """
+    owner = {"display_name": None, "citizen_id": None}
+    counts = {}
+    try:
+        cid = resolve_owner(conn) or ""
+        owner = {"citizen_id": cid or None,
+                 "display_name": (_display_name_of(conn, cid) if cid else None)}
+        for key, sql in (
+                ("memories", "SELECT COUNT(*) FROM code_index WHERE status='active'"),
+                ("boards", "SELECT COUNT(*) FROM boards"),
+                ("vaults", "SELECT COUNT(*) FROM kb_vault WHERE status='active'")):
+            counts[key] = conn.execute(sql).fetchone()[0]
+    except (sqlite3.Error, KeyError) as exc:
+        return owner, counts, exc
+    return owner, counts, None
+
+def _system_page_lines(kind, *, as_of, conn, data_root, inventory, home_root):
+    """三张系统页的正文（纯函数：同 as-of + 同数据 → 同字节）。"""
+    stamp = [f"> 生成器：`fish layout render --all` ｜ as-of {iso_local(as_of)}", ""]
+    if kind == "identity":
+        owner, counts, err = _layout_owner_and_counts(conn)
+        lines = [
+            "# IDENTITY · 系统身份",
+            "",
+            *stamp,
+            "## 这是什么",
+            "",
+            "这套 fish 系统的身份与规模，供新来的 AI 在 30 秒内确认"
+            "「我在哪、谁在写、这里有多少东西」。",
+            "",
+        ]
+        if err is not None:
+            lines += [_degraded_section("身份 / 规模读数", err), ""]
+        else:
+            lines += [
+                "## 系统主人",
+                "",
+                f"- 显示名：{_cell(owner['display_name']) or '—（未登记 is_owner）'}",
+                f"- citizen_id：`{_cell(owner['citizen_id']) or '—'}`",
+                "",
+                "## 规模（只读投影）",
+                "",
+                "| 项 | 数量 |",
+                "|---|---|",
+                f"| 记忆（active） | {counts.get('memories', '—')} |",
+                f"| 看板 | {counts.get('boards', '—')} |",
+                f"| 已登记知识库 | {counts.get('vaults', '—')} |",
+                "",
+            ]
+        lines += [
+            "## 谁在写",
+            "",
+            "`fish layout render --all`。本页**不含任何凭证**：凭证只存在人的凭证管理文档"
+            "与本机环境变量里，门面产物永远不落它。",
+            "",
+        ]
+        return lines
+    if kind == "capabilities":
+        kb_ready = _kb_commands_ready()
+        lines = [
+            "# CAPABILITIES · 能力清单",
+            "",
+            *stamp,
+            "## 这是什么",
+            "",
+            "**当前构建**已接入能力的导航页。判据以 CLI `--help` 与测试为准，本页只做索引，",
+            "不承诺未接入的能力。",
+            "",
+            "## 记忆与检索",
+            "",
+            "- `fish remember` / `recall` / `neighbors` / `inject`：事件流 + 投影 + 注入包。",
+            "- 真相：`data_root/index.sqlite`；正文：`data_root/projects/**`（唯一副本）。",
+            "",
+            "## 看板",
+            "",
+            "- `fish board checkin` / `post` / `render` / `close` / `sweep`："
+            "落点已迁到 `fish-home/`（裁决 C3）。",
+            "- 真相在 `boards` / `presence` / `board_posts`；文件是投影，删了可重建。",
+            "",
+            "## 门面",
+            "",
+            "- `fish layout render --all` / `fish layout verify`：本目录的来源与体检。",
+            "",
+            "## 知识库",
+            "",
+        ]
+        if kb_ready:
+            lines += ["- `fish kb vault` / `tree` / `open` / `search` / `write` / `rollback`："
+                      "按需扫描（不建索引），写入有备份与回滚。",
+                      "- 边界：知识库内容不进 `memory_fts` / `recall` / `inject`（KB-10）。"]
+        else:
+            lines += ["- 读写命令**尚未接入**本构建：当前只有 `kb_vault` / `kb_access` 表结构",
+                      "  （`fish kb vault add` 等命令会明确报 `尚未实现` 并退出 2）。"]
+        lines += [
+            "",
+            "## 不能做什么（边界）",
+            "",
+            "- 不把知识库内容复制进门面；不把门面写回 `data_root`；不在任何页写凭证。",
+            "- 不把读到的内容自动写成记忆（KB-10 的永久边界）。",
+            "",
+            "## 谁在写",
+            "",
+            "`fish layout render --all`（fish 代码）。",
+            "",
+        ]
+        return lines
+    raise ValueError(f"未知系统页：{kind!r}")
+
+
+def render_system_pages(conn, data_root, home_root, *, as_of, written) -> list:
+    """渲染 `90-系统/` 三页；**渲染后立刻跑凭证自检**，命中则不落盘（HOME-8）。
+
+    `written` 是本次渲染的产物清单（含被跳过覆盖的 README），`渲染清单.md` 用它
+    作"这份门面包含哪些文件"的依据。清单按 `LAYOUT_TOP` 顺序 + 路径排序，
+    与"本次是首次渲染还是二次渲染"无关——这是同一 as-of 逐字节全等的前提。
+
+    返回：成功落盘的 `{"path","bytes","sha256"}`；被凭证自检拦下的
+    `{"path","blocked":"credential_like","bytes":0,"sha256":""}`（由调用方记 degraded）。
+    """
+    home = Path(home_root)
+    paths = layout_paths(home)
+    results = []
+
+    def _emit(kind, target):
+        lines = _system_page_lines(kind, as_of=as_of, conn=conn, data_root=data_root,
+                                   inventory=written, home_root=home)
+        text = "\n".join(lines)
+        rel = target.relative_to(home).as_posix()
+        hits = _scan_credentials(text)
+        if hits:
+            return {"path": rel, "blocked": "credential_like",
+                    "bytes": 0, "sha256": "", "patterns": hits}
+        return _layout_write(home, rel, text, data_root=data_root)
+
+    results.append(_emit("identity", paths["system"]["identity"]))
+    results.append(_emit("capabilities", paths["system"]["capabilities"]))
+
+    # 渲染清单：列出"这份门面包含的全部产物"，而不是"本次新写了哪些"。
+    inventory = []
+    seen = set()
+    for item in list(written) + list(results):
+        rel = str((item or {}).get("path") or "")
+        if rel and rel not in seen:
+            seen.add(rel)
+            inventory.append(rel)
+
+    def _order(rel):
+        top = rel.split("/")[0]
+        try:
+            return (LAYOUT_TOP.index(top), rel)
+        except ValueError:
+            return (len(LAYOUT_TOP), rel)
+
+    lines = [
+        "# 渲染清单（manifest）",
+        "",
+        f"> 生成器：`fish layout render --all` ｜ as-of {iso_local(as_of)}",
+        "> 本页列出这份门面的全部产物（相对 `fish-home/` 的路径 / 字节 / sha256 前 12）。",
+        "> 全部只写 `fish-home/**`；`data_root` 零写入（HOME-6）。",
+        "> 本页不列自己（自指的 hash 不可判）；README 已存在时不会被覆盖，但仍列在清单里。",
+        "",
+        "| 相对路径 | 字节 | sha256 前 12 |",
+        "|---|---|---|",
+    ]
+    for rel in sorted(inventory, key=_order):
+        fp = _file_fingerprint(home / rel)
+        if fp is None:
+            lines.append(f"| `{rel}` | — | —（文件缺失） |")
+        else:
+            lines.append(f"| `{rel}` | {fp['bytes']} | `{fp['sha256'][:12]}` |")
+    lines += ["", f"合计：{len(inventory)} 个产物。", ""]
+    target = paths["system"]["manifest"]
+    text = "\n".join(lines)
+    hits = _scan_credentials(text)
+    if hits:
+        results.append({"path": target.relative_to(home).as_posix(),
+                        "blocked": "credential_like", "bytes": 0, "sha256": "",
+                        "patterns": hits})
+    else:
+        results.append(_layout_write(home, target.relative_to(home).as_posix(), text,
+                                     data_root=data_root))
+    return results
+
+
+def render_layout(conn, data_root, *, as_of, home_root=None, only=None,
+                  force_readme=False, allow_external_home=False) -> dict:
+    """渲染整座门面（§4.6）。返回 §3.4 的形状 + `failed`（写盘失败逐条列，供 exit 1）。
+
+    七类产物：五目录骨架、五个 README、记忆索引 / 最近、知识库登记投影、
+    系统三页、项目状态表（B2 接入前是诚实占位页）、渲染清单。
+    **看板不在本函数的职责里**：看板由 `board_render` 写，且它自带 `now()` 语义
+    （在场/闲置判定），混进来会让"同一 as-of 两次渲染字节全等"当场失效（R8）。
+    """
+    data_root = Path(data_root)
+    home = resolve_home_root(data_root, override=home_root, conn=conn,
+                             allow_external_home=allow_external_home)
+    only_set = _layout_only_set(only)
+    written, skipped, degraded, failed = [], [], [], []
+    # R17：未知 scope 不再打断整条 migrate 链——跳过该行并把原因记进 degraded
+    changed_boards = _ensure_boards_home_paths(conn, degraded=degraded)
+
+    def want(rel) -> bool:
+        return only_set is None or rel.split("/")[0] in only_set
+
+    def attempt(rel, fn):
+        """单步渲染：失败按"写盘失败 / 数据源降级"两档归类（R20 · 评审 🟡-5）。
+
+        为什么不是只捕 `OSError`：原实现除 `OSError` 外的异常会**从 render_layout 逃出**，
+        与设计 §4.6「异常按源降级而不中断」相反。现在：
+          · `OSError` / `sqlite3.Error` → `failed`（这一步真的没写成，exit 1）；
+          · 其余异常 → `degraded`（该源降级，其余产物照写）；
+          · 子渲染器自己标了 `degraded=True` → 汇总进 `degraded`（CLI 要能打印"降级"行）。
+        """
+        try:
+            res = fn()
+        except (OSError, sqlite3.Error) as exc:
+            failed.append({"path": rel, "reason": _exc_text(exc)})
+            return None
+        except Exception as exc:            # noqa: BLE001 —— 设计 §4.6：按源降级，不中断
+            degraded.append({"source": rel, "reason": _exc_text(exc)})
+            return None
+        if res is not None:
+            written.append(res)
+            if res.get("degraded") and res.get("path"):
+                degraded.append({"source": res["path"],
+                                 "reason": "数据源不可用（文件里已写明降级段）"})
+        return res
+
+    # ⑦ 目录骨架：五个一级目录（先建，后面每一步都不用自己判断父目录）
+    for name in LAYOUT_TOP:
+        try:
+            (home / name).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            failed.append({"path": name, "reason": _exc_text(exc)})
+    # 10-项目库/<prefix>/ 骨架：只 mkdir，不渲染看板（看板有自己的命令）
+    try:
+        prefixes = [r[0] for r in conn.execute(
+            "SELECT prefix FROM code_registry ORDER BY prefix")]
+    except sqlite3.Error as exc:
+        prefixes = []
+        degraded.append({"source": "code_registry", "reason": _exc_text(exc)})
+    for prefix in prefixes:
+        name = str(prefix or "")
+        if not name or name in (".", "..") or "/" in name or "\\" in name:
+            continue
+        try:
+            (home / "10-项目库" / name).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            failed.append({"path": f"10-项目库/{name}", "reason": _exc_text(exc)})
+
+    # ① 项目状态表（B2 的唯一产物入口。T03 起由 render_project_status 接管：
+    #    六列 + 每格来源 + 三种 `—` + 脚注 + retired 折叠区）
+    if want(LAYOUT_STATUS_TABLE):
+        attempt(LAYOUT_STATUS_TABLE,
+                lambda: render_project_status(conn, data_root, home, as_of=as_of))
+
+    # ②③ 记忆索引 / 最近（HOME-3：只有索引，没有正文副本）
+    if want(f"{LAYOUT_MEMORY_DIR}/"):
+        attempt(_memory_index_relpath(as_of),
+                lambda: render_memory_index(conn, home, as_of=as_of,
+                                            data_root=data_root))
+        attempt(f"{LAYOUT_MEMORY_DIR}/最近.md",
+                lambda: render_memory_recent(conn, home, as_of=as_of,
+                                             data_root=data_root))
+
+    # ④ 知识库登记投影
+    if want("30-知识库/"):
+        attempt("30-知识库/vaults.md",
+                lambda: _render_vaults(conn, home, as_of=as_of,
+                                       data_root=data_root))
+
+    # ⑥ 五个一级 README（存在且未 force_readme → 跳过，裁决 C5）
+    for name in LAYOUT_TOP:
+        rel = f"{name}/README.md"
+        if not want(rel):
+            continue
+        try:
+            res = render_readme(home, name, as_of=as_of, force=force_readme,
+                                data_root=data_root)
+        except (OSError, sqlite3.Error) as exc:
+            failed.append({"path": rel, "reason": _exc_text(exc)})
+            continue
+        if res is None:
+            skipped.append({"path": rel, "reason": "已存在（--force-readme 才覆盖）"})
+        else:
+            written.append(res)
+
+    # ⑤ 90-系统 三页（凭证自检在 render_system_pages 内做）
+    if want(f"{LAYOUT_SYSTEM_DIR}/"):
+        inventory = list(written) + list(skipped)
+        try:
+            sys_results = render_system_pages(conn, data_root, home, as_of=as_of,
+                                              written=inventory)
+        except (OSError, sqlite3.Error) as exc:
+            failed.append({"path": LAYOUT_SYSTEM_DIR, "reason": _exc_text(exc)})
+            sys_results = []
+        for res in sys_results:
+            if res.get("blocked"):
+                degraded.append({
+                    "source": f"{LAYOUT_SYSTEM_DIR}/{Path(res['path']).name}",
+                    "reason": "命中凭证形态（" + "、".join(res.get("patterns") or []) +
+                              "），已拒绝落盘（HOME-8）"})
+            else:
+                written.append(res)
+
+    return {"as_of": iso_local(as_of), "home_root": str(home),
+            "written": written, "skipped": skipped, "degraded": degraded,
+            "failed": failed, "changed_boards": changed_boards}
+
+
+def _markdown_links(text: str) -> list:
+    """提取 markdown 链接目标；跳过外链 / 锚点 / mailto（HOME-5 的链接检查用）。"""
+    out = []
+    for raw in _MD_LINK_RE.findall(text or ""):
+        target = raw.strip().strip("<>").strip()
+        if not target:
+            continue
+        if target.lower().startswith(("http://", "https://", "mailto:", "#")):
+            continue
+        out.append(target)
+    return out
+
+
+def _is_board_link(target) -> bool:
+    """链接目标是不是一块看板（`看板-<pk>.md` / 分片 `看板-<pk>-<n>.md`）。
+
+    状态表里的这类链接缺失属"今天没开工"，是 warning 不是 error——
+    与普通文档链接（首页链接、正文链接）分级不同。
+    """
+    return Path(str(target).split("#", 1)[0]).name.startswith("看板-")
+
+
+def _link_target_ok(src_file, target):
+    """按"相对当前文件"解析链接；返回 `(ok, 说明)`。"""
+    path_part = target.split("#", 1)[0]
+    if not path_part:
+        return True, "锚点"
+    candidate = Path(path_part.replace("/", os.sep))
+    if candidate.is_absolute():
+        return False, "绝对路径链接不可移植"
+    resolved = (Path(src_file).parent / candidate)
+    if resolved.exists():
+        return True, "ok"
+    return False, "目标不存在"
+
+
+def _iter_home_files(home):
+    """遍历门面文件，返回 `[(相对路径, 绝对路径)]`（排序固定：确定性）。"""
+    out = []
+    for dirpath, dirnames, filenames in os.walk(home):
+        dirnames.sort()
+        for name in sorted(filenames):
+            p = Path(dirpath) / name
+            out.append((p.relative_to(home), p))
+    return out
+
+
+def _body_hashes(data_root) -> dict:
+    """`data_root/projects/**/*.md` 的 sha256 → 相对路径（HOME-3 的第二重判据）。"""
+    out = {}
+    base = Path(data_root) / "projects"
+    if not base.is_dir():
+        return out
+    for p in sorted(base.rglob("*.md")):
+        try:
+            out.setdefault(kb_sha256_file(p), p.relative_to(data_root).as_posix())
+        except OSError:
+            continue
+    return out
+
+
+def verify_layout(conn, data_root, *, home_root=None,
+                  allow_external_home=False) -> dict:
+    """门面体检（§4.7）。**只读**：不建目录、不改文件、不修数据。
+
+    11 类检查各有独立 code（判据认 code 不认文案）：
+      top_dir_missing / top_dir_extra / readme_missing / readme_element_missing /
+      depth_exceeded / orphan_file / link_broken / memory_body_copy / credential_like /
+      degraded_source / board_entry_missing / stale_render（后四类中前两类为 error、
+      后两类为 warning；`stale_render` 与看板/事件时间有关，属 warning）。
+    """
+    data_root = Path(data_root)
+    home = resolve_home_root(data_root, override=home_root, conn=conn,
+                             allow_external_home=allow_external_home)
+    items = []
+    seen = set()
+
+    def add(level, code, path, message, fix):
+        key = (level, code, str(path))
+        if key in seen:
+            return
+        seen.add(key)
+        items.append({"level": level, "code": code, "path": str(path),
+                      "message": message, "fix": fix})
+
+    if not home.is_dir():
+        for name in LAYOUT_TOP:
+            add("error", "top_dir_missing", name,
+                "门面根不存在（或该一级目录缺失）",
+                "运行 `fish layout render --all` 重建门面")
+        return _verify_result(home, items)
+
+    # ① 一级目录集合（缺失 / 多余 / 越界条目）
+    for name in LAYOUT_TOP:
+        if not (home / name).is_dir():
+            add("error", "top_dir_missing", name, "一级目录缺失",
+                "运行 `fish layout render --all`（缺目录不会自动建）")
+    for entry in sorted(home.iterdir(), key=lambda p: p.name):
+        if entry.name in LAYOUT_TOP:
+            continue
+        if entry.is_dir():
+            add("error", "top_dir_extra", entry.name,
+                "多余的一级目录（只允许五个一级目录）",
+                "删掉它，或把它移进五个目录之一")
+        else:
+            add("error", "orphan_file", entry.name,
+                "一级目录下不允许直接放文件",
+                "把文件移进五个一级目录之一，或删掉")
+
+    # ② README 存在性 + 四要素
+    for name in LAYOUT_TOP:
+        rel = f"{name}/README.md"
+        if not (home / name).is_dir():
+            continue
+        p = home / rel
+        if not p.exists():
+            add("error", "readme_missing", rel, "该一级目录没有 README.md",
+                "重新渲染；若你删过，`fish layout render --all` 会补回")
+            continue
+        missing = _readme_missing_elements(_read_text(p))
+        if missing:
+            add("error", "readme_element_missing", rel,
+                "README 缺要素：" + "、".join(missing),
+                "补齐四要素：`## 这是什么` / `## 能做什么`（含“不能”）/ `## 谁在写` / "
+                "`生成时刻：` + `手改会被覆盖`")
+
+    files = _iter_home_files(home)
+
+    # ③ 深度（>3 层即 error；`10-项目库/<项目>/看板-261026.md` 恰好 3 层，是上限不是超限）
+    for rel, _p in files:
+        if len(rel.parts) > LAYOUT_MAX_DEPTH:
+            add("error", "depth_exceeded", rel.as_posix(),
+                f"文件深度 {len(rel.parts)} > {LAYOUT_MAX_DEPTH}",
+                "把文件上移；分支看板用一级 `_分支-<名>`，不要用 `_分支/<名>` 两级")
+
+    # ④ 首页 / 状态表的相对链接
+    # 状态表里的**看板入口**单独走 ⑨ 的 warning（board_entry_missing）：
+    # "今天没人开工"是合法状态，不该把整份体检升级成 error。其余链接仍按 error 判。
+    for rel in ("00-首页/README.md", LAYOUT_STATUS_TABLE):
+        p = home / rel
+        if not p.exists():
+            continue
+        for target in _markdown_links(_read_text(p)):
+            if rel == LAYOUT_STATUS_TABLE and _is_board_link(target):
+                continue
+            ok, why = _link_target_ok(p, target)
+            if not ok:
+                add("error", "link_broken", rel,
+                    f"链接目标不存在：{target}（{why}）",
+                    "改链接，或先把目标页渲染出来")
+        if rel == LAYOUT_STATUS_TABLE:
+            # 状态表里的看板入口：今天没人开工是合法状态 → 只记 warning
+            for target in _markdown_links(_read_text(p)):
+                if not _is_board_link(target):
+                    continue
+                ok, _why = _link_target_ok(p, target)
+                if not ok:
+                    add("warning", "board_entry_missing", rel,
+                        f"看板入口目标不存在：{target}",
+                        "当天没开工属正常；否则跑 `fish board render --all`")
+
+    # ⑤ 20-记忆库：**双重判据**（正文命名形态 + sha256 交集）
+    mem_dir = home / LAYOUT_MEMORY_DIR
+    if mem_dir.is_dir():
+        body_hashes = _body_hashes(data_root)
+        for p in sorted(mem_dir.rglob("*.md")):
+            rel = p.relative_to(home).as_posix()
+            if MEMORY_BODY_NAME_RE.match(p.name):
+                add("error", "memory_body_copy", rel,
+                    "文件名是正文形态（`编码__标题.md`）——门面禁止正文副本",
+                    "删掉它；正文只在 `data_root/projects/**`")
+                continue
+            try:
+                digest = kb_sha256_file(p)
+            except OSError:
+                continue
+            if digest in body_hashes:
+                add("error", "memory_body_copy", rel,
+                    f"内容与正文 `{body_hashes[digest]}` 完全相同（sha256 交集）",
+                    "删掉副本；要引用正文请用索引里的相对路径")
+
+    # ⑥ 90-系统：凭证形态扫描（HOME-8）
+    sys_dir = home / LAYOUT_SYSTEM_DIR
+    if sys_dir.is_dir():
+        for p in sorted(sys_dir.rglob("*")):
+            if not p.is_file():
+                continue
+            hits = _scan_credentials(_read_text(p))
+            if hits:
+                add("error", "credential_like", p.relative_to(home).as_posix(),
+                    "命中凭证形态：" + "、".join(hits),
+                    "删掉凭证；凭证只放人的凭证文档与环境变量，永不进门面")
+
+    # ⑦ 数据源降级段（HOME-9：降级要显式，不能看起来像"没有数据"）
+    for rel, p in files:
+        if p.suffix.lower() not in (".md", ".txt"):
+            continue
+        if "数据源不可用：" in _read_text(p):
+            add("warning", "degraded_source", rel.as_posix(),
+                "产物含『数据源不可用』段（是读不到，不是 0）",
+                "修好数据源后重跑 `fish layout render --all`")
+
+    # ⑧ as-of 新鲜度（产物早于数据最后变更 / 今天已有看板但门面还是旧的）
+    as_of_values = []
+    for rel, p in files:
+        if p.suffix.lower() != ".md":
+            continue
+        m = _AS_OF_RE.search(_read_text(p))
+        if m:
+            try:
+                as_of_values.append((rel, _parse_as_of(m.group(1))))
+            except ValueError:
+                continue
+    if as_of_values:
+        newest_rel, newest_dt = max(as_of_values, key=lambda t: t[1])
+        try:
+            row = conn.execute("SELECT MAX(ts) FROM events").fetchone()
+            max_events = row[0] if row else None
+        except sqlite3.Error as exc:
+            max_events = None
+            add("warning", "degraded_source", "(db)",
+                f"读 `events.ts` 失败：{_exc_text(exc)}",
+                "确认 `data_root/index.sqlite` 可读")
+        if max_events:
+            try:
+                events_dt = datetime.datetime.strptime(
+                    max_events, "%Y-%m-%dT%H:%M:%SZ").replace(
+                        tzinfo=datetime.timezone.utc)
+                if newest_dt < events_dt:
+                    add("warning", "stale_render", newest_rel,
+                        f"门面 as-of（{iso_local(newest_dt)}）早于最后一件事（{max_events}）",
+                        "重跑 `fish layout render --all`（不带 --as-of）")
+            except ValueError:
+                pass
+        today_key = datetime.datetime.now().strftime("%y%m%d")
+        board_today = [rel for rel, p in files if p.name == f"看板-{today_key}.md"]
+        if board_today and newest_dt.date() < datetime.date.today():
+            add("warning", "stale_render", board_today[0],
+                "今天已有看板文件，但门面的 as-of 早于今天",
+                "重跑 `fish layout render --all`（不带 --as-of）")
+
+    return _verify_result(home, items)
+
+
+def _verify_result(home, items) -> dict:
+    errors = sum(1 for it in items if it["level"] == "error")
+    warnings = sum(1 for it in items if it["level"] == "warning")
+    return {"home_root": str(home), "as_of": iso_local(),
+            "errors": errors, "warnings": warnings, "items": items}
+
+
+def cmd_layout(args):
+    """B1 门面 CLI：`render --all` / `verify`（§3.2）。
+
+    退出码：0 成功（含降级段）/ 1 域错误（verify 有 error、渲染有目录写失败）/ 2 用法错误。
+    **新命令族用 `raise SystemExit(code)` 表达非零**——`main()` 丢弃返回值（既有缺陷），
+    `return 1` 在这里等于退出 0（§3.1 / R9）。
+    """
+    action = getattr(args, "layout_action", None)
+    conn = connect(Path(args.root))
+    conn.executescript(SCHEMA)
+    migrate(conn)
+    data_root = Path(args.root)
+    try:
+        if action == "render":
+            if not getattr(args, "render_all", False):
+                print("错误：`layout render` 必须带 `--all`（本批只支持全量渲染；"
+                      "`--only` 是 P2）。", file=sys.stderr)
+                raise SystemExit(2)
+            as_of = _parse_as_of_arg(getattr(args, "as_of", None))
+            try:
+                res = render_layout(conn, data_root, as_of=as_of,
+                                    home_root=getattr(args, "home", None),
+                                    force_readme=getattr(args, "force_readme", False),
+                                    allow_external_home=bool(
+                                        getattr(args, "allow_external_home", False)))
+            except RuntimeError as exc:          # 门面根非法 / 写盘越界
+                print(f"错误：{exc}", file=sys.stderr)
+                raise SystemExit(1)
+            for it in res["written"]:
+                print(f"{it['path']}\t{it['bytes']}\t{it['sha256'][:12]}")
+            for it in res["skipped"]:
+                print(f"跳过\t{it['path']}\t{it['reason']}")
+            for it in res["degraded"]:
+                print(f"降级\t{it['source']}\t{it['reason']}")
+            for it in res["failed"]:
+                print(f"失败\t{it['path']}\t{it['reason']}", file=sys.stderr)
+            if res["changed_boards"]:
+                print(f"看板落点已归一 {len(res['changed_boards'])} 行（boards.path）")
+            print(f"改了 {len(res['written'])} 个文件 / 跳过 {len(res['skipped'])} 个已存在的 README")
+            print(f"门面根：{res['home_root']}")
+            print(f"重建命令：fish layout render --all --as-of {res['as_of']}")
+            if res["failed"]:
+                raise SystemExit(1)
+            return 0
+
+        if action == "verify":
+            try:
+                res = verify_layout(conn, data_root,
+                                    home_root=getattr(args, "home", None),
+                                    allow_external_home=bool(
+                                        getattr(args, "allow_external_home", False)))
+            except RuntimeError as exc:
+                print(f"错误：{exc}", file=sys.stderr)
+                raise SystemExit(1)
+            if getattr(args, "json", False):
+                print(json.dumps(res, ensure_ascii=False, indent=2))
+            else:
+                for it in res["items"]:
+                    print(f"[{it['level']}] {it['code']} {it['path']} —— "
+                          f"{it['message']}；修法：{it['fix']}")
+                print(f"共 {res['errors']} 条 error / {res['warnings']} 条 warning")
+            if res["errors"]:
+                raise SystemExit(1)
+            return 0
+
+        print(f"错误：未知 layout 子命令：{action!r}", file=sys.stderr)
+        raise SystemExit(2)
+    finally:
+        conn.close()
+
+
+
+# ---------------------------------------------------------------- 5.3 项目状态表（B2）
+# 依据：架构设计 §4.8 + 裁决 Q4/Q5/Q6/Q7。这一段的全部纪律可以压成三句：
+#   ① **每一格都带来源**（`sources`），来源进 `--json`、进人读脚注——"为什么是 —" 必须能解释；
+#   ② **一切时间走 `as_of`**（窗口、当日看板、最近 7 天），否则"同一 as-of 两次渲染全等"不成立；
+#   ③ **读不到就说读不到**（`—（数据源不可用）` + degraded 段），绝不用 0 / 空串冒充。
+# 数据源共五张表：code_registry（有哪些项目）/ code_index（最近活跃、未闭合、回退 owner）/
+# boards（看板入口）/ project_stints（开档期 → 主责 AI）。
+
+
+def _registry_rows(conn) -> list:
+    """`code_registry` 的行（项目清单的**唯一**来源，裁决 Q6）。
+
+    排序刻意不是按字母：人看状态表的第一眼要的是"还在跑的"，其次是"做完了"，最后是
+    "退役的"。`status` 的未知取值排最后（不隐藏，脚注会说明"未登记状态"）。
+    """
+    rows = conn.execute(
+        "SELECT prefix, namespace, status FROM code_registry "
+        "ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'closed' THEN 1 "
+        "WHEN 'retired' THEN 2 ELSE 3 END, prefix").fetchall()
+    return [{"prefix": r[0], "namespace": r[1], "status": r[2]} for r in rows]
+
+
+def _pst_local_date(ts, tzinfo):
+    """"UTC+Z 时间戳" → `as-of` 时区里的 `YYYY-MM-DD`。
+
+    为什么不直接 `str(ts)[:10]`：数据库时间戳是 UTC，`2026-10-25T00:00:00+08:00`
+    落库是 `2026-10-24T16:00:00Z`——截前 10 位会把它显示成前一天。人读的"最近活跃"
+    必须与 as-of 行用同一个时区，否则同一份表里两处时间互相打脸。
+    """
+    raw = str(ts or "")
+    try:
+        dt = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw[:10]
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(tzinfo).strftime("%Y-%m-%d")
+
+
+def _last_active_of(conn, prefix, *, as_of=None):
+    """项目的"最近活跃"：`max(code_index.recorded_at) WHERE project=?` → `(YYYY-MM-DD, 来源)`。
+
+    为什么加 `recorded_at <= as_of`：as-of 冻结的本意是"在那一刻看到的世界"。
+    少了这个上界，冻结一个过去时间点却能看到之后写的记忆——幂等判据仍绿，
+    但"历史快照"这个语义就是假的。
+    """
+    sql = ("SELECT MAX(recorded_at) FROM code_index WHERE project=? AND dormant=0")
+    params = [prefix]
+    if as_of is not None:
+        sql += " AND recorded_at<=?"
+        params.append(_as_of_utc_z(as_of))
+    row = conn.execute(sql, params).fetchone()
+    value = row[0] if row else None
+    if not value:
+        return PST_DASH_NO_MEMORY, "code_index.recorded_at(无记录)"
+    tzinfo = as_of.tzinfo if as_of is not None else datetime.timezone.utc
+    return _pst_local_date(value, tzinfo), "code_index.recorded_at(max)"
+
+
+def _board_entry_of(conn, prefix, as_of, *, home_root=None):
+    """看板入口：优先"as-of 当日的项目板"，否则"最近一条 open 板" → `(相对链接, 来源)`。
+
+    返回的是**相对状态表所在目录**的 markdown 链接（状态表在 `10-项目库/项目状态表.md`），
+    所以链接形如 `P1/看板-261026.md`。`layout verify` 对这类链接只记 warning
+    （`board_entry_missing`）：今天没人开工是合法状态，不该把整份体检升级成 error。
+
+    为什么不给"当日闭板"也算：闭板意味着这一天已经收工，链接仍指它没有坏处，
+    但"今日无看板"的三种 `—` 之一必须在**真的没有板**时出现（PST-5）。所以只有
+    当日板（open/closed 都算）+ 最近 open 板两条来源。
+    """
+    pk = as_of.strftime("%y%m%d")
+    row = conn.execute(
+        "SELECT path, period_key FROM boards WHERE scope='project' AND scope_key=? "
+        "AND period_key=? ORDER BY id DESC LIMIT 1", (prefix, pk)).fetchone()
+    source = f"boards.path(period={pk})"
+    if row is None:
+        row = conn.execute(
+            "SELECT path, period_key FROM boards WHERE scope='project' AND scope_key=? "
+            "AND status='open' ORDER BY period_key DESC, id DESC LIMIT 1",
+            (prefix,)).fetchone()
+        source = "boards.path(最近 open 板)"
+    if row is None:
+        return PST_DASH_NO_BOARD, "boards(无板)"
+    rel_path = str(row[0] or "")
+    name = Path(rel_path).name
+    if home_root is not None:
+        target = Path(home_root) / rel_path
+        base = Path(home_root) / "10-项目库"
+        try:
+            rel = os.path.relpath(str(target), str(base)).replace(os.sep, "/")
+        except ValueError:                 # 不同盘符（理论上不可能，但别让渲染炸）
+            rel = name
+    else:
+        rel = rel_path[len("10-项目库/"):] if rel_path.startswith("10-项目库/") else rel_path
+    return f"[{name}]({rel})", source
+
+
+def _owners_of(conn, prefix, *, as_of):
+    """主责 AI（裁决 Q4）→ `(显示名串, 来源)`。
+
+    ① **开档期优先**：`project_stints WHERE project=? AND to_ts IS NULL` → display_name。
+       多名时列前 2 + `等 N 人`（N = 该项目的**总人数**，"等 3 人"= 一共 3 人）。
+    ② 无开档期 → 回退"最近 `PST_OWNER_FALLBACK_DAYS` 天内该项目记忆的 owner"，
+       来源标 `recent_owner`（**标来源**是 Q4 的硬要求：回退值必须看得出来是回退的）。
+    ③ 两者都无 → `—（无开档期）`。
+
+    为什么显示名走 `_display_name_of` 而不在这里新写一条 citizens 查询：
+    `test_identity_p1a::test_G_existing_queries_untouched` 规定"新增函数里的 citizens
+    引用必须显式声明"，而本批不允许改那个测试文件。复用既有读点既守住纪律，
+    又保证状态表与 whoami 对"谁是谁"给出同一个答案。
+    """
+    rows = conn.execute(
+        "SELECT citizen_id, MIN(from_ts) AS first FROM project_stints "
+        "WHERE project=? AND to_ts IS NULL GROUP BY citizen_id "
+        "ORDER BY first ASC, citizen_id ASC", (prefix,)).fetchall()
+    names = []
+    for (cid, _first) in rows:
+        try:
+            display = _display_name_of(conn, cid)
+        except sqlite3.Error:
+            display = None
+        names.append((display or "").strip() or _short_citizen_id(cid))
+    if names:
+        if len(names) == 1:
+            return names[0], "project_stints(开档期)"
+        return "、".join(names[:2]) + f"等 {len(names)} 人", "project_stints(开档期)"
+
+    since = _as_of_utc_z(as_of - datetime.timedelta(days=PST_OWNER_FALLBACK_DAYS))
+    rows = conn.execute(
+        "SELECT owner, MAX(recorded_at) AS last FROM code_index "
+        "WHERE project=? AND recorded_at>=? AND owner IS NOT NULL AND TRIM(owner)<>'' "
+        "GROUP BY owner ORDER BY last DESC, owner ASC LIMIT 2", (prefix, since)).fetchall()
+    names = []
+    for (cid, _last) in rows:
+        try:
+            display = _display_name_of(conn, cid)
+        except sqlite3.Error:
+            display = None
+        names.append((display or "").strip() or _short_citizen_id(cid))
+    if names:
+        return "、".join(names), "code_index.owner(recent_owner)"
+    return PST_DASH_NO_OWNER, "none"
+
+
+def _open_loops_of(conn, prefix, *, as_of):
+    """未了事项（该项目在 `PST_OPEN_WINDOW_DAYS` 窗口内命中 8 词词表的条数）→ `(n, 来源)`。
+
+    计数口径与注入包的 A 类信号**同源**（同一个 `_open_loop_rows`、同一个窗口常量），
+    只是这里加 `project=` 过滤、把 limit 拉到计数上限。复制一份 SQL 就会出现
+    "注入包说有 3 条、状态表说 2 条"这种最难解释的分歧。
+    """
+    since = _as_of_utc_z(as_of - datetime.timedelta(days=PST_OPEN_WINDOW_DAYS))
+    # 探一次表：`_open_loop_rows` 对 `sqlite3.Error` 是**静默返回空列表**（注入包的容错，
+    # 改它会动 467 条既有判据）。但状态表不能把"表坏了"显示成"未了事项 0 条"——
+    # 那正是本节开头第③条纪律要防的。所以在这里显式探一次，让异常冒到按列降级。
+    conn.execute("SELECT 1 FROM code_index LIMIT 1", ()).fetchall()
+    rows = _open_loop_rows(conn, since, 10000, project=prefix)
+    return len(rows), "code_index.title(8 词表)"
+
+
+def _non_prefix_dirs(conn, data_root) -> dict:
+    """正文目录里"不属于任何 registry 前缀"的一级目录（裁决 Q6/Q18：只计数、不列表）。
+
+    为什么只计数：`_retired-ANYI-*` 这类目录是历史遗留，逐条列出来会把主表淹掉；
+    但**静默吞掉**又违反"诚实"——所以脚注给一个数字，想看的人自己去目录里看。
+    """
+    base = Path(data_root) / "projects"
+    if not base.is_dir():
+        return {"count": 0, "names": []}
+    try:
+        prefixes = {r[0] for r in conn.execute("SELECT prefix FROM code_registry")}
+    except sqlite3.Error:
+        return {"count": 0, "names": []}
+    extra = sorted(p.name for p in base.iterdir()
+                   if p.is_dir() and p.name not in prefixes)
+    return {"count": len(extra), "names": extra}
+
+
+def _pst_status_label(status) -> str:
+    """状态 → 人读标签；未知取值原样显示（脚注会说明"未登记状态"）。"""
+    return {"active": "进行中", "closed": "已闭合", "retired": "已退役"}.get(
+        str(status or ""), str(status or "") or "—")
+
+
+def _pst_row_skeleton(prefix, namespace, status) -> dict:
+    return {
+        "prefix": prefix,
+        "namespace": namespace,
+        "status": status,
+        "status_label": _pst_status_label(status),
+        "last_active": None,
+        "last_active_source": None,
+        "board_entry": None,
+        "board_entry_source": None,
+        "owners": None,
+        "owners_source": None,
+        "open_loops": None,
+        "open_loops_source": None,
+        "sources": {},
+    }
+
+
+def project_status_rows(conn, data_root, *, as_of, home_root=None,
+                        include_retired=False) -> dict:
+    """六列 + 每列来源 + 降级清单（§3.4 / §4.8）。**只读**：不改任何表、不写盘。
+
+    返回 `{"as_of","home_root","columns","rows","retired","degraded","footnotes",
+    "retired_total","non_prefix_dirs"}`。`rows` 里每行的字段名与 `--json` 完全一致
+    （K1：同一形状），渲染器只做字符串拼装，不再二次读库。
+
+    降级的粒度是**列**而不是整表：某一张表的列坏了（比如旧库缺 `dormant`），
+    只该让那一格变 `—（数据源不可用）`，其余五格照样有值——否则一次局部故障
+    会让整张表看起来像"没有项目"。
+    """
+    data_root = Path(data_root)
+    if home_root is None:
+        home_root = resolve_home_root(data_root, conn=conn)
+    degraded = []
+    rows = []
+
+    def _degrade(source, exc):
+        degraded.append({"source": source, "reason": _exc_text(exc)})
+
+    try:
+        registry = _registry_rows(conn)
+    except sqlite3.Error as exc:
+        _degrade("code_registry", exc)
+        registry = []
+
+    for item in registry:
+        prefix = str(item.get("prefix") or "")
+        namespace = str(item.get("namespace") or "")
+        status = str(item.get("status") or "")
+        row = _pst_row_skeleton(prefix, namespace, status)
+        if status not in ("active", "closed", "retired"):
+            row["status_label"] = f"{status or '—'}（未登记状态）"
+
+        for key, fn in (("last_active", lambda: _last_active_of(conn, prefix, as_of=as_of)),
+                        ("board_entry", lambda: _board_entry_of(
+                            conn, prefix, as_of, home_root=home_root)),
+                        ("owners", lambda: _owners_of(conn, prefix, as_of=as_of)),
+                        ("open_loops", lambda: _open_loops_of(
+                            conn, prefix, as_of=as_of))):
+            try:
+                value, source = fn()
+            except sqlite3.Error as exc:
+                _degrade(f"{key}:{prefix}", exc)
+                row[key] = PST_DASH_UNAVAILABLE
+                row[f"{key}_source"] = "unavailable"
+                row["sources"][key] = "unavailable"
+                continue
+            row[key] = value
+            row[f"{key}_source"] = source
+            row["sources"][key] = source
+        row["sources"]["status"] = "code_registry.status"
+        rows.append(row)
+
+    retired_all = [r for r in rows if r["status"] == "retired"]
+    if include_retired:
+        visible = rows
+        retired = []              # 已放进主表 → 折叠区不再重复列（否则同一行出现两次）
+    else:
+        visible = [r for r in rows if r["status"] != "retired"]
+        retired = retired_all
+
+    try:
+        non_prefix = _non_prefix_dirs(conn, data_root)
+    except OSError as exc:                 # 目录不可读不是 SQL 错，单独兜一次
+        _degrade("data_root/projects", exc)
+        non_prefix = {"count": 0, "names": []}
+
+    keywords = "、".join(ATTENTION_OPEN_KEYWORDS)
+    footnotes = [
+        f"窗口：最近活跃与未了事项都只看 `as-of` 前 {PST_OPEN_WINDOW_DAYS} 天"
+        f"（与注入包的 `ATTENTION_OPEN_WINDOW_DAYS` 同口径）。",
+        "`—（无记忆）` = 该项目在 `code_index` 里没有任何 active 记忆；"
+        "`—（今日无看板）` = 今日没有开过板（**不等于**没人干活，可能只是没签到）；"
+        "`—（无开档期）` = 既无开档期、也没有近 7 天的记忆；`—` = 未了事项为 0。",
+        f"主责 AI 口径（Q4）：① 该项目当前开档期（`project_stints.to_ts IS NULL`）的公民，"
+        f"多名列前 2 + 「等 N 人」；② 无开档期时回退近 {PST_OWNER_FALLBACK_DAYS} 天内"
+        f"该项目记忆的 owner，并在来源里标 `recent_owner`；③ 都无 → `—（无开档期）`。",
+        f"未了事项词表（{len(ATTENTION_OPEN_KEYWORDS)} 个）：{keywords}。",
+        "项目清单以 `code_registry` 为准（裁决 Q6）。",
+        f"正文目录里不属于任何前缀的目录：{non_prefix['count']} 个"
+        + (f"（{', '.join(non_prefix['names'][:5])}"
+           + ("…" if non_prefix["count"] > 5 else "") + "）" if non_prefix["count"] else "")
+        + "——只计数不列表（裁决 Q6/Q18）。",
+        f"本页是投影：真相在 `data_root/index.sqlite`，重建命令 `fish project status`；"
+        f"同一 `--as-of` 重渲染逐字节一致（as-of 行除外）。",
+    ]
+
+    return {"as_of": iso_local(as_of), "home_root": str(Path(home_root)),
+            "columns": list(PST_COLUMNS), "rows": visible, "retired": retired,
+            "retired_total": len(retired_all),
+            "degraded": degraded, "footnotes": footnotes,
+            "non_prefix_dirs": non_prefix}
+
+
+def _pst_cell(value) -> str:
+    """状态表单元格：`None`/空串 → `—`；0 条未了事项 → `—`（显式，不写 0）。"""
+    if value is None or value == "":
+        return PST_DASH_NONE
+    return _cell(value)
+
+
+def _pst_render_table(rows) -> list:
+    lines = ["| " + " | ".join(PST_COLUMNS) + " |",
+             "|" + "---|" * len(PST_COLUMNS)]
+    if not rows:
+        lines.append("| —（registry 里没有项目） | — | — | — | — | — |")
+        return lines
+    for row in rows:
+        name = _cell(row["namespace"] or row["prefix"]) or "（未命名）"
+        if row["namespace"]:
+            name = f"{name}（`{_cell(row['prefix'])}`）"
+        else:
+            name = f"`{_cell(row['prefix'])}`"
+        loops = row.get("open_loops")
+        loops_cell = PST_DASH_NONE if not loops else str(loops)
+        if loops is None:
+            loops_cell = PST_DASH_UNAVAILABLE
+        lines.append(
+            f"| {name} | {_cell(row['status_label']) or PST_DASH_NONE} "
+            f"| {_pst_cell(row.get('last_active'))} "
+            f"| {row.get('board_entry') or PST_DASH_NO_BOARD} "
+            f"| {_pst_cell(row.get('owners'))} "
+            f"| {loops_cell} |")
+    return lines
+
+
+def render_project_status(conn, data_root, home_root, *, as_of,
+                          include_retired=False) -> dict:
+    """把状态表渲染到 `<home_root>/10-项目库/项目状态表.md`（B2 的唯一产物入口）。
+
+    结构固定：标题 → as-of/生成器 → 六列表 → 降级段（有才写）→ 脚注 → retired 折叠区。
+    **同一 as-of 两次渲染逐字节全等**：本函数的所有输入都来自 `as_of` 与库内容，
+    不写 `now()`、不写 `ms`、不写随机数。
+    """
+    home = Path(home_root)
+    res = project_status_rows(conn, data_root, as_of=as_of, home_root=home,
+                              include_retired=include_retired)
+    lines = [
+        "# 项目状态表",
+        "",
+        f"> 生成器：`fish project status` ｜ as-of {res['as_of']}",
+        "> 每格的取值来源见 `--json` 的 `sources`；本页是投影，真相在 "
+        "`data_root/index.sqlite`。",
+        "> 六列严格顺序：项目 / 状态 / 最近活跃 / 看板入口 / 主责 AI / 未了事项。",
+        "",
+    ]
+    lines += _pst_render_table(res["rows"])
+    lines += ["", f"主表 {len(res['rows'])} 个项目"
+              + (f"（含 retired，`--include-retired`）" if include_retired else "")]
+    if res["degraded"]:
+        for item in res["degraded"]:
+            lines += ["", f"## 数据源不可用：{item['source']}", "",
+                      f"原因：`{item['reason']}`",
+                      "该格显示 `—（数据源不可用）`，**不是 0**。修好数据源后重跑 "
+                      "`fish project status`。"]
+    lines += ["", "## 脚注", ""]
+    lines += [f"- {note}" for note in res["footnotes"]]
+    retired = res["retired"]
+    if retired:
+        lines += ["", f"<details><summary>已退役（{len(retired)}）</summary>", ""]
+        lines += _pst_render_table(retired)
+        lines += ["", "</details>", ""]
+    lines += [""]
+    out = _layout_write(home, LAYOUT_STATUS_TABLE, "\n".join(lines),
+                        data_root=data_root)
+    out["rows"] = len(res["rows"])
+    out["retired"] = len(retired)
+    out["degraded"] = res["degraded"]
+    return out
+
+
+def cmd_project_status(args):
+    """B2 项目状态表 CLI（§3.2 `fish project status`）。
+
+    契约要点：`--json` **不写文件**（只打印同一形状的 JSON）；`retired` 默认折进文末；
+    退出码 0/1/2（数据库不可用=1、`--as-of` 解析失败=2）。
+
+    为什么非零用 `raise SystemExit`：`main()` 结尾是 `args.func(args)`，返回值被丢弃——
+    `return 1` 今天等于退出 0（§3.1 / R9）。这是既有缺陷，本批不修 `main()`。
+    """
+    data_root = Path(args.root)
+    try:
+        conn = connect(data_root)
+        conn.executescript(SCHEMA)
+        migrate(conn)
+    except sqlite3.Error as exc:
+        print(f"错误：数据库不可用：{exc}", file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        as_of = _parse_as_of_arg(getattr(args, "as_of", None))
+        include_retired = bool(getattr(args, "include_retired", False))
+        home_override = getattr(args, "home", None)
+        try:
+            home = resolve_home_root(
+                data_root, override=home_override, conn=conn,
+                allow_external_home=bool(getattr(args, "allow_external_home", False)))
+        except RuntimeError as exc:
+            print(f"错误：{exc}", file=sys.stderr)
+            raise SystemExit(1)
+        if getattr(args, "json", False):
+            res = project_status_rows(conn, data_root, as_of=as_of, home_root=home,
+                                      include_retired=include_retired)
+            payload = {"as_of": res["as_of"], "home_root": res["home_root"],
+                       "columns": res["columns"], "rows": res["rows"],
+                       "retired": res["retired"], "degraded": res["degraded"],
+                       "footnotes": res["footnotes"],
+                       "retired_total": res["retired_total"]}
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+            return 0
+        out = render_project_status(conn, data_root, home, as_of=as_of,
+                                    include_retired=include_retired)
+        print(f"{out['path']}\t{out['bytes']}\t{out['sha256'][:12]}")
+        print(f"主表 {out['rows']} 行 / 退役 {out['retired']} 行"
+              f"（retired 默认折进文末折叠区；`--include-retired` 可放进主表）")
+        for item in out["degraded"]:
+            print(f"降级\t{item['source']}\t{item['reason']}")
+        print(f"重建命令：fish project status --as-of {iso_local(as_of)}")
+        return 0
+    finally:
+        conn.close()
+
+def cmd_kb(args):
+    """B3 知识库 CLI（§3.2）：vault / tree / open / search / write / rollback / stats / doctor / backup。
+
+    退出码（K9）：0 成功（含离线降级）/ 1 域错误（拒绝/越界/超限/编码/备份缺失）/ 2 用法错误。
+    **新命令族用 `raise SystemExit(code)`**：`main()` 丢弃返回值，`return 1` 等于退出 0。
+    """
+    data_root = Path(args.root)
+    try:
+        conn = connect(data_root)
+        conn.executescript(SCHEMA)
+        migrate(conn)
+    except sqlite3.Error as exc:
+        print(f"错误：数据库不可用：{exc}", file=sys.stderr)
+        raise SystemExit(1)
+    try:
+        act = getattr(args, "kb_action", None)
+        try:
+            if act == "vault":
+                return _kb_cmd_vault(conn, args)
+            if act == "tree":
+                return _kb_cmd_tree(conn, args)
+            if act == "open":
+                return _kb_cmd_open(conn, args)
+            if act == "search":
+                return _kb_cmd_search(conn, args)
+            if act == "write":
+                return _kb_cmd_write(conn, data_root, args)
+            if act == "rollback":
+                return _kb_cmd_rollback(conn, data_root, args)
+            if act == "stats":
+                return _kb_cmd_stats(conn, args)
+            if act == "doctor":
+                return _kb_cmd_doctor(conn, data_root, args)
+            if act == "backup":
+                return _kb_cmd_backup(conn, data_root, args)
+        except KBError as exc:
+            print(f"错误[{exc.code}]：{exc}", file=sys.stderr)
+            raise SystemExit(_kb_exit_code(exc))
+        raise KBError("bad_usage", f"未知 kb 子命令：{act!r}")
+    except KBError as exc:
+        print(f"错误[{exc.code}]：{exc}", file=sys.stderr)
+        raise SystemExit(_kb_exit_code(exc))
+    except sqlite3.Error as exc:
+        print(f"错误：数据库不可用：{exc}", file=sys.stderr)
+        raise SystemExit(1)
+    finally:
+        conn.close()
+
+
 # ------------------------------------------------------------------ CLI
+
+def _archive_citizens_cmd(conn, args) -> int:
+    """`fish archive --citizens [--days N] [--apply]`（FB-12）。
+
+    默认 dry-run：归档是**搬行**（INSERT 冷表 + DELETE 热表），先看计划再执行。
+    `--days` 缺省取 config（`session.archive_after_days`），而它的默认值就是 0
+    ——"会话归档无限期"。0 不是"全归档"，是"不自动归档"，所以这里明说跳过。
+    """
+    days = args.days if getattr(args, "days", None) is not None \
+        else int(get_config(conn, CITIZEN_ARCHIVE_DAYS_KEY))
+    if int(days or 0) < 1:
+        print("跳过（未配置）：session.archive_after_days = 0 —— 会话归档默认无限期。\n"
+              "  要归档请给阈值：`fish archive --citizens --days N`"
+              "（先演练，确认后加 --apply）；\n"
+              "  或长期配置：`fish config set session.archive_after_days N`。")
+        return 0
+    res = archive_citizens(conn, days=int(days), dry_run=not args.apply)
+    tag = "（演练，未真搬）" if res["dry_run"] else ""
+    print(f"{tag}闲置 ≥{res['days']} 天的公民：可归档 {len(res['planned'])} 个"
+          f"（截止 {res['cutoff']}；共检查 {res['checked']} 个）")
+    for it in res["planned"]:
+        print(f"  {it['display_name'] or '（无名）':<28} {it['citizen_id']}  "
+              f"最后活跃 {it['last_seen_at']}")
+    for it in res["skipped"][:10]:
+        print(f"  跳过 {it['display_name'] or '（无名）'}（{it['citizen_id']}）：{it['why']}")
+    if len(res["skipped"]) > 10:
+        print(f"  … 共 {len(res['skipped'])} 个被跳过")
+    if res["dry_run"]:
+        print("（演练完毕：没有搬任何行。确认后加 --apply 执行。）")
+    else:
+        print(f"已归档 {res['archived_count']} 个："
+              f"{', '.join(res['archived']) or '无'}")
+    return 0
+
 
 def cmd_archive(args):
     """归档 CLI：list / one / sweep。
@@ -8603,6 +14834,12 @@ def cmd_archive(args):
     root = Path(args.root)
     try:
         act = args.action or "sweep"
+
+        # 2026-10-26（FB-12）：`--citizens` 走**公民归档**（搬 citizens 行），
+        # 与下面的正文归档（只搬文件、不删行）是两件事，用开关而不是新子命令：
+        # 两者的默认行为都是"演练"，放同一个入口才不会有人以为 `archive` 只能归档正文。
+        if getattr(args, "citizens", False):
+            return _archive_citizens_cmd(conn, args)
 
         if act == "list":
             rows = conn.execute(
@@ -8698,6 +14935,21 @@ def main():
     pp.add_argument("--apply", action="store_true", help="真的落库；不加只打印计划")
     pp.set_defaults(func=cmd_project)
 
+    # B2 项目状态表（2026-10-26）：`project status` 是**投影**，读的是
+    # code_registry / code_index / boards / presence / project_stints 五张表。
+    # 与 retire/restore/close/reopen 同族但独立 func：那四条改状态，这条只读+渲染。
+    pst = psub.add_parser("status", help="渲染/查看「项目状态表」（B2；只读投影，不改任何表）")
+    pst.add_argument("--include-retired", dest="include_retired", action="store_true",
+                     help="把 retired 项目也放进主表（裁决 Q7 的逃生口）")
+    pst.add_argument("--as-of", dest="as_of", default=None,
+                     help="冻结时间（ISO8601）；缺省=现在。同一 as-of 重渲染逐字节全等")
+    pst.add_argument("--home", default=None, help="门面根覆盖（缺省 <项目根>/fish-home）")
+    pst.add_argument("--allow-external-home", dest="allow_external_home",
+                     action="store_true",
+                     help="允许把门面根指到项目目录之外（默认拒绝；盘根/系统目录永远拒绝）")
+    pst.add_argument("--json", action="store_true", help="机器可读形态（含每格取值来源）")
+    pst.set_defaults(func=cmd_project_status)
+
     # 名字别名（阶段 D）：只给 CLI，不给 MCP 工具——见 cmd_alias 的 docstring。
     p = sub.add_parser("alias", help="名字别名（单向 from→to；只影响检索，不改写入归属）")
     asub = p.add_subparsers(dest="alias_action", required=True)
@@ -8738,6 +14990,8 @@ def main():
 
     # show：读看板（默认动作）
     bsh = _board_common(bsub.add_parser("show", help="读看板（不渲染）"))
+    bsh.add_argument("--json", dest="as_json", action="store_true",
+                     help="机器视图（JSON：含 citizen_id 与会话键，供脚本消费）")
     bsh.set_defaults(func=cmd_board)
 
     # checkin：签到（doing 必填——它是看板的核心价值）
@@ -8746,6 +15000,11 @@ def main():
     bck.add_argument("--surface", default="", help="占用面（文件/目录前缀，逗号分隔）")
     bck.add_argument("--citizen", default=None, help="公民 id（默认取系统主人）")
     bck.add_argument("--agent", default=None, help="会话/宿主侧标识")
+    # 2026-10-26（撞车自撞修复 T02）：终端里没有 token，所以会话键必须能显式给。
+    # 缺省读环境变量 `FISH_SESSION_KEY`（WorkBuddy/hook 侧就是这么传的）。
+    bck.add_argument("--session-key", dest="session_key", default=None,
+                     help="会话键（如 dsh:abc…）；缺省读环境变量 FISH_SESSION_KEY。"
+                          "不传 = 无会话归属（''，与今天的行为相同）")
     # 2026-10-25（`EVAL-261025-14`）：`status='left'` 在 DDL 里写着，但**没有任何入口**
     # ——想「收工下板」的人做不到，行只能自然变 idle、或等 sweep 归档。
     # 补上之后，`left` 才从一个词汇变成一个动作。
@@ -8762,6 +15021,8 @@ def main():
 
     # render：重新渲染（自愈）
     brd = _board_common(bsub.add_parser("render", help="重新渲染看板文件（可自愈）"))
+    brd.add_argument("--all", dest="render_all", action="store_true",
+                     help="渲染 boards 表里的全部看板（含根板）；缺省只渲染当前 scope/key")
     brd.set_defaults(func=cmd_board)
 
     # close：归档（不删）
@@ -8773,6 +15034,137 @@ def main():
     bsw.add_argument("--days", type=int, default=None,
                      help="保留最近 N 天（缺省取 config board.sweep_days，默认 7）")
     bsw.set_defaults(func=cmd_board)
+
+    # B1 门面（2026-10-26）：`fish-home/` 的渲染与体检。
+    # **`render` 必须带 `--all`**：本批只做全量渲染（`--only` 是 P2/裁决不做，
+    # parser 刻意不提供该参数 → argparse 报 unrecognized → exit 2，与契约一致）。
+    p = sub.add_parser("layout", help="fish-home 门面：render（渲染）/ verify（体检）")
+    lsub = p.add_subparsers(dest="layout_action", required=True)
+
+    lr = lsub.add_parser("render", help="渲染门面全部产物（生成物，可删可重建）")
+    lr.add_argument("--all", dest="render_all", action="store_true",
+                    help="渲染五个一级目录的全部产物（**必填**；缺省 → exit 2）")
+    lr.add_argument("--as-of", dest="as_of", default=None,
+                    help="冻结时间（ISO8601）；同一 as-of 连跑两次逐字节全等")
+    lr.add_argument("--home", default=None, help="门面根覆盖（缺省 <项目根>/fish-home）")
+    lr.add_argument("--allow-external-home", dest="allow_external_home",
+                    action="store_true",
+                    help="允许把门面根指到项目目录之外（默认拒绝；盘根/系统目录永远拒绝）")
+    lr.add_argument("--force-readme", dest="force_readme", action="store_true",
+                    help="覆盖已存在的五个一级 README（缺省：存在即不覆盖，裁决 C5）")
+    lr.set_defaults(func=cmd_layout)
+
+    lv = lsub.add_parser("verify", help="体检门面：缺失/多余/超深/越界/README/链接/正文副本/凭证")
+    lv.add_argument("--json", action="store_true", help="机器可读形态（同一套 code）")
+    lv.add_argument("--home", default=None, help="门面根覆盖")
+    lv.add_argument("--allow-external-home", dest="allow_external_home",
+                    action="store_true",
+                    help="允许把门面根指到项目目录之外（默认拒绝；盘根/系统目录永远拒绝）")
+    lv.set_defaults(func=cmd_layout)
+
+    # B3 知识库（2026-10-26）：本批只登记 CLI 契约（T04 实装）。
+    # 为什么现在就把子命令全注册：CLI 面一旦进文档就是契约，后补参数等于破坏性变更；
+    # 占位实现统一 exit 2（见 cmd_kb），不会假装成功。
+    p = sub.add_parser("kb", help="知识库（vault / tree / open / search / write / rollback / stats / doctor）")
+    ksub = p.add_subparsers(dest="kb_action", required=True)
+
+    kv = ksub.add_parser("vault", help="登记 / 列出 / 设默认 / 改模式 / 扫描 / 移除")
+    kvsub = kv.add_subparsers(dest="kb_vault_action", required=True)
+
+    kva = kvsub.add_parser("add", help="登记一个 vault（不搬运任何文件）")
+    kva.add_argument("--name", required=True, help="人给的名字（缺省取根目录名）")
+    kva.add_argument("--path", required=True, help="vault 绝对路径（原地不动）")
+    kva.add_argument("--mode", default="ro", choices=["ro", "rw"],
+                     help="ro=只读（默认）/ rw=允许写入")
+    kva.add_argument("--ignore", action="append", default=[],
+                     help="额外忽略规则（glob，可重复），如 \"**/_media/**\"")
+    kva.add_argument("--default", action="store_true", help="设为默认 vault（唯一）")
+    kva.add_argument("--note", default=None, help="备注（给人看）")
+    kva.set_defaults(func=cmd_kb)
+
+    kvsub.add_parser("list", help="列出全部 vault").set_defaults(func=cmd_kb)
+
+    kvs = kvsub.add_parser("set-default", help="指定默认 vault")
+    kvs.add_argument("key", help="name 或 vault_id")
+    kvs.set_defaults(func=cmd_kb)
+
+    kvm = kvsub.add_parser("set-mode", help="改读写模式（ro/rw）")
+    kvm.add_argument("key", help="name 或 vault_id")
+    kvm.add_argument("mode", choices=["ro", "rw"])
+    kvm.set_defaults(func=cmd_kb)
+
+    kvsc = kvsub.add_parser("scan", help="walk+stat 汇总并写 last_scan_*（不读正文）")
+    kvsc.add_argument("key", nargs="?", default=None, help="name 或 vault_id；缺省=默认")
+    kvsc.set_defaults(func=cmd_kb)
+
+    kvr = kvsub.add_parser("remove", help="只删注册行，**不动磁盘**")
+    kvr.add_argument("key", help="name 或 vault_id")
+    kvr.set_defaults(func=cmd_kb)
+
+    kt = ksub.add_parser("tree", help="看目录（只统计不读正文；预算受限）")
+    kt.add_argument("path", nargs="?", default="", help="起点（vault 内相对路径；缺省=根）")
+    kt.add_argument("--vault", default=None)
+    kt.add_argument("--depth", type=int, default=2)
+    kt.add_argument("--max-chars", dest="max_chars", type=int, default=8000)
+    kt.add_argument("--json", action="store_true")
+    kt.set_defaults(func=cmd_kb)
+
+    ko = ksub.add_parser("open", help="读单文件（必须给显式相对路径）")
+    ko.add_argument("path")
+    ko.add_argument("--vault", default=None)
+    ko.add_argument("--max-chars", dest="max_chars", type=int, default=64000)
+    # R15：敏感名单（凭证/密钥/.env…）默认**不**返回正文，要显式二次授权
+    ko.add_argument("--allow-sensitive", dest="allow_sensitive", action="store_true",
+                    help="允许读敏感名单命中的文件正文（默认只回文件名+大小+建议）")
+    ko.add_argument("--json", action="store_true")
+    ko.set_defaults(func=cmd_kb)
+
+    kse = ksub.add_parser("search", help="在 vault 范围内确定性检索（不建索引）")
+    kse.add_argument("query")
+    kse.add_argument("--vault", default=None)
+    kse.add_argument("--limit", type=int, default=10)
+    kse.add_argument("--json", action="store_true")
+    kse.set_defaults(func=cmd_kb)
+
+    kw = ksub.add_parser("write", help="写三档：create / append / update（update 必带 --base-sha256）")
+    kw.add_argument("path")
+    kmode = kw.add_mutually_exclusive_group(required=True)
+    kmode.add_argument("--create", action="store_true")
+    kmode.add_argument("--append", action="store_true")
+    kmode.add_argument("--update", action="store_true")
+    kw.add_argument("--base-sha256", dest="base_sha256", default=None)
+    kw.add_argument("--content-file", dest="content_file", required=True)
+    kw.add_argument("--frontmatter", action="append", default=[], metavar="k=v")
+    kw.add_argument("--reason", default=None)
+    # S6（第四轮）：写敏感文件（凭证/.env…）默认拒绝；这是"人显式授权"的本地逃生口。
+    kw.add_argument("--allow-sensitive", dest="allow_sensitive", action="store_true",
+                    help="允许改写敏感名单命中的文件（默认拒绝：凭证交 Obsidian/人工）")
+    kw.add_argument("--vault", default=None)
+    kw.set_defaults(func=cmd_kb)
+
+    krb = ksub.add_parser("rollback", help="按 write_id 撤回一次写")
+    krb.add_argument("write_id")
+    krb.add_argument("--force", action="store_true")
+    krb.set_defaults(func=cmd_kb)
+
+    kst = ksub.add_parser("stats", help="未读清单 / 最近变更 / 每 vault 读写计数")
+    kst.add_argument("--vault", default=None)
+    kst.add_argument("--json", action="store_true")
+    kst.set_defaults(func=cmd_kb)
+
+    kd = ksub.add_parser("doctor", help="逐 vault 体检 + obsidian_cli 探测 + 备份体积读数")
+    kd.add_argument("--json", action="store_true")
+    kd.set_defaults(func=cmd_kb)
+
+    # N2（安全 F10）：备份保留策略**只提供显式命令**，默认永不自动删。
+    kbu = ksub.add_parser("backup", help="备份维护（prune：按天清理旧回滚点；默认不动手）")
+    kbusub = kbu.add_subparsers(dest="kb_backup_action", required=True)
+    kbup = kbusub.add_parser("prune", help="删掉 meta.ts 早于 N 天的备份目录（显式命令）")
+    kbup.add_argument("--keep-days", dest="keep_days", type=int, required=True,
+                      help="保留最近 N 天的回滚点（必须 > 0）")
+    kbup.add_argument("--dry-run", dest="dry_run", action="store_true",
+                      help="只统计不删除")
+    kbup.set_defaults(func=cmd_kb)
 
     p = sub.add_parser("remember")
     p.add_argument("project"); p.add_argument("title")
@@ -8791,10 +15183,18 @@ def main():
                    help="附件路径，可重复（图片/文档等，按内容寻址存入 blobs/）")
     p.add_argument("--session-actor", dest="session_actor", default=None,
                    help="会话级身份（如 anyi-dev），用于区分同一宿主下的不同会话")
+    # FB-11：CLI 侧的“写新的同时置旧的”。可重复给（一条新记忆替代多条旧条目）。
+    p.add_argument("--supersedes", action="append", default=[], metavar="OLD_CODE",
+                   help="把这条替代掉的旧编码（可重复）。**新条目写成功之后**才置旧条目"
+                        " superseded；旧编码不存在不会撤销新条目（只提示）")
     p.set_defaults(func=cmd_remember)
 
     p = sub.add_parser("recall")
-    p.add_argument("query")
+    # 2026-10-26（FB-01）：`query` 从必填改为可选（`nargs="?"`）——不传时走**列出模式**
+    # （`--project` [+ `--tags`] 过滤后按时间倒序）。只在"没有项目也没有关键词"时
+    # 才给出引导，而不是把"没给词"当成错误（老用法一字不变：`fish recall 关键词`）。
+    p.add_argument("query", nargs="?", default=None,
+                   help="关键词（省略时按 --project / --tags 列出）")
     p.add_argument("--limit", type=int, default=10)
     p.add_argument("--scope", choices=["all", "title", "body"], default="all",
                    help="检索范围：all（默认）/ title / body")
@@ -8815,6 +15215,22 @@ def main():
 
     p = sub.add_parser("forgetting"); p.add_argument("--apply", action="store_true")
     p.set_defaults(func=cmd_forgetting)
+
+    # 提炼建议（FB-15，16 §11.4）：同主题 episode 聚类 → 建议文件。
+    # **默认演练**：不落文件、不写记忆、不改状态；`--write` 才产出建议。
+    p = sub.add_parser(
+        "distill",
+        help="提炼建议：同 tag 的 episode 聚成建议（默认演练；--write 落文件，不入库）")
+    p.add_argument("project", help="项目名（别名按检索口径展开）")
+    p.add_argument("--days", type=int, default=DISTILL_DEFAULT_DAYS,
+                   help=f"回看窗口天数（缺省 {DISTILL_DEFAULT_DAYS}）")
+    p.add_argument("--min", type=int, default=DISTILL_MIN_GROUP,
+                   help=f"组内至少几条才成组（缺省 {DISTILL_MIN_GROUP}）")
+    p.add_argument("--max-groups", type=int, default=DISTILL_MAX_GROUPS,
+                   help=f"最多输出几组（缺省 {DISTILL_MAX_GROUPS}）")
+    p.add_argument("--write", action="store_true",
+                   help="真的写建议文件；不加只打印（演练）")
+    p.set_defaults(func=cmd_distill)
 
     p = sub.add_parser("citizen-add")
     p.add_argument("name"); p.add_argument("--kind", default="visitor", choices=list(KINDS))
@@ -8869,7 +15285,15 @@ def main():
     sp.add_argument("--role", required=True, help="子 agent 的角色（会拼进 session_key）")
     sp.set_defaults(func=cmd_session_agent)
 
-    p = sub.add_parser("whoami"); p.add_argument("--citizen", default=None)
+    p = sub.add_parser("whoami", help="我是谁：身份段 + 凭证状态 + 身份来源")
+    p.add_argument("--citizen", default=None)
+    p.add_argument("--token", default=None,
+                   help="会话凭证（缺省取 env FISH_SESSION_TOKEN）；"
+                        "决定「凭证状态」「身份来源」两行")
+    # 2026-10-26（评审 🟠3）：CLI 补 `--all`——MCP 的 whoami 早有 `all=true`。
+    # 渲染与 MCP 共用 `fish.related_citizens_lines`（文案逐字一致）。
+    p.add_argument("--all", dest="all", action="store_true",
+                   help="附带「相关公民」清单（按 会话/同名/账号 关联，不是全库清单）")
     p.set_defaults(func=cmd_whoami)
 
     p = sub.add_parser("owner")
@@ -8912,6 +15336,19 @@ def main():
                         "会话档期 → workspace_map(--cwd) → 最近更新推断")
     p.add_argument("--cwd", default=None,
                    help="工作目录：用于 workspace_map 最长前缀匹配（不传则不查映射）")
+    # 2026-10-26（评审 🟠3）：CLI 补上 MCP 早有的两个段选择旋钮（同一份归一实现）。
+    p.add_argument("--sections", default=None,
+                   help="只构建这些段（逗号或空格分隔，缺省=全段）："
+                        + "/".join(INJECTION_SECTIONS)
+                        + "；L0 身份段永远保留（不可关闭）")
+    p.add_argument("--no-board", dest="no_board", action="store_true",
+                   help="不要看板段（等价于 --sections 里不含 board；MCP 的 "
+                        "include_board=false）")
+    p.add_argument("--auto-presence", dest="auto_presence", action="store_true",
+                   help="顺带自动签到（WorkBuddy 会话开场用；MCP 的 inject 不写）")
+    p.add_argument("--session-key", dest="session_key", default=None,
+                   help="自动签到用的会话键（缺省读环境变量 FISH_SESSION_KEY）；"
+                        "只与 --auto-presence 一起生效")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_inject)
 
@@ -8944,6 +15381,16 @@ def main():
     p.add_argument("--limit", type=int, default=None, help="最多处理几条")
     p.add_argument("--no-withdrawn", dest="withdrawn", action="store_false",
                    default=True, help="只归档 superseded，不含 withdrawn")
+    # FB-12：同一条命令承担两个归档面——正文（默认）与公民（--citizens）。
+    # 两边都默认演练、都靠 --apply 真执行，口径统一。
+    p.add_argument("--citizens", action="store_true",
+                   help="改归档**公民**（闲置 ≥N 天且无档期/无凭证/非主人）；"
+                        "与正文归档互斥，缺省是归档正文")
+    p.add_argument("--days", type=int, default=None,
+                   help="--citizens：闲置多少天算可归档（缺省取 config "
+                        "session.archive_after_days，其值 0 = 不自动归档）")
+    p.add_argument("--apply", action="store_true",
+                   help="--citizens：真的搬行；不加只打印计划（默认演练）")
     p.set_defaults(func=cmd_archive)
 
     # 推送（P1-a · E 批）。变量名刻意避开 `ap` / `parser`：
@@ -8955,17 +15402,62 @@ def main():
     push_stats_p.add_argument("--days", type=int, default=30)
     push_stats_p.set_defaults(func=cmd_push)
     pushsub.add_parser("status", help="看 push.* 配置现值").set_defaults(func=cmd_push)
+    pushsub.add_parser("sweep",
+                       help="把超窗仍无反应的推送判为 ignored（幂等；日报也跑它）"
+                       ).set_defaults(func=cmd_push)
+
+    # 动作流（2026-10-26 · T02）：stats 是"一小时多少写动作"的固定读数；prune 供日报/手动清理。
+    # **CLI 专属**：动作流是审计数据，看它的是人（跑日报、查误报），不是模型每次对话都调的东西。
+    actp = sub.add_parser("activity", help="动作流：stats 读数 / prune 清理（CLI 专属）")
+    actsub = actp.add_subparsers(dest="action", required=True)
+    act_stats = actsub.add_parser("stats", help="写动作统计（行数/会话/高频目录/按小时）")
+    act_stats.add_argument("--days", type=int, default=1)
+    act_stats.set_defaults(func=cmd_activity)
+    act_prune = actsub.add_parser("prune", help="按保留期清理（缺省取 activity.retention_days）")
+    act_prune.add_argument("--days", type=int, default=None)
+    act_prune.set_defaults(func=cmd_activity)
+
+    # 原始对话语料层（T02）：子命令面在 `fish_corpus.register_cli`（J4 行数预算把
+    # argparse 注册赶回领域模块；`cmd_corpus` 是薄壳，由这里传入）。
+    fish_corpus.register_cli(sub, cmd_corpus)
+
+
+    # 提示词递送（2026-10-26 · T04）：**读 stdin payload**，输出纯文本。
+    # 只给 hook 用，不是给人直接敲的命令（所以 help 里写明输入形态）。
+    ppush = sub.add_parser("prompt-push",
+                           help="提示词时机递记忆：读 stdin 的 hook payload，输出纯文本")
+    ppush.add_argument("--host", default="dsh", choices=["dsh", "workbuddy", "codebuddy"],
+                       help="宿主方言（决定会话键前缀）")
+    ppush.set_defaults(func=cmd_prompt_push)
 
     p = sub.add_parser("withdraw")
     p.add_argument("code")
     p.add_argument("--reason", default="")
     p.set_defaults(func=cmd_withdraw)
 
+    # 替代（FB-11）：MCP 早就有一个 `supersede` 工具，CLI 侧却没有任何入口，
+    # 于是"两条路"里的另一条只能靠人手改库。补上它，且**回执与 MCP 同口径**。
+    p = sub.add_parser("supersede",
+                       help="把旧编码标记为被新编码替代（回执与 MCP 的 supersede 工具一致）")
+    p.add_argument("code", help="被替代的旧编码")
+    p.add_argument("--by", required=True, metavar="NEW_CODE", help="替代它的新编码")
+    p.add_argument("--reason", default="", help="为什么替代（写进 memory.superseded 事件）")
+    p.set_defaults(func=cmd_supersede)
+
     p = sub.add_parser("events"); p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_events)
 
     args = ap.parse_args()
-    args.func(args)
+    # 2026-10-26（复审 🟡N4）：**子命令的返回码必须传播出去。**
+    #
+    # 旧实现只写 `args.func(args)`，返回值被丢掉 —— 于是所有"参数错误/失败"的
+    # 返回码（`cmd_board` 缺 `--citizen` 的 2、`cmd_archive one` 缺 code 的 2、
+    # `archive sweep` 有错误时的 1）在 CLI 边界全部变成 **exit 0**。
+    # 后果不是"少个提示"：脚本与 CI 读到的是"成功"，而动作根本没发生。
+    # 这里只传播**非零 int**（None = 正常结束，保持原样）。
+    rc = args.func(args)
+    if isinstance(rc, int) and not isinstance(rc, bool) and rc:
+        sys.exit(rc)
 
 
 if __name__ == "__main__":

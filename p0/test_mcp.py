@@ -107,11 +107,13 @@ class MCPProtocolTest(unittest.TestCase):
         names = {t["name"] for t in r["result"]["tools"]}
         # 2026-10-25：阶段 B 加 rename_citizen（名字认领）、阶段 D 加 close/reopen（项目三态）、
         # 晚加 session_start（用户批准：MCP 面缺签发口，AI 只能跑 CLI 而 CLI 会建出第二个公民）。
+        # 2026-10-26（T05 / B3）：加 kb（读）+ kb_write（写）——读与写是两个权限位，不合成一个。
+        # 2026-10-27（语料层 T03）：加 corpus（只读 search/read/stats）——18 → 19。
         self.assertEqual(names, {"remember", "recall", "neighbors", "resolve_code",
                                  "read_body", "whoami", "register", "rename_citizen",
                                  "close_project", "reopen_project",
                                  "inject", "healthcheck", "add_project", "supersede",
-                                 "session_start", "board"})
+                                 "session_start", "board", "kb", "kb_write", "corpus"})
         # 每个工具必须有 inputSchema
         for t in r["result"]["tools"]:
             self.assertIn("inputSchema", t)

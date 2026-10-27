@@ -57,7 +57,8 @@ class RootBoardTest(unittest.TestCase):
 
     def _root_path(self):
         b = fish.board_ensure(self.conn, "root", "")
-        return self.root / b["path"]
+        # 落点唯一入口：根板相对 fish-home 是 `00-首页/看板-<pk>.md`（裁决 C3）。
+        return fish.board_out_path(self.root, b)
 
     def _root_text(self):
         p = self._root_path()

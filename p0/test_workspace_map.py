@@ -40,6 +40,7 @@ N2 seed 共享父目录/降噪    | 覆盖性判据（无变异）：父目录�
 
 运行：`python -m unittest test_workspace_map -v`
 """
+import os
 import shutil
 import sys
 import tempfile
@@ -521,6 +522,94 @@ class WorkspaceMapTest(unittest.TestCase):
         self.assertIn(norm(str(qiye_dir)), suggest)
         self.assertNotIn(norm(str(deep)), suggest,
                          "父路径已被建议时，子路径不单列（前缀语义已覆盖）")
+
+
+class RealpathMatchTest(unittest.TestCase):
+    """C（2026-10-27 · 采集完整性）：同一物理目录的**两种写法**必须归到同一个项目。
+
+    现场：`C:\\Users\\<user>\\.dsh` 是 junction → `I:\\app\\DSH-Home\\home`。hook 报的 cwd 走前者
+    （进程的真实工作目录），人在 `workspace_map` 里映射的是后者（按真实位置写）——
+    只做文本归一的话两边永远是两个字符串，项目归属静默变成"未声明"（注入包写
+    「当前项目：未声明」，看着像没配对，其实是路径没归一）。
+
+    夹具用**本机真实 junction**，不新建任何链接；机器上没有这个 junction 就 skip
+    （skip 不等于通过：换机后要把夹具换成那台机器上真实存在的链接）。
+    """
+
+    LINK = Path.home() / ".dsh"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.real = Path(os.path.realpath(str(cls.LINK)))
+        if os.path.normcase(str(cls.real)) == os.path.normcase(os.path.abspath(str(cls.LINK))):
+            raise unittest.SkipTest("本机 %s 不是 junction/symlink，这条判据没有夹具" % cls.LINK)
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="fish-wsreal-")
+        self.root = Path(self.tmp) / "data"
+        self.conn = fish.connect(self.root)
+        self.conn.executescript(fish.SCHEMA)
+        fish.migrate(self.conn)
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        try:
+            self.conn.close()
+        finally:
+            shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _map(self, path, project):
+        return fish.set_workspace_mapping(self.conn, str(path), project)
+
+    def test_link_cwd_matches_mapping_written_in_real_path(self):
+        resolve = fish.resolve_project_by_cwd
+        self.assertEqual(fish._canonical_path(str(self.LINK)),
+                         fish.normalize_workspace_path(str(self.real)),
+                         "物理归一没把 junction 折到真实目录（这条判据的前提失效）")
+        target = str(self.LINK / "sessions")
+        # 前提自证：只做文本归一时这两个写法**匹配不上**，所以下面的绿必须来自 realpath
+        self.assertFalse(
+            fish.normalize_workspace_path(target).startswith(
+                fish.normalize_workspace_path(str(self.real)) + "/"),
+            "夹具无效：这两种写法文本归一后就相等了（测不到 realpath）")
+        self._map(self.real, "DSHHOME")
+        self.assertEqual(resolve(self.conn, target), "DSHHOME",
+                         "junction 写法没命中以真实路径写的映射（realpath 比对没生效）")
+        self.assertEqual(resolve(self.conn, str(self.real / "sessions")), "DSHHOME",
+                         "反例自证：真实路径写法也必须命中")
+
+    def test_mapping_written_in_link_path_matches_real_cwd(self):
+        resolve = fish.resolve_project_by_cwd
+        mapped = str(self.LINK / "sessions" / "--I-app-anyi--")
+        self._map(mapped, "LINKPROJ")
+        self.assertEqual(resolve(self.conn, str(self.real / "sessions" / "--I-app-anyi--" / "deeper")),
+                         "LINKPROJ", "反向也不行：映射写 junction、cwd 报真实路径时匹配不上")
+
+    def test_longest_prefix_semantics_survive_realpath(self):
+        """realpath 只补一次比对，**不许**把"最长前缀 + 分量边界"改成"谁先命中谁赢"。"""
+        resolve = fish.resolve_project_by_cwd
+        self._map(self.real, "OUTER")
+        self._map(self.real / "sessions", "INNER")
+        self.assertEqual(resolve(self.conn, str(self.LINK / "sessions" / "abc")), "INNER",
+                         "更具体的前缀没赢（链接路径把最长前缀语义弄丢了）")
+        self.assertEqual(resolve(self.conn, str(self.LINK / "other")), "OUTER")
+        self.assertEqual(resolve(self.conn, str(self.LINK / "sessionsX")), "OUTER",
+                         "分量边界被破坏：`sessionsX` 被 `sessions` 吞了（裸 startswith）")
+
+    def test_unrelated_path_still_none(self):
+        self._map(self.real, "DSHHOME")
+        self.assertIsNone(fish.resolve_project_by_cwd(self.conn, "C:/Windows/System32"),
+                          "无关路径被链接归一误伤了（realpath 不能把不同目录折到一起）")
+
+    def test_realpath_failure_falls_back_to_text(self):
+        """盘不存在/没权限时 `realpath` 会失败：**不许抛**，退回文本归一继续比。"""
+        self._map("Q:/no-such-drive/proj", "GHOST")
+        boom = mock.patch.object(fish.os.path, "realpath", side_effect=OSError("boom"))
+        with boom:
+            self.assertEqual(fish._canonical_path("Q:/no-such-drive/proj"),
+                             "q:/no-such-drive/proj", "realpath 失败没退回文本归一")
+            self.assertEqual(fish.resolve_project_by_cwd(self.conn, "Q:/no-such-drive/proj/sub"),
+                             "GHOST", "realpath 失败时整条解析抛了/断了")
 
 
 if __name__ == "__main__":

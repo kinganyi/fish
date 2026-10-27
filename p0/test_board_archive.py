@@ -166,7 +166,7 @@ class BoardArchiveTest(unittest.TestCase):
         b = fish.board_checkin(self.conn, CID, "今天的", scope="project", scope_key="PB")
         fish.board_render(self.conn, self.root, b)
         root_b = fish.board_ensure(self.conn, "root", "")
-        root_p = self.root / root_b["path"]
+        root_p = fish.board_out_path(self.root, root_b)
         self.assertIn("今日有效看板（1 块）", root_p.read_text(encoding="utf-8"))
         fish.board_sweep(self.conn, self.root, days=7)
         txt = root_p.read_text(encoding="utf-8")

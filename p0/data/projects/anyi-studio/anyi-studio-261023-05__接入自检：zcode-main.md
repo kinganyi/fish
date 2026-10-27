@@ -1,6 +1,0 @@
-# 接入自检：zcode-main
-
-> 编码：anyi-studio-261023-05 ｜ 类型：episode ｜ 记录于 2026-10-23T15:31:43Z
-
-anyi-studio-审查B 会话接入 fish 自检：whoami/register/remember/recall 四步全通过。会话名 anyi-studio-审查B，角色 代码审查，公民 17927685072419E5219887E1C4。
-

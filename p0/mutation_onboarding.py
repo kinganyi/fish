@@ -12,12 +12,16 @@
 
 纪律：每个变异体跑完**立刻**从备份逐字节还原，并校验 sha256；还原失败立即中止。
 **全程只碰源码副本与 tempdir**（测试自己用 mkdtemp），不碰生产库。
+2026-10-26（F1）：读写统一走 `mutation_source.SourceText`（工作树是 CRLF，匹配在
+LF 归一视图上做、写回保持原风格、还原走备份的原始字节）。
 """
 import hashlib
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+from mutation_source import SourceText
 
 P0 = Path(__file__).resolve().parent
 FISH = P0 / "fish.py"
@@ -38,16 +42,14 @@ MUTATIONS = [
 
     ("M-B1", "register 顺手把凭证改指向新公民（违反「不改身份语义」）", MCP,
      '        return (f"{cid}\\n{name} / {kind}\\n"\n'
-     '                + self._credential_unmoved_note(ident, name)\n'
-     '                + self._register_next_step(a, cid))\n',
+     '                + self._identity_source_line(ident, registered=True) + "\\n"\n',
      '        if ident and ident.citizen_id:     # 变异：register 顺手改归属\n'
      '            self.conn.execute(\n'
      '                "UPDATE session_tokens SET citizen_id=? WHERE citizen_id=?",\n'
      '                (cid, ident.citizen_id))\n'
      '            self.conn.commit()\n'
      '        return (f"{cid}\\n{name} / {kind}\\n"\n'
-     '                + self._credential_unmoved_note(ident, name)\n'
-     '                + self._register_next_step(a, cid))\n',
+     '                + self._identity_source_line(ident, registered=True) + "\\n"\n',
      ["test_B_register_does_not_change_attribution"]),
 
     ("M-C1", "hook 不查候选（直接当「没有」）", HOOK,
@@ -127,13 +129,14 @@ def main() -> int:
 
     results = []
     for mid, desc, target, old, new, tests in MUTATIONS:
-        src = target.read_text(encoding="utf-8")
-        if src.count(old) != 1:
-            print(f"\n{mid}: 片段命中 {src.count(old)} 次（必须恰好 1 次），跳过")
+        src = SourceText(target)
+        hits = src.count(old)
+        if hits != 1:
+            print(f"\n{mid}: 片段命中 {hits} 次（必须恰好 1 次），跳过")
             print(f"  想找: {old[:90]!r}")
             results.append((mid, desc, "SKIP"))
             continue
-        target.write_text(src.replace(old, new, 1), encoding="utf-8")
+        src.write(src.replaced(old, new))
         try:
             rc = run(tests)
             status = "红（符合预期）" if rc != 0 else "绿（变异没生效！）"

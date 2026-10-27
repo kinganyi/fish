@@ -138,17 +138,19 @@ MUTATIONS = [
      ["test_F_no_attention_no_section"]),
 
     ("M-G1", "裁剪顺序里把「规矩」提到最前（先砍规矩）",
+     # 靶点只取 **L2 那个循环本身**（2026-10-26 修）：上一版把「L2 循环」与
+     # 「注意事项循环」两段拼成一个片段，而两者之间现在夹着一整段解释裁剪
+     # 顺序的注释（`fish.py:7641-7658`）——注释一改，靶点就失配、整条变异被 SKIP。
+     # 纪律：靶点落在**紧邻的语句**上，绝不跨过可自由改写的注释区。
      '    while total() > budget and l2:\n'
      '        l2 = ""\n'
-     '        trimmed.append("L2")\n'
-     '    while total() > budget and attention_text:\n',
+     '        trimmed.append("L2")\n',
      '    while total() > budget and rules_text:      # 变异：先砍规矩\n'
      '        rules_text = ""\n'
      '        trimmed.append("规矩")\n'
      '    while total() > budget and l2:\n'
      '        l2 = ""\n'
-     '        trimmed.append("L2")\n'
-     '    while total() > budget and attention_text:\n',
+     '        trimmed.append("L2")\n',
      ["test_G_trim_order_drops_index_before_rules"]),
 
     ("M-H1", "meta 不记 rules_codes（包里印了但 meta 空）",

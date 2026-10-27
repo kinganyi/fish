@@ -680,7 +680,13 @@ CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL,
             "remember", "recall", "neighbors", "resolve_code", "read_body",
             "add_project", "supersede", "whoami", "register", "rename_citizen",
             "close_project", "reopen_project", "inject", "healthcheck",
-            "session_start", "board"])
+            "session_start", "board",
+            # 2026-10-26（T05 / B3）：知识库读 / 写两个工具（裁决 C2：读与写是**两个权限位**，
+            # 不合成一个；不然后果是"只想看目录"的调用也拿到一份写权限的说明书）。
+            "kb", "kb_write",
+            # 2026-10-27（语料层 T03）：18 → 19，新增 `corpus`（三读动作；
+            # 声明式契约变更，旧 18 个工具的描述/schema 由 golden 逐字锁住）。
+            "corpus"])
         expect = {
             "remember": {"project", "title", "body", "mem_type", "tags", "cause",
                          "occurred_at", "supersedes", "attachments"},
@@ -691,17 +697,34 @@ CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL,
             "read_body": {"code"},
             "add_project": {"prefix", "namespace"},
             "supersede": {"code", "by", "reason"},
-            "whoami": set(),
+            # 2026-10-26（反馈批 C · FB-03）：whoami 新增可选 `all`（相关公民清单）。
+            # 与 test_identity_p1c 的同一处基线变更同源：声明式加一个可选字段。
+            "whoami": {"all"},
             "register": {"display_name", "kind", "role", "host", "session_name"},
             "rename_citizen": {"name", "reason"},
             "close_project": {"prefix", "reason"},
             "reopen_project": {"prefix", "reason"},
-            "inject": {"budget", "project"},
+            # 2026-10-26（反馈批 B · FB-02）：inject 的 `sections` / `include_board`
+            # 同为**声明过的**基线变更（B 批漏登记，C 批同步；与 p1c 同一处口径）。
+            "inject": {"budget", "project", "sections", "include_board"},
             "healthcheck": set(),
             # 2026-10-25 加（用户批准的工具数变更）：MCP 面唯一的签发口。
             "session_start": {"citizen", "display_name", "session_name", "project", "kind"},
             "board": {"action", "project", "doing", "surface", "kind", "text",
                       "status", "assume_surface"},
+            # 2026-10-26（T05 / B3）：字段与架构设计 §3.3 逐字一致；token 由 `_attach_token` 补。
+            # 第二轮（R15）：`kb` 增了可选 `allow_sensitive`（敏感文件正文的二次授权）。
+            # 第四轮（S6 / S8）：`kb_write` 也增了可选 `allow_sensitive`——写面同样要求
+            # 显式二次授权（凭证/.env 默认拒写），所以这条冻结字段必须同步；`token` 依旧
+            # 不在 required 里（`test_02` 钉着）。
+            "kb": {"action", "vault", "path", "query", "depth", "limit", "max_chars",
+                   "allow_sensitive"},
+            "kb_write": {"action", "vault", "path", "content", "frontmatter",
+                         "base_sha256", "reason", "allow_sensitive"},
+            # 2026-10-27（语料层 T03）：18 → 19，新增 `corpus`（三读动作）。
+            # token 由 `_attach_token` 统一补；这里只列业务字段。
+            "corpus": {"action", "host", "limit", "max_chars", "pointer", "project",
+                       "query", "ranker", "role"},
         }
         for t in mcp_server.TOOLS:
             self.assertEqual(set(t["inputSchema"]["properties"]), expect[t["name"]] | {"token"},

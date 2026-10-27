@@ -1,0 +1,40 @@
+# fish.py 拆包第一轮 · 对拍命令清单（T01 · 设计 §1.5）
+#
+# 格式：<slug>|<root>|<args...>
+#   slug = 结果文件名/对比键（不含空格）
+#   root = main（夹具的 data/）| empty（`init` 用的空库，必须不存在）
+#   args = 传给 fish 的参数；`--root` 由捕获器写在最前面（设计 §1.5：`--root` 在子命令之前）
+#
+# 占位符：
+#   {fixture} = 本次工作副本根（复制自 _golden/r1/fixture）
+#   {write_id} = 上一条回执里 `fish kb rollback <id>` 的 id
+#
+# 顺序的两条硬约束（不是口味，是"可比"的前提）：
+#   ① `layout render` / `layout verify` 必须排在**任何会改库的命令之前**：
+#      门面产物里带 `最近扫描=<ts>`，而 `kb vault scan` 会把那一列改成"现在"；
+#      产物还有文件 sha256——时间戳一变，摘要就变，而摘要**不能**被掩码
+#      （掩掉摘要等于放弃"内容不变"这条判据）。所以让它们只看冻结夹具。
+#   ② 写链自洽：create → append → 回滚 append（文件回到 create 后的字节数），
+#      之后才做备份保留策略（那时才有多份回滚点可数）。
+help|main|--help
+kb-help|main|kb --help
+layout-render|main|layout render --all --as-of 2026-01-02T03:04:05Z
+layout-verify|main|layout verify
+vault-list|main|kb vault list
+vault-scan|main|kb vault scan
+tree|main|kb tree
+tree-json|main|kb tree --json
+open|main|kb open 00-首页/欢迎.md
+open-json|main|kb open 00-首页/欢迎.md --json
+search|main|kb search 金色池塘
+stats|main|kb stats
+doctor-json|main|kb doctor --json
+write-create|main|kb write 30-新写/基线.md --create --content-file {fixture}/content.md
+write-append|main|kb write 30-新写/基线.md --append --content-file {fixture}/content.md
+rollback|main|kb rollback {write_id}
+backup-prune-dry|main|kb backup prune --keep-days 7 --dry-run
+backup-prune|main|kb backup prune --keep-days 7
+board-show|main|board show
+inject-json|main|inject --json --citizen C-GOLDEN-0001
+healthcheck|main|healthcheck
+init-empty|empty|init

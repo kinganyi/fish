@@ -1,0 +1,256 @@
+# H1-everything-fast
+# URL: http://www.voidtools.com/forum/viewtopic.php?p=33425
+# 说明: Everything 为什么这么快（voidtools 论坛）
+# 抓取: 2026-10-27 10:35:15（bsk 浏览器）
+======================================================================
+
+@vom 1
+@view 926x970
+@layers 1 focus=L1
+L1 page
+  RootWebArea "How the #*$@ is everything so fast? - voidtools forum"
+    banner "voidtools forum Everything Search Engine"
+      link "Home" [ctx: voidtools forum]
+      heading "voidtools forum"
+        StaticText "voidtools forum"
+      paragraph "Everything Search Engine"
+        StaticText "Everything Search Engine"
+      paragraph
+        link "Skip to content"
+      search
+        form
+          group
+            searchbox "Search for keywords" [empty] placeholder="Search…"
+            button "Search"
+            link "Advanced search"
+    navigation "‹ ‹ ‹"
+      listitem
+        link "Quick links"
+      listitem
+        menuitem "FAQ"
+      listitem
+        menuitem "Contact us"
+      listitem
+        menuitem "Login"
+      listitem
+        menuitem "Register"
+      menubar "‹ ‹ ‹"
+        listitem
+          link "Home"
+          link "Board index"
+          link "Everything"
+          link "General"
+        StaticText "‹"
+        StaticText "‹"
+        StaticText "‹"
+    main "5 posts • Page 1 of 1 Posts: Joined: Wed Oct 14, 2020 3:34 am by » Wed Oct 14, 2020 3:42 am It takes longer for windows explorer to do a properties on a folder with 5000 items than everything takes to fully index whole drives of 500000+ ite"
+      heading "How the #*$@ is everything so fast?"
+        link "How the #*$@ is everything so fast?" [ctx: voidtools forum Everything Search Engine ‹ ‹ ‹]
+      link "Post Reply" [ctx: How the #*$@ is everything so fast?]
+      button "Topic tools" [ctx: How the #*$@ is everything so fast?]
+      search
+        form
+          group
+            searchbox "Search this topic…" [empty] placeholder="Search this topic…"
+            button "Search" [ctx: How the #*$@ is everything so fast?]
+            link "Advanced search" [ctx: How the #*$@ is everything so fast?]
+      strong "1"
+        StaticText "1"
+      strong "1"
+        StaticText "1"
+      StaticText "5 posts • Page"
+      StaticText "of"
+      DescriptionList "Posts: Joined: Wed Oct 14, 2020 3:34 am"
+        term "silversword"
+          link "silversword" [ctx: How the #*$@ is everything so fast?]
+        definition "Posts:"
+          strong "Posts:"
+            StaticText "Posts:"
+          link "2" [ctx: How the #*$@ is everything so fast?]
+        definition "Joined: Wed Oct 14, 2020 3:34 am"
+          strong "Joined:"
+            StaticText "Joined:"
+          StaticText "Wed Oct 14, 2020 3:34 am"
+      heading "How the #*$@ is everything so fast?"
+        link "How the #*$@ is everything so fast?" [ctx: Posts: Joined: Wed Oct 14, 2020 3:34 am]
+      list
+        listitem
+          link "Quote" [ctx: How the #*$@ is everything so fast?]
+      paragraph "by » Wed Oct 14, 2020 3:42 am"
+        link "Post" [ctx: How the #*$@ is everything so fast?]
+        link "silversword" [ctx: How the #*$@ is everything so fast?]
+        time "Wed Oct 14, 2020 3:42 am"
+          StaticText "Wed Oct 14, 2020 3:42 am"
+        StaticText "by"
+        StaticText "»"
+      image ";)"
+      StaticText "It takes longer for windows explorer to do a properties on a folder with 5000 items than everything takes to fully index whole drives of 500000+ items."
+      StaticText "How in the everloving @#$* is this software so fast when windows can't do even tell me properties on a folder?"
+      StaticText "Is this witchcraft?"
+      StaticText "Do I need to call the priest for an excorcism?"
+      StaticText "Should I lay a circle of salt around my computer for protection while I sleep?"
+      StaticText "Curious George wants to know"
+      link "Top" [ctx: How the #*$@ is everything so fast?]
+      DescriptionList "Posts: Joined: Thu Oct 27, 2016 7:19 pm"
+        term "ovg"
+          link "ovg" [ctx: 5 posts • Page of 1 1]
+        definition "Posts:"
+          strong "Posts:"
+            StaticText "Posts:"
+          link "295"
+        definition "Joined: Thu Oct 27, 2016 7:19 pm"
+          strong "Joined:"
+            StaticText "Joined:"
+          StaticText "Thu Oct 27, 2016 7:19 pm"
+      heading "Re: How the #*$@ is everything so fast?"
+        link "Re: How the #*$@ is everything so fast?" [ctx: 5 posts • Page of 1 1]
+      list
+        listitem
+          link "Quote" [ctx: Re: How the #*$@ is everything so fast?]
+      paragraph "by » Wed Oct 14, 2020 5:17 am"
+        link "Post" [ctx: 5 posts • Page of 1 1]
+        link "ovg" [ctx: 5 posts • Page of 1 1]
+        time "Wed Oct 14, 2020 5:17 am"
+          StaticText "Wed Oct 14, 2020 5:17 am"
+        StaticText "by"
+        StaticText "»"
+      image ":mrgreen:"
+      StaticText "You have forgotten the garlic also"
+      link "Top" [ctx: 5 posts • Page of 1 1]
+      DescriptionList "Posts: Joined: Wed May 24, 2017 9:22 pm"
+        term "NotNull"
+          link "NotNull" [ctx: Posts: Joined: Wed Oct 14, 2020 3:34 am by » Wed Oct 14, 2020 3:42 am It takes longer for windows explorer to do a properties on a folder with 5000 items than everything takes to fully index whole drives of 500000+ items. How in the everlov]
+        definition "Posts:"
+          strong "Posts:"
+            StaticText "Posts:"
+          link "5991"
+        definition "Joined: Wed May 24, 2017 9:22 pm"
+          strong "Joined:"
+            StaticText "Joined:"
+          StaticText "Wed May 24, 2017 9:22 pm"
+      heading "Re: How the #*$@ is everything so fast?"
+        link "Re: How the #*$@ is everything so fast?" [ctx: Posts: Joined: Wed Oct 14, 2020 3:34 am by » Wed Oct 14, 2020 3:42 am It takes longer for windows explorer to do a properties on a folder with 5000 items than everything takes to fully index whole drives of 500000+ items. How in the everlov]
+      list
+        listitem
+          link "Quote" [ctx: Re: How the #*$@ is everything so fast?]
+      paragraph "by » Wed Oct 14, 2020 12:19 pm"
+        link "Post" [ctx: Posts: Joined: Wed Oct 14, 2020 3:34 am by » Wed Oct 14, 2020 3:42 am It takes longer for windows explorer to do a properties on a folder with 5000 items than everything takes to fully index whole drives of 500000+ items. How in the everlov]
+        link "NotNull" [ctx: Posts: Joined: Wed Oct 14, 2020 3:34 am by » Wed Oct 14, 2020 3:42 am It takes longer for windows explorer to do a properties on a folder with 5000 items than everything takes to fully index whole drives of 500000+ items. How in the everlov]
+        time "Wed Oct 14, 2020 12:19 pm"
+          StaticText "Wed Oct 14, 2020 12:19 pm"
+        StaticText "by"
+        StaticText "»"
+      blockquote " Everything scans the MFT directly, which limits Everything to NTFS volumes only. Everything makes a very light copy of this mft and keeps it in memory, using the USN Change journal to monitor changes. Searches are compiled into byte code"
+        StaticText ""
+        StaticText "Everything scans the MFT directly, which limits Everything to NTFS volumes only."
+        StaticText "Everything makes a very light copy of this mft and keeps it in memory, using the USN Change journal to monitor changes."
+        StaticText "Searches are compiled into byte code and executed."
+      link "source" [ctx: Posts: Joined: Wed Oct 14, 2020 3:34 am by » Wed Oct 14, 2020 3:42 am It takes longer for windows explorer to do a properties on a folder with 5000 items than everything takes to fully index whole drives of 500000+ items. How in the everlov]
+      StaticText "The official statement is:"
+      StaticText "("
+      StaticText ")"
+      StaticText "But I am pretty sure it is because Everything runs on extremely powerful batteries, based on alien technology ..."
+      link "Top" [ctx: Posts: Joined: Wed Oct 14, 2020 3:34 am by » Wed Oct 14, 2020 3:42 am It takes longer for windows explorer to do a properties on a folder with 5000 items than everything takes to fully index whole drives of 500000+ items. How in the everlov]
+      DescriptionList "Posts: Joined: Wed Oct 14, 2020 3:34 am"
+        term "silversword"
+          link "silversword" [ctx: Posts: Joined: Thu Oct 27, 2016 7:19 pm by » Wed Oct 14, 2020 5:17 am You have forgotten the garlic also]
+        definition "Posts:"
+          strong "Posts:"
+            StaticText "Posts:"
+          link "2" [ctx: Posts: Joined: Thu Oct 27, 2016 7:19 pm by » Wed Oct 14, 2020 5:17 am You have forgotten the garlic also]
+        definition "Joined: Wed Oct 14, 2020 3:34 am"
+          strong "Joined:"
+            StaticText "Joined:"
+          StaticText "Wed Oct 14, 2020 3:34 am"
+      heading "Re: How the #*$@ is everything so fast?"
+        link "Re: How the #*$@ is everything so fast?" [ctx: Posts: Joined: Thu Oct 27, 2016 7:19 pm by » Wed Oct 14, 2020 5:17 am You have forgotten the garlic also]
+      list
+        listitem
+          link "Quote" [ctx: Re: How the #*$@ is everything so fast?]
+      paragraph "by » Wed Oct 28, 2020 10:17 pm"
+        link "Post" [ctx: Posts: Joined: Thu Oct 27, 2016 7:19 pm by » Wed Oct 14, 2020 5:17 am You have forgotten the garlic also]
+        link "silversword" [ctx: Posts: Joined: Thu Oct 27, 2016 7:19 pm by » Wed Oct 14, 2020 5:17 am You have forgotten the garlic also]
+        time "Wed Oct 28, 2020 10:17 pm"
+          StaticText "Wed Oct 28, 2020 10:17 pm"
+        StaticText "by"
+        StaticText "»"
+      blockquote " wrote: Wed Oct 14, 2020 12:19 pm The official statement is:  Everything scans the MFT directly, which limits Everything to NTFS volumes only. .... ( ) But I am pretty sure it is because Everything runs on extremely powerful batteries, ba"
+        StaticText ""
+        link "NotNull" [ctx: Posts: Joined: Thu Oct 27, 2016 7:19 pm by » Wed Oct 14, 2020 5:17 am You have forgotten the garlic also]
+        link "View quoted post"
+        StaticText "Wed Oct 14, 2020 12:19 pm"
+        StaticText "wrote:"
+        blockquote " Everything scans the MFT directly, which limits Everything to NTFS volumes only. ...."
+          StaticText ""
+          StaticText "Everything scans the MFT directly, which limits Everything to NTFS volumes only."
+          StaticText "...."
+        link "source" [ctx: Posts: Joined: Thu Oct 27, 2016 7:19 pm by » Wed Oct 14, 2020 5:17 am You have forgotten the garlic also]
+        StaticText "The official statement is:"
+        StaticText "("
+        StaticText ")"
+        StaticText "But I am pretty sure it is because Everything runs on extremely powerful batteries, based on alien technology ..."
+      image ":)"
+      StaticText "Wow, sure would be nice if some Microsoft Developers had enough brains and skills to put Everything's techniques into explorer and Windows search and actually make Windows better, the layers of cruft that have been put into windows (7's file copy was so much faster than 10's etc)."
+      StaticText "In the mean time, thank you Alien batteries"
+      link "Top" [ctx: Posts: Joined: Thu Oct 27, 2016 7:19 pm by » Wed Oct 14, 2020 5:17 am You have forgotten the garlic also]
+      DescriptionList "Posts: Joined: Wed Dec 02, 2020 5:35 pm"
+        term "Siress"
+          link "Siress" [ctx: Posts: Joined: Wed May 24, 2017 9:22 pm by » Wed Oct 14, 2020 12:19 pm The official statement is:  Everything scans the MFT directly, which limits Everything to NTFS volumes only. Everything makes a very light copy of this mft and keeps it]
+        definition "Posts:"
+          strong "Posts:"
+            StaticText "Posts:"
+          link "2" [ctx: Posts: Joined: Wed May 24, 2017 9:22 pm by » Wed Oct 14, 2020 12:19 pm The official statement is:  Everything scans the MFT directly, which limits Everything to NTFS volumes only. Everything makes a very light copy of this mft and keeps it]
+        definition "Joined: Wed Dec 02, 2020 5:35 pm"
+          strong "Joined:"
+            StaticText "Joined:"
+          StaticText "Wed Dec 02, 2020 5:35 pm"
+      heading "Re: How the #*$@ is everything so fast?"
+        link "Re: How the #*$@ is everything so fast?" [ctx: Posts: Joined: Wed May 24, 2017 9:22 pm by » Wed Oct 14, 2020 12:19 pm The official statement is:  Everything scans the MFT directly, which limits Everything to NTFS volumes only. Everything makes a very light copy of this mft and keeps it]
+      list
+        listitem
+          link "Quote" [ctx: Re: How the #*$@ is everything so fast?]
+      paragraph "by » Wed Dec 02, 2020 5:45 pm"
+        link "Post" [ctx: Posts: Joined: Wed May 24, 2017 9:22 pm by » Wed Oct 14, 2020 12:19 pm The official statement is:  Everything scans the MFT directly, which limits Everything to NTFS volumes only. Everything makes a very light copy of this mft and keeps it]
+        link "Siress" [ctx: Posts: Joined: Wed May 24, 2017 9:22 pm by » Wed Oct 14, 2020 12:19 pm The official statement is:  Everything scans the MFT directly, which limits Everything to NTFS volumes only. Everything makes a very light copy of this mft and keeps it]
+        time "Wed Dec 02, 2020 5:45 pm"
+          StaticText "Wed Dec 02, 2020 5:45 pm"
+        StaticText "by"
+        StaticText "»"
+      StaticText "Preface: I don't actually know."
+      StaticText "One thing that's apparent to me is that Everything performs indexing (the part that takes a while...) on startup/schedule while the File Explorer search seems to only index the files when you initiate a query. The way Everything does it is great for getting quick results to queries, but has the drawback of returning outdated results and indexing the entire domain before it's usable. Since you can schedule the rescans with Everything, I don't even see a practical drawback with it to be honest."
+      link "Top" [ctx: Posts: Joined: Wed May 24, 2017 9:22 pm by » Wed Oct 14, 2020 12:19 pm The official statement is:  Everything scans the MFT directly, which limits Everything to NTFS volumes only. Everything makes a very light copy of this mft and keeps it]
+      link "Post Reply" [ctx: Posts: Joined: Wed Oct 14, 2020 3:34 am by » Wed Oct 28, 2020 10:17 pm  wrote: Wed Oct 14, 2020 12:19 pm The official statement is:  Everything scans the MFT directly, which limits Everything to NTFS volumes only. .... ( ) But I am pretty]
+      button "Topic tools" [ctx: Posts: Joined: Wed Oct 14, 2020 3:34 am by » Wed Oct 28, 2020 10:17 pm  wrote: Wed Oct 14, 2020 12:19 pm The official statement is:  Everything scans the MFT directly, which limits Everything to NTFS volumes only. .... ( ) But I am pretty]
+      form "Display: Sort by: Direction:"
+        button "Display and sorting options"
+      strong "1"
+        StaticText "1"
+      strong "1"
+        StaticText "1"
+      StaticText "5 posts • Page"
+      StaticText "of"
+      paragraph
+        link "Return to “General”" [ctx: Posts: Joined: Wed Dec 02, 2020 5:35 pm by » Wed Dec 02, 2020 5:45 pm Preface: I don't actually know. One thing that's apparent to me is that Everything performs indexing (the part that takes a while...) on startup/schedule while the File E]
+      button "Jump to" [ctx: Posts: Joined: Wed Dec 02, 2020 5:35 pm by » Wed Dec 02, 2020 5:45 pm Preface: I don't actually know. One thing that's apparent to me is that Everything performs indexing (the part that takes a while...) on startup/schedule while the File E]
+    contentinfo "‹ All times are UTC Powered by ® Forum Software © phpBB Limited |"
+      navigation "‹ All times are UTC"
+        menubar "‹ All times are UTC"
+          listitem
+            link "Home"
+            link "Board index"
+          listitem "All times are UTC"
+            StaticText "UTC"
+          listitem
+            menuitem "Delete cookies"
+          listitem
+            menuitem "Contact us"
+          StaticText "‹"
+          StaticText "All times are"
+      paragraph "Powered by ® Forum Software © phpBB Limited"
+        link "phpBB" [→ www.phpbb.com]
+        StaticText "Powered by"
+        StaticText "® Forum Software © phpBB Limited"
+      menu "|"
+        menuitem "Privacy" [ctx: ‹ All times are UTC]
+        menuitem "Terms" [ctx: ‹ All times are UTC]
+        StaticText "|"

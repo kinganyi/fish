@@ -43,6 +43,12 @@ from __future__ import annotations
 import json
 import sys
 
+# 决策词表（`hook-protocol/src/codec.ts:97-133` 只认这三个值）。
+# **fish 本批只用 `ask`**：凭证 deny 与危险命令 ask 由宿主机制负责（用户 2026-10-26
+# 拍板不做重复造轮子）；`allow/deny` 留在词表里只是为了这个出口不撒谎——
+# 若将来真要写，也走同一个出口，而不是又冒一份 json.dumps。
+DECISIONS = ("allow", "deny", "ask")
+
 
 def emit(hook_event_name: str, text: str) -> None:
     """输出 hook 协议要求的 `hookSpecificOutput`（ASCII 安全，带换行）。"""
@@ -50,6 +56,30 @@ def emit(hook_event_name: str, text: str) -> None:
         "hookSpecificOutput": {
             "hookEventName": hook_event_name,
             "additionalContext": text,
+        }
+    }, ensure_ascii=True) + "\n")
+    sys.stdout.flush()
+
+
+def emit_decision(hook_event_name: str, decision: str, reason: str) -> None:
+    """输出 PreToolUse 的**决策**块（`permissionDecision` + 可读原因）。
+
+    三条硬要求（都来自实测，不是风格）：
+
+      1. `hookEventName` 必须与当前事件一致，否则 `codec.ts` 会**整块丢弃且不报错**
+         ——表现是"hook 明明输出了，宿主像没收到一样"；
+      2. `permissionDecision` 只认 `allow/deny/ask`，别的值一律被忽略；
+      3. `ensure_ascii=True`：跨宿主唯一安全形态（GBK 写出 + UTF-8 读入会乱码）。
+
+    `reason` 会直接显示给人看，所以**不许含公民 ULID、不许含文件内容**。
+    """
+    if decision not in DECISIONS:
+        raise ValueError(f"未知决策 decision={decision!r}（可用：{', '.join(DECISIONS)}）")
+    sys.stdout.write(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": hook_event_name,
+            "permissionDecision": decision,
+            "permissionDecisionReason": reason,
         }
     }, ensure_ascii=True) + "\n")
     sys.stdout.flush()

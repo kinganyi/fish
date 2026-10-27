@@ -23,6 +23,14 @@ r"""每日任务：生成使用报告 + 生成一份可独立打开的数据库�
 保留策略：只留最近 14 天（含今天）。只删**名字能解析成日期**的目录，其它一律不动，
           并且每次删除前确认目标在 `_backups` 之下（防越界）。
 
+语料采集（2026-10-27 复审 🟠-1）：**默认关闭**。全量采集是分钟级动作（实测 515 个
+  DSH 会话 + 4GB WorkBuddy），挂在日报上会让每个日报用例、每次定时任务都去扫真实
+  日志。三种开启方式（优先级从高到低）：
+    ① `python daily_report.py --corpus`            —— 只这次跑；
+    ② `FISH_CORPUS_DISABLE=0`（=1 则强制关断）     —— 临时，环境影响；
+    ③ `fish config set corpus.daily_enabled 1`     —— 持久配置（默认 false）。
+  关闭时日报仍会打印一行"语料采集：跳过（…）"，把开关状态明说出来。
+
 计划任务注册（用户级，不需要管理员）：
   schtasks /create /tn "fish_daily_report" /sc daily /st 23:00 ^
     /tr "\"C:\Users\15596\AppData\Local\Programs\Python\Python311\python.exe\" \"I:\app\DSH-Home\workspace\learn\大肥鱼生命系统\p0\daily_report.py\""
@@ -78,7 +86,59 @@ def _counts(conn) -> dict:
         "superseded": one("SELECT COUNT(*) FROM code_index WHERE status='superseded'"),
         "events": one("SELECT COUNT(*) FROM events"),
         "citizens": one("SELECT COUNT(*) FROM citizens"),
+        # 2026-10-26（T02）：动作流也进备份对账。缺表（旧库还没迁移）→ None，
+        # 不是 0：0 是"表在但没数据"，两者不能混。
+        "tool_activity": one("SELECT COUNT(*) FROM tool_activity"),
     }
+
+
+def prune_activity(days=None, db_path=None) -> dict:
+    """按保留期清理动作流 + 撞车审计（返回 `{pruned, asks_pruned, days}`）。
+
+    为什么挂在每日任务：动作流是低语义审计、按天滚动的数据，天然"每天该清一次"；
+    而清理 SQL 只在 `fish_activity.prune` 一处（本函数只负责开库/关库）。
+    失败不抛：派生数据的失败不该让备份假红（主流程 = 报告 + 备份）。
+    """
+    db_path = Path(db_path or DB)
+    data_dir = db_path.parent
+    result = {"pruned": 0, "asks_pruned": 0, "days": None}
+    if not db_path.exists():
+        return result
+    conn = sqlite3.connect(str(db_path), timeout=30.0)
+    try:
+        conn.execute("PRAGMA busy_timeout=15000")
+        import fish_activity
+        keep = int(days if days is not None else fish_activity.get_cfg(
+            conn, "activity.retention_days"))
+        result["days"] = keep
+        result["pruned"] = fish_activity.prune(conn, days=keep)
+    finally:
+        conn.close()
+    # 撞车审计：同一条保留期。只删"整行是合法 JSON 且时间早于截止"的行，
+    # 半行/坏行原样留着（审计文件的坏行本身就是证据）。
+    if int(result["days"] or 0) > 0:
+        asks = data_dir / "_audit" / "hooks" / "pretool-asks.jsonl"
+        if asks.exists():
+            cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                      - datetime.timedelta(days=int(result["days"]))).strftime(
+                          "%Y-%m-%dT%H:%M:%SZ")
+            kept, removed = [], 0
+            try:
+                for line in asks.read_text(encoding="utf-8").splitlines():
+                    try:
+                        if (json.loads(line).get("ts") or "") >= cutoff:
+                            kept.append(line)
+                        else:
+                            removed += 1
+                    except ValueError:
+                        kept.append(line)
+                tmp = asks.with_name(asks.name + ".tmp")
+                tmp.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+                os.replace(tmp, asks)
+                result["asks_pruned"] = removed
+            except OSError:
+                result["asks_pruned"] = 0
+    return result
 
 
 def _atomic_replace(src: Path, dst: Path, retries: int = 5) -> None:
@@ -247,11 +307,196 @@ def _run_report(days=1):
                           env=env, timeout=120)
 
 
+def archive_citizens_step(data_dir=None, days=None) -> str:
+    """日报的一步（FB-12）：按 `session.archive_after_days` 归档闲置公民，返回**一行**。
+
+    为什么抽成函数而不是写在 `main()` 里：判据要能只测这一步（配 0 说"跳过"、
+    配 N 真归档、失败只落一行），而 `main()` 会顺带跑报告/备份/清理——
+    拿它当夹具等于让每条判据都背上整套副作用与网络无关的重活。
+
+    `days=None` → 读 config；`days<1` → 明写"跳过（未配置）"。
+    默认值就是 0（用户 2026-10-25 裁定：会话归档**无限期**，不给默认天数），
+    所以"什么都不做"必须是**显式**的一句话，不能是静默。
+
+    **异常一律转成一行文本**：报告与备份比它重要，派生动作失败不许拖垮日报
+    （与推送收口 / 看板归档 / 动作流清理同一口径）。
+    """
+    try:
+        sys.path.insert(0, str(HERE))
+        import fish as fishlib             # noqa: PLC0415 —— 延迟导入：日报不该依赖 fish 的加载期副作用
+        conn = fishlib.connect(Path(data_dir or DATA))
+        try:
+            use_days = int(fishlib.get_config(conn, "session.archive_after_days")
+                           if days is None else days)
+            if use_days < 1:
+                return "公民归档：跳过（未配置）"
+            res = fishlib.archive_citizens(conn, days=use_days, dry_run=False)
+        finally:
+            conn.close()
+        line = (f"公民归档：{res['archived_count']} 个（阈值 {use_days} 天，"
+                f"截止 {res['cutoff']}）")
+        if res["skipped"]:
+            line += f"；跳过 {len(res['skipped'])} 个"
+        return line
+    except Exception as e:                 # noqa: BLE001 — 派生数据，不许拖垮主流程
+        return f"公民归档失败：{type(e).__name__}: {e}"
+
+
+# 语料采集的开关（2026-10-27 复审 🟠-1）：**日报默认不采集**。
+# 全量采集是分钟级动作（实测 515 个 DSH 会话 + 4GB WorkBuddy），挂在日报上等于让每个
+# 日报测试/每次定时任务都去扫真实日志——测试里表现为"跑不完"，生产里表现为每天一次
+# 长时间写锁。开启方式写在 `--help` 与 `docs/依赖说明-corpus.md`：见 `CORPUS_ENABLE_HINT`。
+CORPUS_CFG_KEY = "corpus.daily_enabled"
+ENV_CORPUS_DISABLE = "FISH_CORPUS_DISABLE"
+CORPUS_ENABLE_HINT = ("开启：fish config set %s 1（持久）；临时关断：%s=1；"
+                      "单次开启：daily_report.py --corpus"
+                      % (CORPUS_CFG_KEY, ENV_CORPUS_DISABLE))
+
+
+def _parse_bool_env(name):
+    """环境变量的三态解析：`None` = 没设置；`True`/`False` = 明确；其它 → `ValueError`。
+
+    为什么不"差不多就当真"：`FISH_CORPUS_DISABLE=banana` 猜成开或关都是替用户做了一个
+    决定（扫全盘 / 让每天采集静默停掉）——这种值必须响亮，而不是被默默当默认值。
+    """
+    raw = (os.environ.get(name) or "").strip().lower()
+    if raw == "":
+        return None
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ValueError("环境变量 %s 的值无法解释：%r（用 1/0）" % (name, raw))
+
+
+def corpus_daily_enabled(data_dir=None, *, explicit=None) -> dict:
+    """决定"这次日报要不要跑语料采集"，返回 `{"enabled", "source", "reason"}`。
+
+    优先级：`explicit`（函数参数 / CLI 开关）> 环境变量 > 配置（默认 **关闭**）。
+    "为什么关"要能被人读懂（一句开启办法），不是静默跳过；配置读不到时也**关**，
+    因为"读不到"不代表用户开启了它。
+    """
+    if explicit is not None:
+        return {"enabled": bool(explicit), "source": "param",
+                "reason": "本次调用显式%s" % ("开启" if explicit else "关闭")}
+    try:
+        env = _parse_bool_env(ENV_CORPUS_DISABLE)
+    except ValueError as exc:
+        return {"enabled": False, "source": "env", "reason": str(exc)}
+    if env is not None:
+        return {"enabled": not env, "source": "env",
+                "reason": "%s=%d（环境变量%s）"
+                          % (ENV_CORPUS_DISABLE, 1 if env else 0,
+                             "强制关断" if env else "临时开启")}
+    data = Path(data_dir) if data_dir is not None else DATA
+    if not (data / "index.sqlite").exists():
+        return {"enabled": False, "source": "default",
+                "reason": "主库不存在，配置读不到（默认关闭）"}
+    try:
+        conn = fish.connect(data)
+        try:
+            value = bool(fish.get_config(conn, CORPUS_CFG_KEY))
+        finally:
+            conn.close()
+    except Exception as exc:               # noqa: BLE001 —— 读不到配置 = 不采（保守）
+        return {"enabled": False, "source": "config",
+                "reason": "配置读取失败（%s: %s），按关闭处理"
+                          % (type(exc).__name__, exc)}
+    return {"enabled": value, "source": "config",
+            "reason": ("配置 %s=true" % CORPUS_CFG_KEY if value
+                       else "默认关闭（配置 %s 未开启）" % CORPUS_CFG_KEY)}
+
+
+def corpus_ingest_step(root=None, *, enabled=None, reason=None):
+    """语料采集一步（设计 §4.3）：失败只落一行、`busy` 时视为正常跳过（不改退出码）。
+
+    **默认不执行**（2026-10-27 复审 🟠-1）：全量采集是**分钟级**动作（实测 515 个 DSH
+    会话 + 4GB WorkBuddy），挂在日报上等于让每个日报测试、每次定时任务都去扫真实日志
+    ——实测表现是"日报用例跑不完"（测试隔离问题），生产里则是每天一次长时间写锁。
+
+    三档开关（优先级从高到低，见 `corpus_daily_enabled`）：
+      ① 参数 `enabled=True/False`（测试与脚本显式要，`main` 也走这一档）；
+      ② 环境变量 `FISH_CORPUS_DISABLE=1`（临时关断）/ `=0`（临时开启）；
+      ③ 配置 `corpus.daily_enabled`（持久开关，**默认 false**）。
+    关闭时返回一行**说清怎么开**的文本，不是静默跳过。
+
+    采集窗口与 CLI 缺省同一口径：`days=fish_corpus.DEFAULT_WINDOW_DAYS`（3 天，
+    2026-10-27 用户决策）。**必须显式传**——`ingest()` 的函数默认是 `None`（不限），
+    漏传就等于把几个月的历史重新全量投影回来。
+
+    为什么解析器在这里注入：项目/公民归属要读主库（`workspace_map` / `session_tokens`），
+    而语料模块按判据 J2 **不许 import fish**——所以由本模块开一个主库连接喂进去。
+    为什么不做常驻守护：多一个常驻面就多一处要留痕/监控的东西；日报 + 手动 CLI
+    已经满足"每天采一次 + 可查滞后"（设计 D13）。
+    """
+    data = Path(root) if root is not None else DATA
+    try:
+        if enabled is None:
+            decision = corpus_daily_enabled(data)
+            enabled, reason = decision["enabled"], decision["reason"]
+        elif not reason:
+            reason = "调用方显式%s" % ("开启" if enabled else "关闭")
+        if not enabled:
+            return "语料采集：跳过（%s。%s）" % (reason, CORPUS_ENABLE_HINT)
+        sys.path.insert(0, str(HERE))
+        import fish_corpus                  # noqa: PLC0415
+        conn = fish.connect(data)
+        try:
+            res = fish_corpus.ingest(
+                hosts=("dsh", "workbuddy"), root=data,
+                # 时间窗口（2026-10-27 用户决策：**只投影最近 3 天**，更早留待回填）：
+                # 日报是**生产入口**，口径必须与 CLI 缺省一致，所以引用常量而不是再写一个
+                # `3`——两处各写一个数字，改一处就会静默漂成两种口径。注意 `ingest()`
+                # 的函数默认是 `None`（不限）：不显式传，这里就会全量采集。
+                days=fish_corpus.DEFAULT_WINDOW_DAYS,
+                project_of=lambda cwd: fish.resolve_project_by_cwd(conn, cwd),
+                citizen_of=lambda key: fish.fish_activity.resolve_citizen(conn, key),
+                candidates_of=lambda cwd: fish.list_workspace_candidates(conn, cwd))
+        finally:
+            conn.close()
+        if res.get("busy"):
+            return "语料采集：跳过（并发锁被占用，下一轮再采）"
+        line = (f"语料：新增 {res['segments_new']} 段 / 会话 {res['sessions_seen']}"
+                f" / 降级 {len(res['degraded'])} / 孤儿 {len(res['orphan'])}")
+        if res.get("purged_by_segment_tombstone"):
+            line += f" / 台账回收 {res['purged_by_segment_tombstone']} 段"
+        if res.get("warnings"):
+            line += f" / 告警 {len(res['warnings'])}"
+        pruned = fish_corpus.prune_access_log(root=data)      # 审计保留 30 天（设计 §8）
+        if pruned.get("deleted"):
+            line += f"；审计清理 {pruned['deleted']} 行"
+        lag = res.get("lag_sec")
+        if lag is not None and lag > 26 * 3600:
+            line += f" ⚠ 滞后 {round(lag / 3600.0, 1)} h（源日志可能不再增长=假增量）"
+        # C-P0-9 红②（2026-10-27）：连续 N 轮 0 新增但源在变 → 日报必须喊出来。
+        # 只放在 stats 里没人看得到：日报是每天唯一会被人读的那一行。
+        stall = res.get("stall") or {}
+        if stall.get("alarm"):
+            line += (f" ⚠ 语料停滞：连续 {stall.get('zero_streak')} 轮 0 新增但源在变"
+                     "（C-P0-9 红②，查 kinds/事件模型是否漂移）")
+        return line
+    except Exception as e:                 # noqa: BLE001 — 派生数据，不许拖垮主流程
+        return f"语料采集失败：{type(e).__name__}: {e}"
+
+
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="fish 每日任务：生成报告 + 数据库备份")
+    ap = argparse.ArgumentParser(
+        description="fish 每日任务：生成报告 + 数据库备份",
+        epilog=("语料采集**默认关闭**（全量扫描是分钟级动作）。开启方式：\n"
+                "  fish config set corpus.daily_enabled 1      # 持久开启\n"
+                "  python daily_report.py --corpus             # 只这次跑\n"
+                "  FISH_CORPUS_DISABLE=1                        # 临时关断（优先于配置）"))
     ap.add_argument("--skip-report", action="store_true", help="只做备份，不生成报告")
     ap.add_argument("--days", type=int, default=1, help="报告统计最近 N 天（默认 1）")
     ap.add_argument("--keep-days", type=int, default=KEEP_DAYS, help="备份保留天数（默认 14）")
+    corpus_group = ap.add_mutually_exclusive_group()
+    corpus_group.add_argument(
+        "--corpus", dest="corpus_on", action="store_true", default=False,
+        help="本次也跑语料采集（默认不跑；持久开启用 fish config set %s 1）"
+             % CORPUS_CFG_KEY)
+    corpus_group.add_argument(
+        "--no-corpus", dest="corpus_off", action="store_true", default=False,
+        help="本次不跑语料采集（即使配置/环境变量已开启）")
     args = ap.parse_args(argv)
 
     LOG.parent.mkdir(parents=True, exist_ok=True)
@@ -289,6 +534,37 @@ def main(argv=None):
     except Exception as e:                 # noqa: BLE001 — 派生数据，不许拖垮主流程
         board_line = f"看板归档失败：{type(e).__name__}: {e}"
 
+    # 动作流清理（2026-10-26 · T02）：保留期默认 14 天，与撞车审计同一口径。
+    # 按发生顺序：先清旧的 → 再备份（备份里是"已经是正确形状"的库）。
+    activity_line = ""
+    try:
+        pr = prune_activity()
+        if pr["days"] is None:
+            activity_line = "动作流清理：跳过（库不存在）"
+        elif int(pr["days"]) <= 0:
+            activity_line = "动作流清理：跳过（activity.retention_days < 1 = 不清理）"
+        else:
+            activity_line = (f"动作流清理：{pr['pruned']} 行（保留 {pr['days']} 天）；"
+                             f"撞车审计清 {pr['asks_pruned']} 行")
+    except Exception as e:                 # noqa: BLE001 — 派生数据，不许拖垮主流程
+        activity_line = f"动作流清理失败：{type(e).__name__}: {e}"
+
+    # 公民归档（2026-10-26 · FB-12）：30 天裁决的另一半——`archive_citizens` 此前
+    # **没有调用点**，于是"闲置 N 天 → 归档"只有手动 CLI 一条路，冷表永远是空的。
+    # 默认 0 = 不自动归档（无限期），配了 N 才动；异常只落一行，不中断其它步骤。
+    citizen_line = archive_citizens_step()
+
+    # 语料采集（2026-10-27 · T03/T04/T05；同日复审 🟠-1 加闸门）：**默认不采集**。
+    # 是否采集由 `corpus_daily_enabled()` 明确决定（CLI 开关 > 环境变量 > 配置），
+    # 而不是"反正每天都跑一下"——那是最贵的一句默认。
+    corpus_explicit = True if args.corpus_on else (False if args.corpus_off else None)
+    corpus_decision = corpus_daily_enabled(explicit=corpus_explicit)
+    if corpus_explicit is not None:
+        corpus_decision["reason"] = ("命令行 %s" % ("--corpus" if corpus_explicit
+                                                    else "--no-corpus"))
+    corpus_line = corpus_ingest_step(enabled=corpus_decision["enabled"],
+                                     reason=corpus_decision["reason"])
+
     # 备份即使报告失败也要做：数据安全 > 报告成功
     backup_ok, backup_line = True, ""
     try:
@@ -315,6 +591,13 @@ def main(argv=None):
             f.write(push_line + "\n")
         if board_line:
             f.write(board_line + "\n")
+        if activity_line:
+            f.write(activity_line + "\n")
+        # 顺序 = 发生顺序：清理 → 归档（搬行）→ 语料（采集）→ 备份（把采完的状态拍下来）
+        if citizen_line:
+            f.write(citizen_line + "\n")
+        if corpus_line:
+            f.write(corpus_line + "\n")
         f.write(backup_line + "\n")
 
     print(f"[{stamp}] 报告 exit={report_code}；{backup_line}")
@@ -322,6 +605,12 @@ def main(argv=None):
         print(f"[{stamp}] {push_line}")
     if board_line:
         print(f"[{stamp}] {board_line}")
+    if activity_line:
+        print(f"[{stamp}] {activity_line}")
+    if citizen_line:
+        print(f"[{stamp}] {citizen_line}")
+    if corpus_line:
+        print(f"[{stamp}] {corpus_line}")
     return 0 if (report_code == 0 and backup_ok) else 1
 
 

@@ -1,0 +1,295 @@
+%% B1/B2/B3 增量 · 类图（数据模型 + 函数分组）v0.1
+%% 架构师 高见远｜2026-10-26｜基线 fish-devA @ b23a63f
+%% 说明：本项目是「模块级函数」风格，没有服务类。为了让关系看得清，
+%%       把新增函数按职责聚成三个命名空间类（FishLayout / FishProject / FishKB）与一个工具面类（FishMCP）。
+%%       它们**不是要新建的 Python 类**，只是图上的分组；实际符号名见架构设计 §1.5。
+%%       与既有表的关系：本批只**读**它们，唯一的语义变更是 Boards.path。
+
+classDiagram
+    direction LR
+
+    %% ============ 新增表（本批唯一的结构增量） ============
+    class KBVault {
+      <<table>>
+      +TEXT vault_id  PK
+      +TEXT name  UNIQUE
+      +TEXT path
+      +TEXT path_key  UNIQUE
+      +TEXT mode  CHECK_ro_rw
+      +TEXT ignore_globs  JSON
+      +INT max_open_bytes
+      +INT is_default
+      +TEXT last_scan_at
+      +INT last_scan_files
+      +INT last_scan_notes
+      +INT last_scan_bytes
+      +TEXT note
+      +TEXT status
+      +TEXT created_at
+      +TEXT updated_at
+    }
+
+    class KBAccess {
+      <<table>>
+      +INT id  PK
+      +TEXT vault_id
+      +TEXT path
+      +TEXT citizen_id
+      +TEXT account_id
+      +TEXT action
+      +TEXT result
+      +TEXT via
+      +TEXT ts
+      +INT bytes
+      +TEXT sha256
+      +TEXT backup_path
+      +TEXT meta  JSON_1KB_whitelist
+    }
+
+    class KBPathStats {
+      <<view>>
+      +TEXT vault_id
+      +TEXT path
+      +INT hits
+      +TEXT last_at
+      +INT open_count
+      +INT write_count
+      +INT rollback_count
+      +INT readers
+    }
+
+    %% ============ 既有表（只读依赖；Boards.path 是唯一语义变更） ============
+    class Boards {
+      <<existing table>>
+      +INT id  PK
+      +TEXT scope
+      +TEXT scope_key
+      +TEXT period_key
+      +TEXT path  CHANGED_relative_to_fish_home
+      +TEXT status
+      +TEXT created_at
+      +TEXT closed_at
+    }
+
+    class CodeRegistry {
+      <<existing table>>
+      +TEXT prefix  PK
+      +TEXT namespace
+      +TEXT last_date
+      +INT last_seq
+      +TEXT status
+    }
+
+    class CodeIndex {
+      <<existing table>>
+      +TEXT code  PK
+      +TEXT title
+      +TEXT project
+      +TEXT owner
+      +TEXT mem_type
+      +TEXT status
+      +TEXT recorded_at
+      +TEXT file_path
+      +INT dormant
+    }
+
+    class ProjectStints {
+      <<existing table>>
+      +INT id  PK
+      +TEXT citizen_id
+      +TEXT project
+      +TEXT from_ts
+      +TEXT to_ts  NULL_means_open
+    }
+
+    class CitizensAll {
+      <<existing view>>
+      +TEXT citizen_id
+      +TEXT display_name
+      +TEXT kind
+      +TEXT status
+      +INT is_owner
+    }
+
+    class Presence {
+      <<existing table>>
+      +INT board_id
+      +TEXT citizen_id
+      +TEXT status
+      +TEXT doing
+      +TEXT surface
+      +TEXT last_seen_at
+    }
+
+    %% ============ 新增投影/回执对象（纯值对象，不是表） ============
+    class LayoutResult {
+      +str as_of
+      +Path home_root
+      +list written
+      +list skipped
+      +list degraded
+      +list changed_boards
+    }
+
+    class VerifyReport {
+      +str home_root
+      +str as_of
+      +int errors
+      +int warnings
+      +list items
+    }
+
+    class ProjectStatusRow {
+      +str prefix
+      +str namespace
+      +str status_label
+      +str last_active
+      +str board_entry
+      +str owners
+      +int open_loops
+      +dict sources
+    }
+
+    class KBTarget {
+      +bool ok
+      +Path abs
+      +str rel
+      +Path real_root
+    }
+
+    class KBWriteReceipt {
+      +str write_id
+      +str action
+      +str rel
+      +int bytes_before
+      +int bytes_after
+      +str sha256_before
+      +str sha256_after
+      +str backup_path
+      +bool verified
+      +str eol
+      +list same_name_warnings
+      +str undo
+    }
+
+    class KBError {
+      +str code
+      +str message
+      +str hint
+      +dict detail
+      +__str__() str
+    }
+
+    %% ============ 函数分组（图上的命名空间；实际是模块级函数） ============
+    class FishLayout {
+      <<module functions>>
+      +resolve_home_root(data_root, override) Path
+      +iso_local(dt) str
+      +render_layout(conn, data_root, as_of, home_root, only, force_readme) LayoutResult
+      +render_readme(home_root, top_name, as_of, force) dict
+      +render_memory_index(conn, home_root, as_of) dict
+      +render_memory_recent(conn, home_root, as_of, limit) dict
+      +render_system_pages(conn, data_root, home_root, as_of, written) list
+      +verify_layout(conn, data_root, home_root) VerifyReport
+      +_layout_write(home_root, relpath, text) dict
+      +board_out_path(data_root, board, home_root) Path
+      +_ensure_boards_home_paths(conn) list
+    }
+
+    class FishProject {
+      <<module functions>>
+      +project_status_rows(conn, data_root, as_of, home_root, include_retired) dict
+      +render_project_status(conn, data_root, home_root, as_of, include_retired) dict
+      +_registry_rows(conn) list
+      +_last_active_of(conn, prefix) tuple
+      +_board_entry_of(conn, prefix, as_of) tuple
+      +_owners_of(conn, prefix, as_of) tuple
+      +_open_loops_of(conn, prefix, as_of) tuple
+    }
+
+    class FishKB {
+      <<module functions>>
+      +kb_vault_add(conn, name, path, mode, ignore, is_default, note) dict
+      +kb_vault_list(conn) list
+      +kb_vault_get(conn, key) dict
+      +kb_vault_set_default(conn, key) dict
+      +kb_vault_set_mode(conn, key, mode) dict
+      +kb_vault_remove(conn, key) dict
+      +kb_vault_scan(conn, key) dict
+      +kb_resolve_target(vault, rel, for_write) KBTarget
+      +kb_detect_text(data, ext) dict
+      +kb_read_text(vault, rel, max_bytes) dict
+      +kb_tree(conn, vault, rel, depth, max_chars, max_tokens) dict
+      +kb_open(conn, vault, rel, max_chars) dict
+      +kb_search(conn, vault, query, limit, max_chars, max_tokens) dict
+      +kb_write(conn, data_root, vault, rel, action, content, frontmatter, base_sha256) KBWriteReceipt
+      +kb_rollback(conn, data_root, write_id, force) dict
+      +kb_stats(conn, key) dict
+      +kb_doctor(conn) dict
+      +kb_backup(data_root, vault, rel, data, meta) dict
+      +kb_atomic_write(path, data, eol) dict
+      +kb_log_access(conn, vault, rel, action, result, citizen_id, via, bytes, sha256, backup_path, meta) int
+      +_kb_ignored(rel_posix, globs) str
+      +_kb_walk(vault, start_abs) Iterator
+      +_kb_split_frontmatter(text) dict
+      +_kb_merge_frontmatter(head, updates) list
+      +_kb_detect_eol(data) str
+      +_kb_first_reparse(root, target) str
+      +_kb_obsidian_cli() dict
+    }
+
+    class FishMCP {
+      <<mcp_server.py tool surface>>
+      +TOOLS 16_to_18
+      +_attach_token(tools) list
+      +tool_kb(a, ident) str
+      +tool_kb_write(a, ident) str
+      +call_tool(name, args, ident) str
+    }
+
+    %% ============ 关系 ============
+    FishKB ..> KBVault
+    FishKB ..> KBAccess
+    KBAccess ..> KBPathStats
+    KBVault "1" o-- "0..*" KBAccess
+
+    FishLayout ..> LayoutResult
+    FishLayout ..> VerifyReport
+    FishLayout ..> Boards
+    FishLayout ..> CodeIndex
+    FishLayout ..> CodeRegistry
+    FishLayout ..> KBVault
+
+    FishProject ..> ProjectStatusRow
+    FishProject ..> CodeRegistry
+    FishProject ..> CodeIndex
+    FishProject ..> Boards
+    FishProject ..> Presence
+    FishProject ..> ProjectStints
+    FishProject ..> CitizensAll
+
+    FishKB ..> KBTarget
+    FishKB ..> KBWriteReceipt
+    FishKB ..> KBError
+
+    FishMCP ..> FishKB
+    FishMCP ..> KBError
+
+    %% ============ 字段口径（用注释表达，避免塞进成员行破坏语法） ============
+    %% KBVault.path        绝对路径，存原样（给人看、给 Obsidian 看）
+    %% KBVault.path_key    normcase(realpath(path)) —— Windows 大小写/短名/junction 别名的去重口径
+    %% KBVault.mode        ro 默认；rw 才允许写。CHECK 锁的是权限升级路径（同 session_tokens 的理由）
+    %% KBVault.is_default  0/1；部分唯一索引 ux_kb_vault_default 保证至多一个 1
+    %% KBAccess.path       vault 内相对路径，分隔符统一 '/'；'' = 库级动作（tree/search/vaults）
+    %% KBAccess.citizen_id 无凭证 = 'unattributed'（与 mcp_server.UNATTRIBUTED 同值，靠判据锁死）
+    %% KBAccess.action     vaults|tree|open|search|search_hit|create|append|update|rollback|reject|scan
+    %% KBAccess.result     ok|denied|not_found|too_large|bad_encoding|offline|media|ignored|stale_base
+    %% KBAccess.via        cli:kb|mcp:kb|mcp:kb_write
+    %% KBAccess.meta       白名单键：depth/limit/max_chars/max_tokens/scan_ms/scanned_*/query_hash/qlen/
+    %%                     write_id/reason/eol/truncated/truncated_reasons/same_name_count/undo_action
+    %%                     **绝不存 query 原文、绝不存正文**（隐私判据）
+    %% KBAccess 不设 FK     vault 被 remove 后审计仍要能读
+    %% Boards.path         ★唯一语义变更：相对 fish-home（见架构设计 §2.4 迁移与回滚 SQL）
+    %% CodeIndex           本批只读；KB 侧**永不写**（KB-10 永久边界）
+    %% ProjectStatusRow.sources  六列各自的取值来源 —— PST-9 的全部内容，--json 直接可用
+    %% FishKB 不依赖 mcp_server（避免环形 import）；身份以 citizen_id/account_id 两个普通参数传入

@@ -12,8 +12,9 @@
 两层互为补充：CI 守"判据有判别力"，本脚本守"删源码真的会红"。
 
 纪律：
-  · 读写走字节（文件是 LF 结尾的，文本模式在 Windows 上会把 LF 改成 CRLF → 还原不干净）；
-  · 每改一次都比对 sha256，结束后**必须**逐字节还原并复核；
+  · **换行无关**：匹配在 LF 归一视图上做、写回保持文件原本风格（工作树是 CRLF，
+    见 `mutation_source.py`；2026-10-26 F1 前这里是 0 命中的假失败）；
+  · 每改一次都比对 sha256，结束后**必须**逐字节还原并复核（还原走原始字节）；
   · 任何异常（进程崩溃 / Ctrl-C）都走 finally 还原；
   · 还原失败 → 立刻非零退出并打印人工恢复步骤（备份在 历史版本\\）。
 
@@ -26,6 +27,8 @@ import hashlib
 import subprocess
 import sys
 from pathlib import Path
+
+from mutation_source import SourceText
 
 HERE = Path(__file__).resolve().parent
 TARGET = HERE / "fish.py"
@@ -70,9 +73,9 @@ MUTATIONS = (
     (
         "M-E", "E", "test_E_open_stint_unique",
         '    "CREATE UNIQUE INDEX IF NOT EXISTS ux_stint_open "\n'
-        '    "ON project_stints(citizen_id) WHERE to_ts IS NULL",',
-        '    "SELECT 1",',
-        "索引清单里删掉 ux_stint_open（第二个开档期不再被拒）",
+        '    "ON project_stints(citizen_id, project) WHERE to_ts IS NULL")',
+        '    "SELECT 1")   # 变异：唯一索引不再建（第二个开档期不再被拒）',
+        "唯一索引不再建（等价于旧版『索引清单里删掉 ux_stint_open』）",
     ),
     (
         "M-F1", "F", "test_F_session_token_checks",
@@ -100,15 +103,6 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def read_source() -> str:
-    """按字节读、再解码：文件是 LF 结尾的，文本模式会把换行悄悄改写掉。"""
-    return TARGET.read_bytes().decode("utf-8")
-
-
-def write_source(text: str):
-    TARGET.write_bytes(text.encode("utf-8"))
-
-
 def run_test(test_name: str) -> tuple:
     """跑目标用例，返回 (是否通过, 最后一行输出)。判据"红"= 不通过（失败或报错都算）。"""
     node = f"{TEST_FILE}::{TEST_CLASS}::{test_name}"
@@ -121,14 +115,14 @@ def run_test(test_name: str) -> tuple:
     return proc.returncode == 0, tail[:160]
 
 
-def apply_mutation(old: str, new: str) -> str:
-    """就地改源码，返回改之前的原文（用于还原）。找不到片段就报错，绝不静默跳过。"""
-    text = read_source()
-    hits = text.count(old)
-    if hits != 1:
-        raise AssertionError(f"变异片段命中 {hits} 次（要求恰好 1 次）：{old[:60]!r}")
-    write_source(text.replace(old, new))
-    return text
+def apply_mutation(old: str, new: str) -> SourceText:
+    """就地改源码，返回**改之前的字节句柄**（还原走 `restore()`，逐字节一致）。
+
+    找不到片段/多处命中就抛错，绝不静默跳过。
+    """
+    src = SourceText(TARGET)
+    src.write(src.replaced(old, new))
+    return src
 
 
 def main(argv=None) -> int:
@@ -163,7 +157,7 @@ def main(argv=None) -> int:
             failures.append(f"{mut_id} 执行异常：{exc}")
         finally:
             if original is not None:
-                write_source(original)
+                original.restore()
             restored_ok = sha256(TARGET) == baseline
             if not restored_ok:
                 failures.append(

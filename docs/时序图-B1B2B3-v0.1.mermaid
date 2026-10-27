@@ -1,0 +1,258 @@
+%% 大肥鱼生命系统 · B1/B2/B3 增量 · 关键流程时序图（8 张）· v0.1
+%% 权威：docs/架构设计-B1B2B3-v0.1.md §4.1–§4.8 —— 与文档逐字同源，改图必须两处同改
+%% 基线：dev/fish-devA @ b23a63f｜架构师 高见远｜2026-10-26
+%% Mermaid 一次渲染一张：用 `%% ==== 流程 N ====` 切段，编辑器里按段预览。
+
+%% ==== 流程 1 · kb tree（只统计不读正文 · 双预算） · 正文 §4.1 ====
+sequenceDiagram
+    autonumber
+    participant M as 模型/人
+    participant C as fish CLI
+    participant T as FishKB
+    participant V as vault 文件系统
+    participant DB as index.sqlite
+
+    M->>C: fish kb tree [path] --vault n --depth 2
+    C->>DB: kb_vault_get(key) —— 无则 KBError(vault_missing)
+    C->>T: kb_tree(conn, vault, rel, depth, max_chars=8000, max_tokens=1200)
+    T->>T: kb_resolve_target(vault, rel, for_write=False)
+    alt vault 路径不存在
+        T-->>C: KBError(offline) + last_scan_at（无旧数据则 exit 1）
+    else 在线
+        T->>V: _kb_walk 有界 BFS —— os.scandir + entry.stat()
+        Note over T,V: 只累加 notes/attachments/bytes/mtime<br/>绝不 open() 任何文件（KB-2 判据）
+        V-->>T: 每目录 笔记数/附件数/字节/最近修改
+        T->>T: 每目录子项排序 mtime DESC,rel ASC → 截 20 项 + more=N
+        T->>T: 渲染文本 → 先按 max_chars 截 → 再按 max_tokens 截（K7）
+        T->>DB: kb_log_access(action=tree, result=ok, meta={depth,chars,tokens,ms})（失败静默）
+        T-->>C: {dirs, scan{files,bytes,ms}, text, chars, tokens, truncated}
+    end
+    C-->>M: 头部 vault/mode/as-of/生效忽略规则 + 目录行 + 合计 + 截断声明
+
+%% ==== 流程 2 · kb open（显式路径 · 五道闸） · 正文 §4.2 ====
+sequenceDiagram
+    autonumber
+    participant M as 模型/人
+    participant C as fish CLI
+    participant T as FishKB
+    participant V as vault 文件系统
+    participant DB as index.sqlite
+
+    M->>C: fish kb open <rel> --vault n [--max-chars 64000]
+    C->>T: kb_open(conn, vault, rel, max_chars)
+    T->>T: ① kb_resolve_target(for_write=False)
+    Note over T: 空/绝对/盘符/UNC/\\?\  → path_invalid<br/>含 ..                    → path_invalid<br/>.obsidian/** .trash/**  → ignored<br/>realpath+commonpath 越界 → outside_vault<br/>逐级 reparse point       → reparse_point
+    alt 校验失败
+        T->>DB: kb_log_access(action=reject, result=denied)
+        T-->>C: KBError(code, message, hint)
+        C-->>M: exit 1 + 下一步提示
+    else 通过
+        T->>V: stat → st_size
+        alt st_size > max_open_bytes（默认 2 MiB）
+            T-->>C: KBError(too_large) + 字节数 + 分段建议
+        else 大小合格
+            T->>V: read 首 8 KiB → kb_detect_text（扩展名 + 魔数 + 控制字符比）
+            alt 媒体/二进制
+                T-->>C: KBError(media)
+            else 文本
+                T->>V: read 全部字节 → utf-8 → utf-8-sig → gb18030（严格）
+                alt 全失败
+                    T-->>C: KBError(bad_encoding) + "另存为 UTF-8"
+                else 解码成功
+                    T->>T: 截到 max_chars → truncated/shown/limit
+                    T->>DB: kb_log_access(action=open, bytes, sha256)（**不写 events**）
+                    T-->>C: {text, sha256, encoding, eol, truncated, statements}
+                end
+            end
+        end
+    end
+    C-->>M: 正文 + 三句声明（来源=知识库/未建索引/是否截断）
+
+%% ==== 流程 3 · kb search（按需扫描 · 不建索引 · 不混 recall） · 正文 §4.3 ====
+sequenceDiagram
+    autonumber
+    participant M as 模型/人
+    participant C as fish CLI
+    participant T as FishKB
+    participant V as vault 文件系统
+    participant F as memory_fts / recall
+    participant DB as index.sqlite
+
+    M->>C: fish kb search <query> --vault n --limit 10
+    C->>T: kb_search(conn, vault, query, limit, max_chars=8000, max_tokens=1800)
+    T->>V: _kb_walk 全库（跳过 ignore）→ 只留 *.md 且 size ≤ 2 MiB
+    loop 每个候选文件
+        T->>V: read bytes → 解码（失败计入 skipped_encoding）
+        T->>T: 按行 casefold 匹配 query.casefold() → (rel,lineno,context±120)
+    end
+    T->>T: 排序 (-occurrences,-mtime,rel) → 取 limit（≤30）→ 预算截断
+    T->>F: **不调用** recall / memory_fts（KB-10 永久边界）
+    Note over T,F: 变异自证：同一文件复制进 data_root 并 reindex 后<br/>recall 命中 1 → 证明边界判据不是恒绿
+    T->>DB: kb_log_access(action=search, meta={query_hash,qlen,scan_ms,scanned})<br/>+ 每条命中 search_hit（**不存 query 原文、不存正文**）
+    T-->>C: {hits, shown, text, scan{files,bytes,ms}, truncated}
+    C-->>M: 头部三行 + 每条 全路径:行号 + 上下文 + "来源=知识库（未建索引）"
+
+%% ==== 流程 4 · kb write（三档 · 备份先行 · 写后校验） · 正文 §4.4 ====
+sequenceDiagram
+    autonumber
+    participant M as 模型/人
+    participant C as fish CLI / MCP
+    participant T as FishKB
+    participant B as _backups/kb
+    participant V as vault 文件系统
+    participant DB as index.sqlite
+
+    M->>C: kb_write(action=create|append|update, rel, content, frontmatter, base_sha256)
+    C->>T: kb_write(...)
+    T->>DB: kb_vault_get → mode
+    alt mode = 'ro'
+        T-->>C: KBError(mode_ro) + "set-mode <n> rw"
+    else mode = 'rw'
+        T->>T: kb_resolve_target(for_write=True)（父目录链再查 reparse）
+        T->>V: 判目标状态 + 读现有 sha256/字节
+        alt create 且已存在
+            T-->>C: KBError(exists) + "改用 update（先 kb open 取 sha256）"
+        else update 缺 base_sha256 或 不匹配
+            T-->>C: KBError(stale_base) + "先重新读再写"
+        else 三档合法
+            T->>T: kb_detect_text（媒体/编码不过 → media|bad_encoding）
+            T->>B: kb_backup(before_bytes, meta)  ← **写之前**
+            B-->>T: {write_id, backup_path}
+            T->>T: 组装新字节（frontmatter 只增改给定键；EOL 沿用；[[双链]] 原样）
+            T->>T: content > 512 KiB → content_too_large
+            T->>V: 同目录临时文件 → fsync → os.replace（原子）
+            T->>V: **重读文件算 sha256**（KB-15）
+            alt 校验不一致
+                T-->>C: 报错（不假装成功）+ 已给 write_id 供回滚
+            else 一致
+                T->>DB: kb_log_access(action, bytes, sha256_after, backup_path, meta={write_id,reason,eol})
+                T->>V: 同名笔记扫描（仅 create）→ same_name_warnings（不阻断）
+                T-->>C: 回执 {write_id, sha256_before/after, backup_path, verified, undo}
+            end
+        end
+    end
+    C-->>M: 三段式 —— 改了什么 / 备份在哪 / 怎么撤
+
+%% ==== 流程 5 · kb rollback（目标被改则拒绝） · 正文 §4.5 ====
+sequenceDiagram
+    autonumber
+    participant M as 模型/人
+    participant C as fish CLI / MCP
+    participant T as FishKB
+    participant B as _backups/kb
+    participant V as vault 文件系统
+    participant DB as index.sqlite
+
+    M->>C: fish kb rollback <write_id> [--force]
+    C->>T: kb_rollback(conn, data_root, write_id, force)
+    T->>DB: 解析 write_id 前缀 → SELECT kb_access WHERE id=? AND action IN (create,append,update)
+    alt 无此行
+        T-->>C: KBError(not_found) + write_id 形态示例
+    else 有行
+        T->>B: 读 backup_path（payload + meta.json）
+        alt 备份被清理
+            T-->>C: KBError(backup_missing) + "无法回滚"
+        else 备份在
+            T->>V: 算当前 sha256
+            alt 当前值 ≠ 写后值（之后被改过）
+                alt force = False
+                    T-->>C: KBError(stale_base) + "确认覆盖请加 --force"
+                else force = True
+                    T->>B: 先把当前内容再备份一次（新 write_id）
+                end
+            end
+            T->>T: 按 action 恢复 —— create 删自己那次新建的（当前 sha 必须等于写后 sha）<br/>append/update 用备份 payload 覆盖
+            T->>V: 原子写 → 重读校验 sha256 == sha256_before
+            T->>DB: kb_log_access(action=rollback, sha256, backup_path, meta={write_id,undo_action})
+            T-->>C: {restored, removed, sha256, bytes}
+        end
+    end
+    C-->>M: 恢复结果 + 用了哪份备份
+
+%% ==== 流程 6 · layout render --all（as-of 冻结 · 不写 data_root） · 正文 §4.6 ====
+sequenceDiagram
+    autonumber
+    participant M as 人/AI
+    participant C as fish CLI
+    participant L as FishLayout
+    participant DB as index.sqlite
+    participant H as fish-home 文件系统
+    participant D as p0/data（真相根）
+
+    M->>C: fish layout render --all [--as-of ISO] [--force-readme]
+    C->>L: render_layout(conn, data_root, as_of, home_root, force_readme)
+    L->>L: resolve_home_root → 断言 home 不在 data_root 内
+    L->>DB: ① code_registry + code_index + boards + presence + project_stints（只读）
+    alt 某数据源异常
+        L->>L: 记 degraded{source,reason} —— 不中断（HOME-9）
+    end
+    L->>H: 10-项目库/项目状态表.md（六列 + as-of + 脚注 + retired 折叠区）
+    L->>H: 20-记忆库/索引-YYYY-MM.md（as_of 当月，每月一份）
+    L->>H: 20-记忆库/最近.md（as_of 前 30 条，**只给指针不给正文**）
+    L->>H: 30-知识库/vaults.md（kb_vault 投影）
+    L->>H: 90-系统/{IDENTITY,CAPABILITIES,渲染清单}.md（渲染后跑凭证正则自检）
+    L->>H: 五个一级 README.md（已存在且未 --force-readme → 跳过并记 skipped）
+    L->>H: 目录骨架 mkdir（10-项目库/<prefix>/）
+    Note over L,D: **全程不写 p0/data**：_layout_write 断言 commonpath 在 home 内且不在 data_root 内
+    L-->>C: {written[], skipped[], degraded[], changed_boards[]}
+    C-->>M: 每目录 路径/字节/sha256 + 跳过清单 + 降级清单
+    Note over C,D: 看板文件**不在本命令职责内**（由 board_render 写 home_root）<br/>否则 as-of 幂等判据会被 last_seen_at 污染（R8）
+
+%% ==== 流程 7 · layout verify（11 类检查 · error 即 exit 1） · 正文 §4.7 ====
+sequenceDiagram
+    autonumber
+    participant M as 人/AI/CI
+    participant C as fish CLI
+    participant L as FishLayout
+    participant H as fish-home
+    participant D as p0/data
+
+    M->>C: fish layout verify [--json]
+    C->>L: verify_layout(conn, data_root, home_root)
+    L->>H: os.walk 一遍 → (rel,size,depth)
+    L->>L: ① 一级集合 == 五元组 → top_dir_missing / top_dir_extra
+    L->>H: ② 每级 README.md → readme_missing / readme_element_missing（四要素正则）
+    L->>L: ③ depth > 3 → depth_exceeded（3 是上限：10-项目库/<项目>/看板.md 合法）
+    Note over L: 分支看板必须是 10-项目库/_分支-<k>/看板-<pk>.md（3 层）<br/>PRD 原式 _分支/<k>/ 是 4 层，会被本检查判红 → 设计 v0.2 已扁平化（文档 §2.4 / A29）
+    L->>L: ④ 五目录外的条目 → orphan_file
+    L->>H: ⑤ 解析首页/状态表里的相对链接 → link_broken
+    L->>H: ⑥ 20-记忆库 文件名形态 + sha256 交集
+    L->>D: （只读）projects/**/*.md 的 sha256 集合
+    L->>H: ⑦ 90-系统/** 凭证形态（fsh_ / token= / PRIVATE KEY） → credential_like
+    L->>L: ⑧ 产物含"数据源不可用" → degraded_source(warning)
+    L->>L: ⑨ 状态表看板入口目标不存在 → board_entry_missing(warning)
+    L-->>C: {errors, warnings, items[{level,code,path,message,fix}]}
+    alt errors > 0
+        C-->>M: 逐条清单 + raise SystemExit(1)
+    else 只有 warning 或全绿
+        C-->>M: 清单（或"全绿"）+ exit 0
+    end
+    Note over C: 用 SystemExit 而不是 return 1 —— main() 丢弃返回值（L8968），return 1 今天等于退出 0
+
+%% ==== 流程 8 · project status（六列 · 每格带来源 · 降级显式） · 正文 §4.8 ====
+sequenceDiagram
+    autonumber
+    participant M as 人/AI
+    participant C as fish CLI
+    participant P as FishProject
+    participant DB as index.sqlite
+    participant H as fish-home
+
+    M->>C: fish project status [--include-retired] [--as-of ISO] [--json]
+    C->>P: project_status_rows(conn, data_root, as_of, include_retired)
+    P->>DB: _registry_rows → prefix/namespace/status（异常 → degraded，不吞）
+    loop 每个 prefix
+        P->>DB: 最近活跃 = max(code_index.recorded_at) → "—（无记忆）" 兜底
+        P->>DB: 看板入口 = boards(period_key=今日 或 最近 open) → "—（今日无看板）" 兜底
+        P->>DB: 主责 AI = ① 开档期(project_stints.to_ts IS NULL)→citizens_all.display_name<br/>② 无 → 近 7 天该项目记忆 owner（标来源 recent_owner）<br/>③ 都无 → "—（无开档期）"
+        P->>DB: 未了事项 = _open_loop_rows(project=prefix, since=as_of-30d) 计数 → 0 显示 "—"
+    end
+    P->>P: retired 分到折叠区（除非 --include-retired）
+    P-->>C: {as_of, columns[6], rows[], retired[], degraded[], footnotes[]}
+    alt 数据库不可用
+        C-->>M: 明确报错 + exit 1（不生成空表）
+    else 正常
+        C->>H: _layout_write(10-项目库/项目状态表.md)
+        C-->>M: 路径 + 字节 + sha256 + 行数 + 降级清单
+    end
+    Note over M,H: 同一 --as-of 两次渲染：除 as-of 行外字节全等（PST-4）<br/>脚注写清每种 — 的含义、30 天窗口、8 个开放词、非前缀目录只计数

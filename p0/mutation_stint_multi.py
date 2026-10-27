@@ -32,6 +32,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from mutation_source import SourceText
+
 HERE = Path(__file__).resolve().parent
 FISH = HERE / "fish.py"
 BAK = FISH.with_name("fish.py.mutation-stint-bak.bak")
@@ -116,28 +118,17 @@ def run_test(name: str) -> tuple:
     return proc.returncode == 0, tail
 
 
-def read_source() -> str:
-    """按字节读再解码。
+def apply_mutation(old: str, new: str) -> SourceText:
+    """改源码，返回**改之前的字节句柄**（供还原）。命中次数必须恰好 1，否则抛错不写。
 
-    **不能用 Path.read_text / write_text**（2026-10-24 实测踩到）：它们在 Windows 上
-    用默认 newline 模式，写回时会把 `\\n` 翻成 `\\r\\n`——文件语义没变，但字节变了，
-    "字节还原"校验必然失败（本驱动第一版就是在这里报的"还原失败"，把一次正常轮次
-    打断了）。源码还原必须是**字节级**的，所以读写都走 bytes。
+    读写纪律（2026-10-24 踩过，2026-10-26 F1 又踩一次）：**不能用 Path.read_text /
+    write_text**，也不能用 `read_bytes().decode()` 直接匹配——前者写回时会把 `\\n`
+    翻成 `\\r\\n`（字节还原必失败），后者在 CRLF 树上命中 0 次（整条变异被跳过）。
+    统一走 `mutation_source.SourceText`：原字节先存、匹配在 LF 归一视图上做、
+    写回保持原风格、还原走 `restore()`（逐字节一致）。
     """
-    return FISH.read_bytes().decode("utf-8")
-
-
-def write_source(text: str) -> None:
-    FISH.write_bytes(text.encode("utf-8"))
-
-
-def apply_mutation(old: str, new: str) -> str:
-    """改源码，返回原文（供还原）。命中次数必须恰好 1，否则抛错不写。"""
-    src = read_source()
-    hits = src.count(old)
-    if hits != 1:
-        raise AssertionError(f"变异片段命中 {hits} 次（要求恰好 1 次）：{old[:70]!r}")
-    write_source(src.replace(old, new, 1))
+    src = SourceText(FISH)
+    src.write(src.replaced(old, new))
     return src
 
 
@@ -189,7 +180,7 @@ def main(argv=None) -> int:
             continue
         finally:
             if original is not None:
-                write_source(original)
+                original.restore()
         restored = sha256(FISH) == base
         if not restored:
             print(f"[X] {mut_id} 还原失败！用 历史版本\\fish.py.20261024-1940-stints.bak 手工恢复")

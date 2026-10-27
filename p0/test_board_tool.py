@@ -97,34 +97,53 @@ class BoardToolTest(unittest.TestCase):
 
     # ------------------------------------------------------------------ P4
     def test_P4_checkin_then_show(self):
-        """端到端：签到之后看板能看到自己。"""
+        """端到端：签到之后看板能看到自己（**可读名**，不是 ULID）。"""
         out = self.srv.tool_board(
             {"action": "checkin", "doing": "做看板工具",
              "surface": "p0/mcp_server.py", "project": "P1"}, self.valid)
         self.assertIn("已签到", out)
         self.assertIn("做看板工具", out)
         shown = self.srv.tool_board({"action": "show", "project": "P1"}, self.valid)
-        self.assertIn(self.valid.citizen_id, shown, "看板上应出现自己的公民 id")
+        # 2026-10-26（T03 契约变更）：人类可读面用可读名，**不许**出现 26 位公民 ID。
+        self.assertNotIn(self.valid.citizen_id, shown,
+                         "看板渲染不许出现公民 ULID（用户拍板：不要机器码）")
+        self.assertIn("board-dev", shown, "看板上应出现可读名")
         self.assertIn("做看板工具", shown, "看板上应出现 doing")
         self.assertIn("p0/mcp_server.py", shown, "看板上应出现占用面")
 
     # ------------------------------------------------------------------ P5
     def test_P5_checkin_idempotent_per_citizen(self):
-        """同一人重复签到只有一行；**不覆盖别人**（只写自己行）。"""
+        """同一人重复签到只有一行；**不覆盖别人**（只写自己行）。
+
+        ⚠️ 2026-10-26（T03）：`tool_session_start` 现在会**自动签到**（自动行算登记），
+        所以"总行数 == 2"这个断言不再成立——它测的其实是"有没有自动行"，
+        而不是"幂等"。改成按公民数行（每个公民在每块板上恰好 1 行），
+        判据更贴近它想证明的性质，也没有放宽。
+        """
         other = self._make_ident("board-dev-2")
+
+        board = fish.board_ensure(self.srv.conn, "project", "P1")
+
+        def rows_of(cid):
+            """**这块板**上该公民有几行（别的板上的自动行不算）。"""
+            return self.srv.conn.execute(
+                "SELECT COUNT(*) FROM presence WHERE board_id=? AND citizen_id=?",
+                (board["id"], cid)).fetchone()[0]
+
         self.srv.tool_board({"action": "checkin", "doing": "A 的活",
                              "project": "P1"}, self.valid)
         self.srv.tool_board({"action": "checkin", "doing": "B 的活",
                              "project": "P1"}, other)
-        n = self.srv.conn.execute("SELECT COUNT(*) FROM presence").fetchone()[0]
-        self.assertEqual(n, 2, f"两个人应有两行，实际 {n}")
+        self.assertEqual(rows_of(self.valid.citizen_id), 1, "一个公民在每块板上只能有一行")
+        self.assertEqual(rows_of(other.citizen_id), 1, "一个公民在每块板上只能有一行")
         # 重复签到只更新自己那一行
         self.srv.tool_board({"action": "checkin", "doing": "A 改主意了",
                              "project": "P1"}, self.valid)
-        n2 = self.srv.conn.execute("SELECT COUNT(*) FROM presence").fetchone()[0]
-        self.assertEqual(n2, 2, "重复签到不该变成三行")
+        self.assertEqual(rows_of(self.valid.citizen_id), 1, "重复签到不该多出一行")
+        # ⚠️ 按**这块板**取 doing：自动签到会在根板另建一行，
+        # 全表 `{citizen_id: doing}` 的字典会把两行折叠成一行（取到哪行取决于顺序）。
         rows = {r[0]: r[1] for r in self.srv.conn.execute(
-            "SELECT citizen_id, doing FROM presence")}
+            "SELECT citizen_id, doing FROM presence WHERE board_id=?", (board["id"],))}
         self.assertEqual(rows[self.valid.citizen_id], "A 改主意了")
         self.assertEqual(rows[other.citizen_id], "B 的活", "A 的签到覆盖了 B 的行")
 

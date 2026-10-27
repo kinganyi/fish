@@ -1,6 +1,0 @@
-# Codex 使用 fish 的工作方式
-
-> 编码：anyi-studio-261022-18 ｜ 类型：rule ｜ 记录于 2026-10-21T22:28:08Z
-
-Codex 在 fish 中使用身份 codex-main，当前会话名 codex-anyi。记录记忆用 remember，project="ANYI"；查询用 recall 或 resolve_code；查看关联用 neighbors。图片/文档通过 remember 的 attachments 传本地绝对路径。记忆编码由系统分配，不自行编造。不要直接读取或写入 data/ 目录或 sqlite，所有操作走 fish 工具。Codex 没有会话开始时的自动状态注入；新任务开始时建议先调用 inject 获取当前项目、最近记忆、衰减参数和操作指引（也可通过资源 fish://me 读取）。遇到真实操作摩擦时，最多记录 2 条具体的 fish-feedback lesson，说明场景、卡点和期望。
-
