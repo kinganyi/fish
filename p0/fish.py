@@ -6295,6 +6295,35 @@ def cmd_supersede(args):
         conn.close()
 
 
+def search_by_relevance(conn, query, *, limit=10, project=None, tags=None):
+    """按 bm25 相关度检索（⑥ `--by relevance`，BUG-5 的收口）。
+
+    与 `search_memories` 的分工：那个是"编码 > 标题 > 正文"的**优先级**排序
+    （可预期、可复现，默认）；这里是 FTS5 的 bm25（更接近"问什么答什么"）。
+    两条路共享同一份 `memory_fts`，都只读；默认仍是 priority（既有判据零回归）。
+    返回与 `search_memories` 同形 `(rows, src_of)`，让 `cmd_recall` 直接复用下游。
+    """
+    expr = fts_match_expr(query)
+    if expr is None:
+        return [], {}
+    where = " AND ci.status = 'active'"
+    params = [expr]
+    if project:
+        where += " AND ci.project = ?"
+        params.append(str(project))
+    if tags:
+        needle = tags if isinstance(tags, str) else ",".join(str(t) for t in tags)
+        where += " AND ci.tags LIKE ?"
+        params.append(f"%{needle}%")
+    sql = ("SELECT ci.code, ci.title, ci.project, ci.mem_type, ci.status, "
+           "ci.file_path, ci.dormant, 'bm25' "
+           "FROM memory_fts JOIN code_index ci ON ci.code = memory_fts.code "
+           "WHERE memory_fts MATCH ?" + where +
+           " ORDER BY bm25(memory_fts) LIMIT ?")
+    rows = conn.execute(sql, params + [int(limit)]).fetchall()
+    return rows, {r[0]: "bm25" for r in rows}
+
+
 def cmd_recall(args):
     conn = connect(Path(args.root))
     conn.executescript(SCHEMA)
@@ -6342,9 +6371,13 @@ def cmd_recall(args):
         conn.close()
         return
     ensure_fts(conn, Path(args.root))
-    rows, src_of = search_memories(
-        conn, query=q, code=code, project=project, tags=tags,
-        scope=getattr(args, "scope", "all"), limit=limit)
+    if (getattr(args, "by", "priority") or "priority") == "relevance" and q:
+        rows, src_of = search_by_relevance(conn, q, limit=limit,
+                                           project=project, tags=tags)
+    else:
+        rows, src_of = search_memories(
+            conn, query=q, code=code, project=project, tags=tags,
+            scope=getattr(args, "scope", "all"), limit=limit)
     # ⑥ 统计行（BUG-5 的收口，2026-10-28）：区分"没有"与"没搜到"——按匹配来源计数。
     total_scanned = count_memories(conn, project=project, tags=tags)
     hit_counts = {"编码": 0, "标题": 0, "正文": 0}
@@ -13762,6 +13795,8 @@ def main():
     p.add_argument("query", nargs="?", default=None,
                    help="关键词（省略时按 --project / --tags 列出）")
     p.add_argument("--limit", type=int, default=10)
+    p.add_argument("--by", choices=["priority", "relevance"], default="priority",
+                   help="排序：priority（编码>标题>正文，默认）/ relevance（bm25 相关度）")
     p.add_argument("--scope", choices=["all", "title", "body"], default="all",
                    help="检索范围：all（默认）/ title / body")
     p.add_argument("--code", default=None, help="精确编码（与 query 二选一或并用）")
