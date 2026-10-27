@@ -13253,6 +13253,31 @@ def cmd_project_status(args):
     finally:
         conn.close()
 
+def cmd_ui(args):
+    """`fish ui serve|dump` —— 只读读口的 CLI 入口（2026-10-28 从生产树移植）。
+
+    真正的实现在 `fish_ui.py`（独立模块，可单独 `python fish_ui.py` 跑，便于调试）。
+    这里只做三件事：定位库、把 CLI 参数翻译成它的参数、调它。
+    **不在这里写任何查询**——读口的形状只有一份，避免 CLI 与独立运行两条路漂移。
+    """
+    try:
+        import fish_ui
+    except ImportError as exc:  # pragma: no cover - 只在缺文件时触发
+        print(f"[fish ui] 找不到 fish_ui.py（应与 fish.py 同目录）：{exc}", file=sys.stderr)
+        return 2
+
+    # root 指向**数据目录**（不是项目根）——fish 的 connect(Path(root)) 就是拿它当 data 目录用。
+    db = os.path.join(str(Path(args.root)), "index.sqlite")
+    action = getattr(args, "ui_action", "serve")
+    argv = ["--db", db, "--minutes", str(getattr(args, "minutes", 30))]
+    if action == "dump":
+        argv.append("--once")
+    else:
+        argv += ["--host", getattr(args, "host", "127.0.0.1"),
+                 "--port", str(getattr(args, "port", 8787))]
+    return fish_ui.main(argv)
+
+
 def cmd_kb(args):
     """B3 知识库 CLI（§3.2）：vault / tree / open / search / write / rollback / stats / doctor / backup。
 
@@ -13895,6 +13920,19 @@ def main():
     sub.add_parser("healthcheck").set_defaults(func=cmd_healthcheck)
     sub.add_parser("rebuild").set_defaults(func=cmd_rebuild)
     sub.add_parser("reindex").set_defaults(func=cmd_reindex)
+
+    # `fish ui serve|dump`（2026-10-28 从生产树移植）：只读读口（给界面用）。
+    # 纪律全落在 fish_ui.py 里（mode=ro + query_only=1 + 只绑回环）。
+    p = sub.add_parser("ui", help="只读读口：把库投影成界面要的 JSON（serve / dump）")
+    usub = p.add_subparsers(dest="ui_action", required=True)
+    us = usub.add_parser("serve", help="起只读 HTTP 读口（默认只绑 127.0.0.1）")
+    us.add_argument("--host", default="127.0.0.1")
+    us.add_argument("--port", type=int, default=8787)
+    us.add_argument("--minutes", type=int, default=30)
+    us.set_defaults(func=cmd_ui)
+    ud = usub.add_parser("dump", help="打印一份快照就退出（调试 / 对拍用）")
+    ud.add_argument("--minutes", type=int, default=30)
+    ud.set_defaults(func=cmd_ui)
 
     # 归档（2026-10-25 · 用户要求）：把已失效的正文移进 archive/<年>/，**只改位置不改语义**。
     # 判据直接复用已有的 status（superseded / withdrawn）——不新造"归档状态"，
