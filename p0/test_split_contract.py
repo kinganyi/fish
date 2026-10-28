@@ -77,12 +77,13 @@ FISH_LINES_MIN = 13800
 FISH_LINES_MAX = 14500
 EXPECTED_LINE_ACTUAL = 14032
 FISH_PUSH_LINES_MIN = 1050
-# 2026-10-29（P2 收尾）：MMR + 价值门 + 三因子 + RRF 全落在这里 → 实测 **1,647**。
-# 上限 1,620 → **1,700**（第 6 次抬）。
-# ⚠️ 六次抬窗口已经构成一个明确信号：**这条判据的"防膨胀"意图在 fish_push 上失效**。
-# 下一轮的第一件事必须是**抽「推送管道」模块**（候选生成/门槛/去重/融合），
-# 把窗口交还给新模块，而不是再抬一次。
-FISH_PUSH_LINES_MAX = 1700
+# 2026-10-29（结构整改）：融合/排序层抽出为 `fish_push_rank.py`（9 个纯函数，187 行），
+# fish_push.py 1,647 → **1,486**。窗口因此**从 1,700 收回 1,550**——
+# 这才是"抽层"的收益：不是继续抬窗口，而是把窗口还回去。
+# 新模块另有自己的上界（`FISH_PUSH_RANK_LINES_MAX`），防止它再长成第二个巨石。
+FISH_PUSH_LINES_MAX = 1550
+FISH_PUSH_RANK_LINES_MIN = 120
+FISH_PUSH_RANK_LINES_MAX = 300
 FISH_COMMON_LINES_MIN = 550
 FISH_COMMON_LINES_MAX = 750
 
@@ -336,6 +337,12 @@ class SplitSizeTest(unittest.TestCase):
                                 f"fish_push.py 只有 {push_lines} 行：搬漏了")
         self.assertLessEqual(push_lines, FISH_PUSH_LINES_MAX,
                              f"fish_push.py 有 {push_lines} 行：长回去了")
+        # 新模块（2026-10-29 抽出的融合/排序层）自己的窗口：不许再长成第二个巨石
+        rank_lines = len(_read(P0 / "fish_push_rank.py").split("\n"))
+        self.assertGreaterEqual(rank_lines, FISH_PUSH_RANK_LINES_MIN,
+                                f"fish_push_rank.py 只有 {rank_lines} 行：搬漏了")
+        self.assertLessEqual(rank_lines, FISH_PUSH_RANK_LINES_MAX,
+                             f"fish_push_rank.py 有 {rank_lines} 行：长回去了")
         common_lines = len(_read(FISH_COMMON).split("\n"))
         self.assertGreaterEqual(common_lines, FISH_COMMON_LINES_MIN,
                                 f"fish_common.py 只有 {common_lines} 行：下沉漏了")
