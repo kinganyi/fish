@@ -185,7 +185,10 @@ class FishPushP0Test(unittest.TestCase):
     # push_log 的列契约：**精确集合**断言（多一列少一列都红），能拦住"悄悄改表结构"。
     PUSH_LOG_COLUMNS = {
         "id", "session_key", "citizen_id", "project", "code", "candidate_id",
-        "channel", "budget_tokens", "pushed_at", "reaction", "reacted_at", "latency_sec"}
+        "channel", "budget_tokens", "pushed_at", "reaction", "reacted_at", "latency_sec",
+        # 2026-10-29（P0-2 第二段，内容感知去重）：新增 content_hash。
+        # 声明式契约变更——旧库升级也必须补上这列（test_L 钉住 upgrade 路径）。
+        "content_hash"}
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="fish-push-p0-")

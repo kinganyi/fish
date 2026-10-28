@@ -485,25 +485,56 @@ def _kb_push_candidates(conn, root, *, query, project=None, exclude=(), limit=2,
             code = f"kb:{vault['name']}:{hit.get('rel') or ''}"
             if code in exclude or any(c["code"] == code for c in out):
                 continue
+            # P0-2 第二段（内容感知去重，2026-10-29）：旧实现只看"24h 内推过没有"，
+            # 于是 ① 读过的旧版 24h 后还会再来；② 文件改过的新版反而被当成同一条挡掉。
+            # 现在：结案（accepted/ignored）与 24h 内的推送都要**比对内容指纹**——
+            # 指纹变了才允许重推（且注明"已更新"），没变就静默跳过。
+            cur_hash = _kb_content_hash(conn, vault.get("name"), hit.get("rel"))
             recent = conn.execute(
-                "SELECT 1 FROM push_log WHERE code=? AND pushed_at >= ? LIMIT 1",
-                (code, since)).fetchone()
+                "SELECT content_hash, reaction FROM push_log WHERE code=? AND "
+                "(pushed_at >= ? OR reaction IN ('accepted','ignored')) "
+                "ORDER BY pushed_at DESC LIMIT 1", (code, since)).fetchone()
+            updated = False
             if recent:
-                continue                    # 24h 内推过同一个文件 → 不重复
+                prev_hash = recent[0]
+                if not cur_hash or not prev_hash or cur_hash == prev_hash:
+                    continue                # 同一份内容（或指纹未知）→ 不重复
+                updated = True              # 内容变了 → 允许推新版
             snippet = ""
             if hit.get("lines"):
                 snippet = str((hit["lines"][0] or {}).get("text") or "")[:40]
             out.append({
                 "code": code, "kind": "kb",
                 "title": str(hit.get("rel") or ""),
-                "reason": f"知识库「{vault['name']}」命中「{q[:24]}」",
+                "reason": (f"知识库「{vault['name']}」**已更新**（内容变了）"
+                           if updated else f"知识库「{vault['name']}」命中「{q[:24]}」"),
                 "project": project, "benefit": 0.55, "cost": 0.05,
                 "weight": 1.0, "key": False, "score": 0.5,
                 "kb": {"vault": vault["name"], "rel": hit.get("rel"),
                        "snippet": snippet},
+                "content_hash": cur_hash,
             })
             exclude.add(code)
     return _breaker(conn, root, "kb", started, query, out[:max(int(limit), 1)])
+
+
+def _kb_content_hash(conn, vault_name, rel):
+    """知识库文件的当前内容指纹（取不到返回 None = 不知道，按旧行为处理）。
+
+    这是 P0-2 的"内容感知"唯一取数口：`kb_index.content_hash` 在每次索引时写入。
+    不抛错——知识库是增强项，指纹拿不到只意味着"退回 24h 去重"。
+    """
+    if not rel:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT i.content_hash FROM kb_index i JOIN kb_vault v "
+            "ON v.vault_id = i.vault_id WHERE v.name=? AND i.rel_path=? "
+            "AND i.status='active' LIMIT 1",
+            (str(vault_name), str(rel))).fetchone()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
 
 def _conv_push_candidates(conn, root, *, query, project=None, session_key=None,
                           exclude=(), limit=1, now=None, citizen_id=None):

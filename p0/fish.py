@@ -269,7 +269,8 @@ _PUSH_LOG_DDL = """CREATE TABLE IF NOT EXISTS push_log (
   pushed_at     TEXT NOT NULL,
   reaction      TEXT,
   reacted_at    TEXT,
-  latency_sec   INTEGER
+  latency_sec   INTEGER,
+  content_hash  TEXT
 );"""
 
 _PUSH_SCHEMA = ("\n" + _ACCESS_LOG_DDL + "\n\n" + _LINKS_DDL
@@ -871,6 +872,9 @@ _PUSH_LOG_COLS = (
     ("reaction", "TEXT"),
     ("reacted_at", "TEXT"),
     ("latency_sec", "INTEGER"),
+    # P0-2 第二段（2026-10-29）：推这份内容时它的指纹。结案（accepted/ignored）
+    # 之后只有"当前指纹 != 记录指纹"才允许重推——读过的旧版不再打扰，新版该来。
+    ("content_hash", "TEXT"),
 )
 
 _PUSH_LOG_INDEXES = (
@@ -2360,7 +2364,7 @@ _UNSET = object()          # "不过滤"的哨兵；None 本身就是 reaction �
 
 def append_push_log(conn, codes, *, channel, session_key=None, citizen_id=None,
                     project=None, candidate_id=None, budget_tokens=None,
-                    pushed_at=None) -> int:
+                    pushed_at=None, content_hash=None, hash_by_code=None) -> int:
     """写"这次推送"的日志：一条记忆一行，返回写入行数。
 
     容错边界与 append_access_log 完全一致（**故意的**）：本函数不做 try/except，
@@ -2385,12 +2389,16 @@ def append_push_log(conn, codes, *, channel, session_key=None, citizen_id=None,
             "SELECT code,project FROM code_index WHERE code IN ("
             + ",".join("?" * len(codes)) + ")", codes).fetchall())
     budget = int(budget_tokens) if budget_tokens is not None else None
+    # P0-2 第二段：`hash_by_code` 逐条给指纹（kb 候选各带各的）；单值 `content_hash`
+    # 保留给"整批同一份内容"的调用点。
     rows = [(session_key, citizen_id,
              project if project is not None else proj.get(c),
-             c, candidate_id, channel, budget, ts) for c in codes]
+             c, candidate_id, channel, budget, ts,
+             ((hash_by_code or {}).get(c) or content_hash) if hash_by_code
+             else content_hash) for c in codes]
     conn.executemany(
         "INSERT INTO push_log (session_key,citizen_id,project,code,candidate_id,channel,"
-        "budget_tokens,pushed_at) VALUES (?,?,?,?,?,?,?,?)", rows)
+        "budget_tokens,pushed_at,content_hash) VALUES (?,?,?,?,?,?,?,?,?)", rows)
     conn.commit()
     return len(rows)
 
@@ -9711,7 +9719,9 @@ def cmd_prompt_push(args):
             append_push_log(conn, codes, channel="prompt", citizen_id=citizen_id,
                             session_key=session_key, project=project,
                             candidate_id=codes[0] if codes else None,
-                            budget_tokens=budget)
+                            budget_tokens=budget,
+                            hash_by_code={c["code"]: c.get("content_hash")
+                                          for c in picked})
         except (sqlite3.Error, ValueError) as exc:
             # 记账失败不影响这次递送——但**必须出声**（采纳率缺数会让人得出错误结论）
             warn_derived(conn, "append_push_log", exc)
