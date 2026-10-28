@@ -4778,6 +4778,14 @@ def validate_session_token(conn, token, at=None):
         return None
     if info["expires_at"] and info["expires_at"] <= moment:
         return None
+    # 身份生命周期（外部审查 🔴5 / 🔴11，2026-10-29）：**公民状态也算失效的一部分**。
+    # 旧实现只查 revoked/expires，实测 `RETIRED_TOKEN_VALID`——退役/合并后的 bearer
+    # token 还能继续用，等于"退役"只是个标签。status 非 active（retired/merged_into/…）
+    # 或公民行不存在，一律拒绝。
+    row = conn.execute("SELECT status FROM citizens WHERE citizen_id=?",
+                       (info["citizen_id"],)).fetchone()
+    if row is None or str(row[0] or "") != "active":
+        return None
     return info["citizen_id"]
 
 
@@ -8555,7 +8563,10 @@ def _ownership_tables(conn):
     for (name,) in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' "
             "AND name NOT LIKE 'sqlite_%'"):
-        if name == "citizens":
+        if name in ("citizens", "citizens_archive", "session_tokens"):
+            # `citizens` / `citizens_archive` 是**身份本体**（冷热两处），`session_tokens`
+            # 是**凭证**——合并都不迁移：迁凭证等于把 src 的 token 变成 dst 身份（提权，
+            # 外部审查 🔴10）；改归档表会把"曾经的身份"也改写，破坏可追溯。
             continue
         try:
             cols = {row[1] for row in conn.execute(f"PRAGMA table_info({name})")}
@@ -8584,12 +8595,29 @@ def citizen_merge(conn, *, src, dst, apply=False) -> dict:
     src_row, dst_row = load_citizen(conn, src_id), load_citizen(conn, dst_id)
     if not src_row or not dst_row:
         raise ValueError(f"身份不存在：src={src} dst={dst}")
+    # 链式合并（A→B→C，外部审查 🔴10）：dst 若自己已被合并过，解析到最终目标。
+    for _ in range(8):
+        st = str(dst_row.get("status") or "")
+        if not st.startswith("merged_into:"):
+            break
+        dst_id = st.split(":", 1)[1]
+        dst_row = load_citizen(conn, dst_id)
+        if not dst_row:
+            raise ValueError(f"dst 的合并链断了：{dst_id}")
+    else:
+        raise ValueError("dst 的合并链过长（疑似环）")
     if dst_row["status"] != "active":
         raise ValueError(f"dst 必须是 active（现在是 {dst_row['status']}）")
     owner_row = conn.execute(
         "SELECT is_owner FROM citizens WHERE citizen_id=?", (src_id,)).fetchone()
     if owner_row and int(owner_row[0] or 0):
         raise ValueError("拒绝合并系统主人：先用 `owner` 切换主人再合并")
+    # 外部审查 🔴10：**dst 是 owner 也要拒**——合并会把 src 的凭证/归属都变成主人
+    # 身份（持 src token 者合并后即持 owner），那是提权路径。
+    dst_owner = conn.execute(
+        "SELECT is_owner FROM citizens WHERE citizen_id=?", (dst_id,)).fetchone()
+    if dst_owner and int(dst_owner[0] or 0):
+        raise ValueError("拒绝合并到系统主人（会变成身份提权）：先切换主人再合并")
     tables = _ownership_tables(conn)
     plan = {}
     for name, col in tables:
@@ -8606,7 +8634,20 @@ def citizen_merge(conn, *, src, dst, apply=False) -> dict:
         return out
     moved = {}
     try:
+        # 外部审查 🔴10/🔴11：凭证**先吊销、不迁移**——迁移会把 src 的 token 变成
+        # dst 身份（提权），而"先吊销再迁"会让吊销查不到行。顺序必须是先吊销。
+        revoke_session_tokens(conn, citizen_id=src_id)
         for name, col in tables:
+            if name == "project_stints":
+                # `(citizen_id, project)` 唯一约束（外部审查 🔴10）：src 与 dst 同项目时
+                # 直接 UPDATE 必撞。只迁 dst **没有**的项目，其余行留在 src（历史可查，
+                # 且 merged_into 已标明去向）。
+                cur = conn.execute(
+                    "UPDATE project_stints SET citizen_id=? WHERE citizen_id=? "
+                    "AND project NOT IN (SELECT project FROM project_stints "
+                    "WHERE citizen_id=?)", (dst_id, src_id, dst_id))
+                moved[f"{name}.{col}"] = int(cur.rowcount or 0)
+                continue
             cur = conn.execute(f"UPDATE {name} SET {col}=? WHERE {col}=?",
                                (dst_id, src_id))
             moved[f"{name}.{col}"] = int(cur.rowcount or 0)
@@ -8686,7 +8727,12 @@ def cmd_citizen_retire(args):
         print(f"已迁移 {n_mem} 条记忆 → {tgt[0]}")
 
     conn.execute("UPDATE citizens SET status='retired' WHERE citizen_id=?", (args.citizen_id,))
+    # P1（外部审查 🔴11，2026-10-29）：退役必须**吊销**该公民的活凭证——
+    # 否则"退役"只是标签，bearer token 仍能调用（实测 RETIRED_TOKEN_VALID）。
+    revoked = revoke_session_tokens(conn, citizen_id=args.citizen_id)
     conn.commit()
+    if revoked:
+        print(f"（同时吊销 {revoked} 条活凭证）")
     append_event(conn, "citizen.retired",
                  {"citizen_id": "system", "evidence_level": "signed"},
                  {"kind": "citizen", "id": args.citizen_id},

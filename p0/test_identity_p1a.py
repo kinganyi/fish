@@ -200,6 +200,11 @@ DECLARED_NEW_FUNCS = {
                 # （把 src 的归属改指向 dst），按同一纪律声明；上面的基线一字未改，
                 # 且它有自己的一组判据（test_citizen_merge：dry-run/迁移/标记/幂等）。
                 "citizen_merge",
+                # 2026-10-29（P1 身份生命周期，外部审查 🔴11）：`validate_session_token`
+                # 新增一条 citizens.status 查询——"退役/合并后的 token 必须失效"。
+                # 按同一纪律声明（不是改旧查询）；行为由 test_identity_lifecycle 的
+                # V-1/V-2 逐条钉住。
+                "validate_session_token",
                 # 2026-10-25（`EVAL-261025-16`）：`board_presence_rows` 加了
                 # `LEFT JOIN citizens` 拿 display_name（看板原来只显示 ULID，
                 # 人每次要拿它去 whoami 对照才知道是谁）。

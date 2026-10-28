@@ -124,7 +124,12 @@ SESSION_CITIZEN_SQL = {
 }
 
 # 派生的常量（改一处忘另一处就会在判据 I 里当场红）。
-EXPECTED_NEW_FUNCS = frozenset(SESSION_CITIZEN_SQL)
+EXPECTED_NEW_FUNCS = frozenset(SESSION_CITIZEN_SQL) | {
+    # 2026-10-29（P1 身份生命周期，外部审查 🔴11）：`validate_session_token` 新增一条
+    # citizens.status 查询（退役/合并的 token 立即失效）。按同一纪律声明；行为由
+    # test_identity_lifecycle 的 V-1/V-2 钉住。
+    "validate_session_token",
+}
 EXPECTED_STMT_COUNT = sum(len(v) for v in SESSION_CITIZEN_SQL.values())
 
 # MCP 工具表基线：**独立抄一份**，不从 mcp_server.TOOLS 反推（反推等于自己证自己）。
