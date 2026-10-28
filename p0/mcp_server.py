@@ -35,6 +35,7 @@ fish MCP server — dual-era 实现（零依赖 · JSON-RPC 2.0 over stdio）
 import argparse
 import collections
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -961,6 +962,13 @@ class FishServer:
         if "-" in prefix:
             raise ValueError("prefix 不能含 '-'（编码用它分隔段，如 ANYI-261022-01；"
                              "含 '-' 的存量前缀不适用本工具）")
+        # P1（外部审查 🔴6，2026-10-29）：prefix 绝不能带路径分隔符/点段/控制字符。
+        # `body_relpath` 也会拦，但"库里先登记一个脏前缀"本身就是脏数据，而且它会
+        # 进文件名——入口必须拒。
+        if (prefix in (".", "..") or "/" in prefix or "\\" in prefix
+                or any(seg in (".", "..") for seg in prefix.split("/"))
+                or re.search(r'[<>:"|?*\x00-\x1f]', prefix)):
+            raise ValueError(f"prefix 非法（不许路径分隔符/点段/控制字符）：{prefix!r}")
         if len(prefix) > 20:
             raise ValueError("prefix 太长（≤20 字符）")
         ns = (a.get("namespace") or prefix).strip()

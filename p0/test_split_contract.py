@@ -69,7 +69,12 @@ COMMON_NAMES = ("ulid", "now_utc", "iso_local", "count_tokens", "_exc_text")
 # 2026-10-28（T03b 合并）：fish_push 因 rerank 接线（+60 行）到 1,309 → 窗口上抬到 1,400
 # （功能增长导致的判据迁移，不是弱化：下限仍 1,050，且 J7/J8 守语义）。
 FISH_LINES_MIN = 13800
-FISH_LINES_MAX = 14300
+# 2026-10-29（P1 修复轮，外部审查 §8 P1）：🔴11 公民状态校验 / 🔴10 链式+唯一约束 /
+# 🔴6 body_relpath 路径穿越拦截 / 🔴9 append_event 事务参数 都落在 fish.py 上，
+# 实测 14,302 行 → 上界 14,300 → **14,500**。这是"功能增长"的判据迁移（不是放宽）：
+# 下界不动、新模块窗口不动，且这些改动的行为由各自判据（test_identity_lifecycle /
+# test_event_tx / test_path_traversal）逐条钉住。
+FISH_LINES_MAX = 14500
 EXPECTED_LINE_ACTUAL = 14032
 FISH_PUSH_LINES_MIN = 1050
 FISH_PUSH_LINES_MAX = 1400

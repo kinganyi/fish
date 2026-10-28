@@ -506,7 +506,7 @@ def _kb_push_candidates(conn, root, *, query, project=None, exclude=(), limit=2,
     return _breaker(conn, root, "kb", started, query, out[:max(int(limit), 1)])
 
 def _conv_push_candidates(conn, root, *, query, project=None, session_key=None,
-                          exclude=(), limit=1, now=None):
+                          exclude=(), limit=1, now=None, citizen_id=None):
     """语料候选（C-P0-6）：**取数/门槛/时间窗都在 `fish_corpus`**（M8：主体已搬走）。
 
     这里只交付两处主库依赖：`push_log` 里的"最近推过"与打分公式 `_cand`
@@ -516,6 +516,7 @@ def _conv_push_candidates(conn, root, *, query, project=None, session_key=None,
     started = time.monotonic()
     out = fish_corpus.conv_push_for_session(
         root=root, query=query, project=project, exclude=exclude, limit=limit, now=now,
+        citizen_id=citizen_id,
         recent_of=lambda hours, when: _recent_pushed_codes(conn, session_key, hours=hours,
                                                           now=when),
         scorer=lambda item: _cand(conn, item["code"], "conv_related", title=item["title"],
@@ -698,7 +699,8 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
     # 一次 `database is locked` 就让 tool_after 整轮抛异常。
     try:
         out.extend(_conv_push_candidates(conn, root, query=prompt, project=project,
-                                         session_key=session_key, now=now_dt))
+                                         session_key=session_key, now=now_dt,
+                                         citizen_id=citizen_id))
     except Exception:       # noqa: BLE001 —— 语料候选是增强项
         pass
 
@@ -1120,7 +1122,8 @@ def build_prompt_candidates(conn, root, *, prompt, citizen_id=None, session_key=
     # 绝不许把用户消息边界上的 prompt-push 整个打断）
     try:
         conv_cands = _conv_push_candidates(conn, root, query=prompt, project=project,
-                                           session_key=session_key, limit=1, now=now_dt)
+                                           session_key=session_key, limit=1, now=now_dt,
+                                           citizen_id=citizen_id)
     except Exception:       # noqa: BLE001 —— 语料候选是增强项
         conv_cands = []
     if not terms:

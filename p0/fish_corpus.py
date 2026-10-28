@@ -1141,11 +1141,10 @@ def _dup_count_map(dup_counts, now, skip):
         return None
 
 
-def conv_push_candidates(*, query, project=None, root=None, conn=None, exclude=(),
-                         limit=PUSH_MAX_ITEMS, now=None,
+def conv_push_candidates(*, query, project=None, root=None, conn=None, exclude=(), limit=PUSH_MAX_ITEMS, now=None,
                          min_relevance=PUSH_MIN_RELEVANCE, min_chars=PUSH_MIN_CHARS,
                          include_subagent=PUSH_INCLUDE_SUBAGENT, via="push",
-                         scorer=None, dup_counts=None) -> dict:
+                         scorer=None, dup_counts=None, citizen_id=None) -> dict:
     """语料命中 → 推送候选（C-P0-6 · 设计 §7）。
 
     **只产条目，不在这里发明打分**：给 `scorer`（`fish.py` 传它的 `_cand`）时，
@@ -1216,6 +1215,12 @@ def conv_push_candidates(*, query, project=None, root=None, conn=None, exclude=(
         if not hit.get("citizen_id"):
             _skip("no_citizen")               # 身份查不到就不推（不静默：计入 skipped）
             continue
+        # 外部审查 🔴8（2026-10-29）：**跨公民推送**——旧实现只要求"有 citizen_id"，
+        # 不比较是谁的，于是 A 会话会被推 B 会话生成的内容。给了 `citizen_id` 就
+        # 只推**本公民**的段（没给 = 旧行为，兼容既有调用点）。
+        if citizen_id and str(hit.get("citizen_id")) != str(citizen_id):
+            _skip("other_citizen")
+            continue
         if (hit.get("origin") or "main") == "subagent" and not include_subagent:
             _skip("subagent")
             continue
@@ -1281,7 +1286,7 @@ def conv_push_candidates(*, query, project=None, root=None, conn=None, exclude=(
 
 def conv_push_for_session(*, root, query, project=None, exclude=(), limit=PUSH_MAX_ITEMS,
                           now=None, recent_of=None, dup_counts_of=None,
-                          scorer=None) -> list:
+                          scorer=None, citizen_id=None) -> list:
     """`fish.py` 的**薄壳口**（M8）：把两处主库依赖做成回调，这里只做门槛与去重。
 
     - `recent_of(hours, now)`     → **本会话**最近推过的 code 集合（挡：24h 内推过就不产）；
@@ -1310,7 +1315,8 @@ def conv_push_for_session(*, root, query, project=None, exclude=(), limit=PUSH_M
             pushed = set()
     res = conv_push_candidates(root=root, query=query, project=project,
                                exclude=set(exclude or ()) | pushed, limit=limit,
-                               now=now, dup_counts=dup_counts_of, scorer=scorer)
+                               now=now, dup_counts=dup_counts_of, scorer=scorer,
+                               citizen_id=citizen_id)
     return res["items"]
 
 

@@ -50,7 +50,19 @@ RULES = (
     # GitHub 五种短前缀 + 细粒度 PAT（`github_pat_<id>_<secret>`）。
     ("github_token", re.compile(r"(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}")),
     ("aws_access_key", re.compile(r"(?:AKIA|ASIA)[0-9A-Z]{16}")),
-    ("private_key", re.compile(r"BEGIN [A-Z ]*PRIVATE KEY")),
+    # 外部审查 🔴8（2026-10-29）：旧规则只匹配 `BEGIN ...` 这一行、只替换标志本身，
+    # 私钥正文（base64 块）原样留在库里，`doctor` 复扫也查不出（因为标志已没了）。
+    # 改成**整段消费**：从 BEGIN 到 END（含）一起替换，正文不可能残留。
+    ("private_key", re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+        re.S)),
+    # 无 END 的残缺块（被截断的 PEM）：从 BEGIN 吃到结尾/一大段，宁可多掩。
+    ("private_key_orphan", re.compile(
+        r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]{40,}", re.S)),
+    # 裸格式兜底（`BEGIN RSA PRIVATE KEY` 不带 `-----`）：`test_corpus_contract`
+    # 要求"主库 CREDENTIAL_PATTERNS 的每一条，语料侧都必须有同样命中的规则"。
+    # 上面两条管完整 PEM；这条保证裸格式也至少被识别（scan 能看见）。
+    ("private_key_bare", re.compile(r"BEGIN [A-Z ]*PRIVATE KEY")),
     # `Bearer <8 字符以上>`：整体消费，否则只要值是 base64 就漏。
     ("bearer_token", re.compile(r"Bearer\s+\S{8,}", re.IGNORECASE)),
     # 键+值整体消费：`MY_TOKEN=` / `GITHUB_TOKEN=` / `"access_token": "…"` /

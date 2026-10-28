@@ -2021,7 +2021,17 @@ def body_relpath(project, code, title):
 
     **唯一入口**：`record_memory` 与 `rebuild_projection` 都必须调它，
     否则两处规则漂移 = 重建即断链（这类"两份实现"的亏本项目吃过多次）。
+
+    **路径穿越在这里拦**（外部审查 🔴6，2026-10-29）：`project_writable` 只查状态
+    不查字符，实测 `body_relpath('../../outside', …)` 会拼出
+    `projects/../../outside/...`，normpath 之后逃出 root。唯一入口必须自己守。
     """
+    p = str(project or "").strip()
+    if (not p or p in (".", "..") or "/" in p or "\\" in p
+            or re.search(r"[<>:\"|?*\x00-\x1f]", p)
+            or any(seg in (".", "..") for seg in p.split("/"))):
+        raise ValueError(
+            f"项目名非法（不许路径分隔符/点段/控制字符）：{project!r}")
     return f"projects/{project}/{code}__{slug_title(title)}.md"
 
 
