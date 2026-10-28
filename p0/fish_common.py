@@ -237,6 +237,11 @@ CONFIG_DEFAULTS = {
     "push.score_floor": (0.0, "float", None),
     "push.meta_penalty": (0.5, "float", None),
     "push.corpus_enabled": (False, "bool", None),
+    # T03b（rerank + 断路器）的可配键：B 的实现用 `_cfg_any` 兜默认，但**必须在这里登记**
+    # ——否则 `fish config set` 报"未知配置键"，运维就没有开关（只能改代码或环境变量）。
+    "push.rerank_enabled": (False, "bool", None),
+    "push.rerank_top_k": (50, "int", None),
+    "push.breaker_seconds": (3.0, "float", None),
     "push.gap_window_days": (14, "int", None),            # 遗漏检测窗口（§3.3-B ②）
     "push.gap_others_read_min": (3, "int", None),         # 「别人常读」的次数下限
     "push.situational_window_min": (10, "int", None),     # 态势窗口（§3.3-C ②）
