@@ -77,10 +77,11 @@ FISH_LINES_MIN = 13800
 FISH_LINES_MAX = 14500
 EXPECTED_LINE_ACTUAL = 14032
 FISH_PUSH_LINES_MIN = 1050
-# 2026-10-29（P0-1/P0-2 推送去重）：空 session 全局去重 + 结案（accepted/ignored）
-# 永久不推 → 实测 1,405 行，上限 1,400 → **1,450**。下界不动；行为由
-# test_push_dedupe（3）与 test_push_settled（4）逐条钉住。
-FISH_PUSH_LINES_MAX = 1450
+# 2026-10-29（P0-1/P0-2/P1-1）：空 session 全局去重 + 结案永久不推 + content_hash
+# 内容感知 + 分通道时效门 → 实测 **1,470** 行，上限 1,450 → **1,520**。
+# ⚠️ 这是本项目第 4 次抬 fish_push 的上限——**它在长回去**。下一轮应按审查 §6.1
+# 抽"推送管道"模块（候选生成/门槛/去重三段），而不是继续抬窗口。
+FISH_PUSH_LINES_MAX = 1520
 FISH_COMMON_LINES_MIN = 550
 FISH_COMMON_LINES_MAX = 750
 

@@ -1022,6 +1022,40 @@ def _activity_overlap_candidates(conn, *, project=None, citizen_id=None,
             "project": project, "benefit": 0.8, "cost": 0.05, "weight": 1.0,
             "key": False, "score": 0.75,
         })
+    return _apply_stale_floor(conn, out, _push_stale_floor(conn))
+
+
+def _push_stale_floor(conn) -> float:
+    try:
+        return float(get_config(conn, "push.prompt_stale_floor"))
+    except Exception:       # noqa: BLE001 —— 配置坏了就用默认
+        return 0.35
+
+
+def _apply_stale_floor(conn, cands, floor):
+    """P1-1（2026-10-29，行为谱系 G3）：**分通道时效门**。
+
+    旧实现只有 prompt 通道有硬门槛（此前 fish_push.py:1188 那一处），
+    tool_after/inject 只靠 `_cand` 的打分折扣（能压分，压不到 0）——
+    "状态类旧条目"因此照样从工具后通道进来。
+
+    规则与 prompt **同源**：`STALE_SENSITIVE_TYPES`（fact/episode/artifact）过门槛；
+    `FRESHNESS_EXEMPT_TYPES`（rule/identity/lesson）的 factor 恒 1.0，天然免疫
+    （免疫是算出来的，不是特判出来的）。kb/看板候选没有 mem_type → 不在这里判。
+    """
+    out = []
+    for cand in cands:
+        mtype = cand.get("mtype")
+        if mtype is None:
+            row = conn.execute("SELECT mem_type FROM code_index WHERE code=?",
+                               (cand.get("code"),)).fetchone()
+            mtype = row[0] if row else None
+            cand["mtype"] = mtype
+        if str(mtype or "") in STALE_SENSITIVE_TYPES:
+            factor = float((cand.get("freshness") or {}).get("factor", 1.0))
+            if factor < floor:
+                continue
+        out.append(cand)
     return out
 
 _PROMPT_STOPWORDS = frozenset("""
