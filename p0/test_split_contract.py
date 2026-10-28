@@ -77,7 +77,10 @@ FISH_LINES_MIN = 13800
 FISH_LINES_MAX = 14500
 EXPECTED_LINE_ACTUAL = 14032
 FISH_PUSH_LINES_MIN = 1050
-FISH_PUSH_LINES_MAX = 1400
+# 2026-10-29（P0-1/P0-2 推送去重）：空 session 全局去重 + 结案（accepted/ignored）
+# 永久不推 → 实测 1,405 行，上限 1,400 → **1,450**。下界不动；行为由
+# test_push_dedupe（3）与 test_push_settled（4）逐条钉住。
+FISH_PUSH_LINES_MAX = 1450
 FISH_COMMON_LINES_MIN = 550
 FISH_COMMON_LINES_MAX = 750
 

@@ -744,13 +744,19 @@ def _recent_pushed_codes(conn, session_key, *, hours=24, now=None) -> set:
         return set()
     now_dt = now or datetime.datetime.now(datetime.timezone.utc)
     cutoff = (now_dt - datetime.timedelta(hours=window)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # P0-2（2026-10-29，行为谱系 G1）：**结案的 code 永久不再推**——
+    # `accepted` = 已经读过了（再推就是重复打扰）；`ignored` = 过了窗口也没人读
+    # （再推同样只是噪音）。生产实测：ignored 平均被推 963.9 次、accepted 22.7 次，
+    # 真正被读的只占 2.9%——不按"结局"去重，去重永远只是在拖延时间。
+    # 内容变化后的重推由 P0-2 第二段（content_hash）负责，这里只挡"同一份内容"。
+    settled = ("accepted", "ignored")
     if not session_key:
         return {r[0] for r in conn.execute(
-            "SELECT DISTINCT code FROM push_log WHERE pushed_at >= ? "
-            "AND code IS NOT NULL", (cutoff,)).fetchall()}
+            "SELECT DISTINCT code FROM push_log WHERE code IS NOT NULL AND ("
+            "pushed_at >= ? OR reaction IN (?,?))", (cutoff, *settled)).fetchall()}
     return {r[0] for r in conn.execute(
-        "SELECT DISTINCT code FROM push_log WHERE session_key=? AND pushed_at >= ? "
-        "AND code IS NOT NULL", (session_key, cutoff)).fetchall()}
+        "SELECT DISTINCT code FROM push_log WHERE session_key=? AND code IS NOT NULL AND ("
+        "pushed_at >= ? OR reaction IN (?,?))", (session_key, cutoff, *settled)).fetchall()}
 
 def _declared_row_fresh(last_seen, auto_seen, window_min, now_dt) -> bool:
     """声明行是否**还在有效窗口内**（`find_collisions` 的声明面口径，评审 F5）。
