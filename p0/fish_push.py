@@ -1247,8 +1247,56 @@ def build_prompt_candidates(conn, root, *, prompt, citizen_id=None, session_key=
     # P0-1：知识库候选与记忆候选同批排序、同一预算（"做设计的 AI 拿到设计文章"）。
     out.extend(kb_cands)
     out.extend(conv_cands)          # T04：原话候选同批（同一份预算，不另开一格）
+    # P1-2（2026-10-29，行为谱系）：**RRF 融合**——三路（记忆"收益−成本"加权 /
+    # 知识库字面命中 / 语料检索分）的 score **量纲互不相干**（审查 🟠-P/Q 的同源问题），
+    # 直接 `sort(-score)` 等于拿三把尺子量同一件东西。RRF 只依赖**名次**（k=60），
+    # 天然免疫量纲差异。默认**关**（`push.rrf_enabled`）——行为变化大，观察后再开。
+    out = _rrf_fuse(out) if _rrf_enabled(conn) else out
     out.sort(key=lambda c: (-c["score"], c["code"]))
     return _with_ctx_project(conn, out[:max(int(limit), 1)], project)
+
+
+def _rrf_enabled(conn) -> bool:
+    """`push.rrf_enabled`（默认 False：保持"分数直排"的既有行为，零回归）。"""
+    try:
+        return bool(get_config(conn, "push.rrf_enabled"))
+    except Exception:       # noqa: BLE001 —— 配置坏了就按关处理
+        return False
+
+
+def _rrf_fuse(cands, *, k=60):
+    """RRF 融合（Reciprocal Rank Fusion，Cormack et al., SIGIR 2009）。
+
+    为什么需要它：记忆的 score 是"收益−成本×静默降权"、知识库是字面命中数、
+    语料是检索分——**三把不同的尺子**（外部审查 🟠-P/Q 指出的正是这个）。
+    RRF 的解法：每路**只在路内排**，`score = Σ_r 1/(k + rank_r(d))`，最后归一到 [0,1]
+    （与既有分数同域，不破坏下游的阈值判断）。k=60 是 RRF 论文的默认值。
+    """
+    routes = {}
+    for cand in cands:
+        kind = str(cand.get("kind") or "")
+        route = ("kb" if kind == "kb" else
+                 "corpus" if kind in ("conv", "conv_related", "corpus") else
+                 "board" if kind in ("board", "situational") else "memory")
+        routes.setdefault(route, []).append(cand)
+    fused = {}
+    for route, items in routes.items():
+        items.sort(key=lambda c: (-float(c.get("score") or 0.0), str(c.get("code"))))
+        for rank, cand in enumerate(items, start=1):
+            key = str(cand.get("code"))
+            fused[key] = fused.get(key, 0.0) + 1.0 / (k + rank)
+    if not fused:
+        return cands
+    top = max(fused.values()) or 1.0
+    out = []
+    for cand in cands:
+        key = str(cand.get("code"))
+        if key in fused:
+            cand = dict(cand)
+            cand["score"] = round(fused[key] / top, 6)
+            cand["rrf"] = round(fused[key], 6)
+        out.append(cand)
+    return out
 
 # ---------------------------------------------------------------- 六特征重排（T03b）
 #

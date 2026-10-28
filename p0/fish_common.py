@@ -343,6 +343,9 @@ CONFIG_DEFAULTS = {
     "push.prompt_min_relevance": (0.6, "float", None),
     # 陈旧性硬门槛：与 band 的 stale 阈值同值但**可独立调**（见 §6.5）。
     "push.prompt_stale_floor": (0.35, "float", None),
+    # P1-2（2026-10-29）：RRF 融合开关。默认**关**——把"分数直排"换成"按名次融合"是
+    # 行为变化，要用户观察后再手动开（`fish config set push.rrf_enabled true`）。
+    "push.rrf_enabled": (False, "bool", None),
     # 同会话 24h 内不重复推同一编码（与 _recent_pushed_codes 同一口径）。
     "push.prompt_exclude_hours": (24, "int", None),
 }
