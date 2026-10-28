@@ -352,6 +352,11 @@ CONFIG_DEFAULTS = {
     "push.factor_recency": (0.2, "float", None),
     "push.factor_importance": (0.3, "float", None),
     "push.factor_relevance": (0.5, "float", None),
+    # P2 阶段（2026-10-29）：多样性（MMR）与价值门。两个都**默认关**——
+    # 它们会改变"推哪几条"，需要观察后再开。
+    "push.mmr_enabled": (False, "bool", None),
+    "push.mmr_lambda": (0.7, "float", None),    # λ：相关 vs 多样的折中（0.7 = 偏相关）
+    "push.value_floor": (0.0, "float", None),   # 0 = 关；开了按 importance×relevance 卡
     # 同会话 24h 内不重复推同一编码（与 _recent_pushed_codes 同一口径）。
     "push.prompt_exclude_hours": (24, "int", None),
 }

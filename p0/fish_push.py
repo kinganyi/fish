@@ -1483,6 +1483,12 @@ def select_push_candidates(conn, cands, *, limit=4, prefer_kind=None, project=No
     # ⑤ 推送门槛（2026-10-28，BUG-2 收口）：宁空勿错——错推一次，模型学会忽略整个通道。
     cands = _apply_push_gates(conn, cands)
     cands = [c for c in cands if c["score"] > 0]
+    # P2 阶段（2026-10-29，行为谱系 G6）：**价值门**——`importance × relevance` 低于
+    # 阈值的不推。默认 0（= 关）。开了之后低价值候选连"占一格"都不该占：
+    # 生产实测 accepted 只占 2.9%，"少推一条"的收益远大于"多推一条"。
+    _floor = _value_floor(conn)
+    if _floor > 0:
+        cands = [c for c in cands if _value_ok(c, _floor)]
     picked, seen_kinds = [], {}
     quota = int(limit)
     # 先给"意外"留一格——不靠排序运气（否则它在冷启动时永远排不上）
@@ -1494,14 +1500,80 @@ def select_push_candidates(conn, cands, *, limit=4, prefer_kind=None, project=No
         wanted = [c for c in cands if c["kind"] == prefer_kind and c not in picked]
         if wanted:
             picked.append(wanted[0])          # 指定类别优先占第一格
-    for c in cands:
-        if len(picked) >= quota:
-            break
-        if c in picked:
-            continue
-        picked.append(c)
+    # P2 阶段（行为谱系 G5）：**MMR 多样性**——默认关；开了之后"补齐"阶段用
+    # 最大边际相关（Maximal Marginal Relevance）替代纯分数，避免两条几乎一样的
+    # 条目占两格（"意外"固定 10% 配额治不了这个问题）。
+    remaining = [c for c in cands if c not in picked]
+    if _mmr_enabled(conn):
+        picked.extend(_mmr_select(conn, remaining,
+                                  max(quota - len(picked), 0)))
+    else:
+        for c in remaining:
+            if len(picked) >= quota:
+                break
+            picked.append(c)
     picked.sort(key=lambda c: (-c["score"], c["code"]))
     return picked[:quota]
+
+
+def _value_floor(conn) -> float:
+    try:
+        return float(get_config(conn, "push.value_floor"))
+    except Exception:       # noqa: BLE001
+        return 0.0
+
+
+def _value_ok(cand, floor) -> bool:
+    """`importance × relevance` 是否过价值门（缺 factors 时按 1.0 放过，不误杀）。"""
+    f = cand.get("factors") or {}
+    imp = float(f.get("importance", 1.0))
+    rel = float(f.get("relevance", cand.get("score") or 1.0))
+    return (imp * rel) >= floor
+
+
+def _mmr_enabled(conn) -> bool:
+    try:
+        return bool(get_config(conn, "push.mmr_enabled"))
+    except Exception:       # noqa: BLE001
+        return False
+
+
+def _mmr_select(conn, cands, quota, *, lam=None):
+    """MMR 贪心选择：`λ·rel(d) − (1−λ)·max_{s∈S} sim(d,s)`。
+
+    没有 embedding，所以用**可解释的粗相似度**（取两者较大）：
+      · 同 kind + 同 project → 0.8（同一类东西的两条）
+      · 标题字符集合的 Jaccard → [0,1]
+    目标只有一个：**别让两条几乎一样的条目占两格**。
+    """
+    if quota <= 0:
+        return []
+    if lam is None:
+        try:
+            lam = float(get_config(conn, "push.mmr_lambda"))
+        except Exception:   # noqa: BLE001
+            lam = 0.7
+
+    def _sim(a, b):
+        same = 0.8 if (a.get("kind") == b.get("kind")
+                       and (a.get("project") or "") == (b.get("project") or "")) else 0.0
+        ta = set(str(a.get("title") or ""))
+        tb = set(str(b.get("title") or ""))
+        jac = (len(ta & tb) / float(len(ta | tb))) if (ta or tb) else 0.0
+        return max(same, jac)
+
+    pool, chosen = list(cands), []
+    while pool and len(chosen) < quota:
+        best, best_v = None, None
+        for cand in pool:
+            rel = float(cand.get("score") or 0.0)
+            div = max((_sim(cand, s) for s in chosen), default=0.0)
+            val = lam * rel - (1.0 - lam) * div
+            if best_v is None or val > best_v:
+                best, best_v = cand, val
+        chosen.append(best)
+        pool.remove(best)
+    return chosen
 
 def build_push_block(conn, root, *, budget_tokens=None, **kw):
     """把候选渲染成注入包的一段（`16` §5.7 的"开场"档）。
