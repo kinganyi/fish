@@ -80,8 +80,10 @@ class SessionStartToolTest(unittest.TestCase):
         o1 = self.srv.tool_session_start({"session_name": "dev-a"}, self.anon)
         cid = self._citizen_of(o1)
         n_before = self.srv.conn.execute("SELECT COUNT(*) FROM citizens").fetchone()[0]
+        # S-01：显式绑定已有公民要出示证明（你现有的 token）
         o2 = self.srv.tool_session_start(
-            {"session_name": "another-session", "citizen": cid}, self.anon)
+            {"session_name": "another-session", "citizen": cid,
+             "bind_token": self._token_of(o1)}, self.anon)
         self.assertEqual(self._citizen_of(o2), cid, "应绑到指定的公民上")
         n_after = self.srv.conn.execute("SELECT COUNT(*) FROM citizens").fetchone()[0]
         self.assertEqual(n_before, n_after, f"不该新建公民（{n_before} → {n_after}）")

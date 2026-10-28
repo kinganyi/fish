@@ -85,7 +85,8 @@ BASELINE_TOOL_PROPS = {
     # 2026-10-25 加（用户批准的工具数变更）：MCP 面唯一的签发口。
     # 入参刻意**不含 token**（它本身就是拿 token 的地方），只有 `_attach_token`
     # 统一加的那个可选字段——所以这里列的是业务字段。
-    "session_start": {"citizen", "display_name", "session_name", "project", "kind"},
+    "session_start": {"citizen", "display_name", "session_name", "project", "kind",
+                          "bind_token"},  # 2026-10-28 S-01：显式证明（可选）
     # 2026-10-25 加（用户要求补）：看板的 MCP 面。show 只读、checkin 要凭证。
     # 2026-10-25 补 post（EVAL-261025-10）：MCP 面做完无法标 done，看板丢掉"动到哪了"。
     # 2026-10-25 再加 status（EVAL-261025-14）：left 在 DDL 里有、入口没有，

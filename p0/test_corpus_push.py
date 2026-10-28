@@ -159,6 +159,10 @@ class CandidateTest(PushCase):
         self.assertTrue(cands)
         for cand in cands:
             self.assertGreater(cand["score"], 0, cand)
+        # 2026-10-28：G4 默认挡语料；本判据测的是"候选分数与选择"，需显式开通道。
+        self.conn.execute("INSERT OR REPLACE INTO config (key,value) "
+                          "VALUES ('push.corpus_enabled','true')")
+        self.conn.commit()
         self.assertEqual(fish.select_push_candidates(self.conn, cands, limit=1), cands[:1])
 
     def test_only_one_item_per_batch(self):

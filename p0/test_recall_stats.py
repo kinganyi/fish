@@ -44,9 +44,12 @@ class RecallStatsTest(unittest.TestCase):
                 "INSERT INTO code_index (code,title,project,status,file_path) "
                 "VALUES (?,?,?,?,?)",
                 (code, f"{word}条", "demo", "active", f"demo/{code}.md"))
+            # 评审 R-04：索引侧必须用 `fts_text()`（与 `_index_one_fts` 同源）——
+            # 裸插原文在 unicode61 下是**一个 token**，查询侧 bigram 永远匹配不上 → 判据空转。
             conn.execute(
                 "INSERT INTO memory_fts (code, title_idx, body_idx) VALUES (?,?,?)",
-                (code, f"{word}条", f"独特词{word}在这里"))
+                (code, fish.fts_text(f"{word}条"),
+                 fish.fts_text(f"独特词{word}在这里")))
         conn.commit()
         conn.close()
 

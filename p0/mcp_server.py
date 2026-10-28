@@ -427,6 +427,9 @@ TOOLS = [
             "properties": {
                 "citizen": {"type": "string",
                             "description": "绑到**已存在**的公民（register 回执里的 citizen_id）"},
+                "bind_token": {"type": "string",
+                               "description": "绑定已有公民时的**证明**：你现有的 fish token"
+                                              "（S-01：防止凭可读的 session_name/citizen_id 接管）"},
                 "display_name": {"type": "string",
                                  "description": "新公民的名字（与 citizen 二选一）"},
                 "session_name": {"type": "string",
@@ -1542,7 +1545,8 @@ class FishServer:
             res = fish.start_session(
                 self.conn,
                 projects=[project] if project else None,
-                citizen=citizen, alias=session_name, kind=kind)
+                citizen=citizen, alias=session_name, kind=kind,
+                bind_token=a.get("bind_token"))
         except ValueError as e:
             # `--citizen` 指向不存在/已归档的公民会在这里响亮失败——
             # 静默绑错比不绑更糟（它看起来成功了）。

@@ -223,6 +223,8 @@ class RerankCase(unittest.TestCase):
     def _enable_push(self, *, rerank=True):
         self._cfg("push.enabled", "true")
         self._cfg("push.prompt_enabled", "true")
+        # 2026-10-28：G4 真实生效后，语料默认不进候选；要测"三类同池"必须显式开。
+        self._cfg("push.corpus_enabled", "true")
         self._cfg("push.prompt_max_items", "2")
         self._cfg("push.rerank_enabled", "true" if rerank else "false")
 

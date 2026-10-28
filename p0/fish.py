@@ -5424,7 +5424,7 @@ def _normalize_projects(projects=None, project=None) -> list:
 
 def start_session(conn, *, projects=None, project=None, account=None, alias=None,
                   kind="visitor", role=None, environ=None, ttl_hours=None,
-                  citizen=None) -> dict:
+                  citizen=None, bind_token=None) -> dict:
     """`session start` 的全部逻辑（CLI 只负责打印）。返回 dict，**含明文 token**。
 
     六步就是 18 §2 的六步，顺序不能换：
@@ -5448,6 +5448,30 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
     # 于是 `find_or_create` 会新建一个 B——两条通道的归属从此对不上，且无法合并。
     # `--citizen` 让调用方把这条会话**直接绑到已存在的公民**上，是那个问题的显式出口。
     forced = (citizen or "").strip() if isinstance(citizen, str) else citizen
+    # S-01（安全审计 2026-10-28）：绑定**已存在**公民必须证明持有它——否则任何会话
+    # 凭可读的 session_name / citizen_id 就能接管任意公民，且轮换会吊销受害者活凭证。
+    proof = str(bind_token or os.environ.get("FISH_SESSION_BIND_TOKEN") or "").strip()
+
+    def _prove(target_id):
+        if not proof:
+            # S-01 复核（2026-10-28 晚）：**有活凭证**的公民才必须证明；没有活凭证的
+            # 允许"恢复重连"（token 过期/被吊销后，AI 重启仍应拿回自己的身份——
+            # 否则正常使用会被挡死）。攻击者能利用的窗口只剩"受害者已断线"。
+            live = conn.execute(
+                "SELECT 1 FROM session_tokens WHERE citizen_id=? AND revoked_at IS NULL "
+                "AND (expires_at IS NULL OR expires_at > ?) LIMIT 1",
+                (target_id, now_utc())).fetchone()
+            if live:
+                raise ValueError(
+                    "绑定已有公民需要证明：fish session start --citizen <id> "
+                    "--bind-token <你现有的 fish token>（或设 FISH_SESSION_BIND_TOKEN）")
+            return
+        holder = validate_session_token(conn, proof)
+        if not holder:
+            raise ValueError("bind_token 无效、已吊销或已过期")
+        if holder != target_id:
+            raise ValueError("bind_token 不属于目标公民（拒绝：防接管）")
+
     if forced:
         row = conn.execute(
             "SELECT citizen_id, display_name, account_id, archived_at FROM citizens "
@@ -5456,6 +5480,7 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
             raise ValueError(f"指定的公民不存在：{forced}")
         if row[3]:
             raise ValueError(f"指定的公民已归档：{forced}（先 citizen-restore 再绑）")
+        _prove(forced)
         who = {"citizen_id": row[0], "created": False, "display_name": row[1],
                "account_id": row[2], "archived": False}
         if account_id and not row[2]:
@@ -5467,6 +5492,12 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
             conn, session_key=ident["session_key"], evidence=ident["evidence"],
             host=ident["host"], display_name=display_name, account_id=account_id,
             kind=kind, role=role)
+        if not who.get("created") and ident["session_key"].startswith(SELF_SESSION_PREFIX):
+            # S-01 的边界（2026-10-28 晚修正）：**只对可猜的键**（`self:<name>`，来自
+            # session_name）要求证明。宿主注入的键（dsh:/workbuddy:）需要"能设子进程
+            # env"才能伪造，那是同信任域内的行为（安全报告 N9 已承认）；而"重跑
+            # session start 幂等"是 J7/T3 钉死的契约，不能为了宿主键把它一并挡死。
+            _prove(who["citizen_id"])
     # 轮换：同一会话的新凭证生效时，旧的活凭证立即作废。
     # 为什么轮换而不是"留着"：重跑 start 的语义是"拿到一条新的、能用的凭证"，
     # 留着旧的意味着泄露面随时间只增不减；轮换后任一时刻一个会话只有一条活凭证。
@@ -8498,44 +8529,88 @@ def cmd_owner(args):
     conn.close()
 
 
+def _require_ulid(conn, value, label):
+    """只接受 ULID（评审 R-02：生产有 2 组同名活跃公民，按名字解析会合并错人）。"""
+    text = str(value or "").strip()
+    if not re.fullmatch(r"[0-9A-HJKMNP-TV-Z]{26}", text):
+        raise ValueError(
+            f"{label} 必须是 ULID（26 位 Crockford），收到 {value!r}；"
+            "用 `fish citizen-list` 查 ID，别用显示名")
+    return text
+
+
+def _ownership_tables(conn):
+    """自动发现"归属表"：任何带 `citizen_id` / `owner` 列的表（评审 R-02 的覆盖缺口）。
+
+    排除 `citizens` 自身（`merged_into` 标记单独写）。
+    """
+    out = []
+    for (name,) in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%'"):
+        if name == "citizens":
+            continue
+        try:
+            cols = {row[1] for row in conn.execute(f"PRAGMA table_info({name})")}
+        except sqlite3.Error:
+            continue
+        for col in ("citizen_id", "owner"):
+            if col in cols:
+                out.append((name, col))
+    return sorted(out)
+
+
 def citizen_merge(conn, *, src, dst, apply=False) -> dict:
     """把 src 公民的全部归属改指向 dst（⑥ 身份合并，2026-10-28）。
 
-    默认 **dry-run**（只数行数）；`apply=True` 才写。只做 from→to：不反向、不删行
-    （审计要"谁什么时候被合并"），src 标 `status='merged_into:<dst>'`。
-    收口的是"173 个公民 / 323 条记忆"这类身份分裂（07 号报告 P0-2）。
+    **安全边界**（评审 R-02 + 安全 S-03 收口）：
+      · 只接受 **ULID**（生产有 2 组同名活跃公民，按名字解析会合并错人）；
+      · **dst 必须 active**；**拒绝合并系统主人**（先用 `owner` 切换）；
+      · 归属表由 `PRAGMA table_info` **自动发现**（`citizen_id`/`owner` 列）；
+      · `apply` 走**单事务**：任一表失败 → ROLLBACK + 抛错 + **不写 merged_into**；
+      · 成功写 `citizen.merged` 事件（不可抵赖）；src 不删，标 `merged_into:<dst>`。
     """
-    src_id = _citizen_id_of(conn, src)
-    dst_id = _citizen_id_of(conn, dst)
-    if not src_id or not dst_id:
-        raise ValueError(f"身份不存在：src={src!r} dst={dst!r}")
+    src_id = _require_ulid(conn, src, "src")
+    dst_id = _require_ulid(conn, dst, "dst")
     if src_id == dst_id:
         raise ValueError("src 与 dst 是同一个公民")
-    tables = (("code_index", "owner"), ("session_tokens", "citizen_id"),
-              ("presence", "citizen_id"), ("board_posts", "citizen_id"),
-              ("push_log", "citizen_id"))
+    src_row, dst_row = load_citizen(conn, src_id), load_citizen(conn, dst_id)
+    if not src_row or not dst_row:
+        raise ValueError(f"身份不存在：src={src} dst={dst}")
+    if dst_row["status"] != "active":
+        raise ValueError(f"dst 必须是 active（现在是 {dst_row['status']}）")
+    owner_row = conn.execute(
+        "SELECT is_owner FROM citizens WHERE citizen_id=?", (src_id,)).fetchone()
+    if owner_row and int(owner_row[0] or 0):
+        raise ValueError("拒绝合并系统主人：先用 `owner` 切换主人再合并")
+    tables = _ownership_tables(conn)
     plan = {}
-    for table, col in tables:
+    for name, col in tables:
         try:
-            n = conn.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE {col}=?", (src_id,)).fetchone()[0]
+            plan[f"{name}.{col}"] = int(conn.execute(
+                f"SELECT COUNT(*) FROM {name} WHERE {col}=?",
+                (src_id,)).fetchone()[0] or 0)
         except sqlite3.Error:
-            n = 0
-        plan[f"{table}.{col}"] = int(n or 0)
-    out = {"src": src_id, "dst": dst_id, "apply": bool(apply), "plan": plan}
+            plan[f"{name}.{col}"] = "?"       # 判不到 ≠ 0（评审 R-02：别把错误说成空表）
+    out = {"src": src_id, "dst": dst_id, "apply": bool(apply),
+           "src_name": src_row.get("display_name"),
+           "dst_name": dst_row.get("display_name"), "plan": plan}
     if not apply:
         return out
     moved = {}
-    for table, col in tables:
-        try:
-            cur = conn.execute(
-                f"UPDATE {table} SET {col}=? WHERE {col}=?", (dst_id, src_id))
-            moved[f"{table}.{col}"] = int(cur.rowcount or 0)
-        except sqlite3.Error:
-            moved[f"{table}.{col}"] = -1
-    conn.execute("UPDATE citizens SET status=? WHERE citizen_id=?",
-                 (f"merged_into:{dst_id}", src_id))
-    conn.commit()
+    try:
+        for name, col in tables:
+            cur = conn.execute(f"UPDATE {name} SET {col}=? WHERE {col}=?",
+                               (dst_id, src_id))
+            moved[f"{name}.{col}"] = int(cur.rowcount or 0)
+        conn.execute("UPDATE citizens SET status=? WHERE citizen_id=?",
+                     (f"merged_into:{dst_id}", src_id))
+        append_event(conn, "citizen.merged", {"citizen_id": dst_id}, src_id,
+                     {"src": src_id, "dst": dst_id, "moved": moved})
+        conn.commit()
+    except Exception:
+        conn.rollback()          # 单事务：半迁移绝不留盘（评审 R-02 的核心）
+        raise
     out["moved"] = moved
     return out
 
@@ -8884,7 +8959,8 @@ def cmd_session_start(args):
         res = start_session(
             conn, projects=projects,
             account=getattr(args, "account", None), alias=getattr(args, "alias", None),
-            citizen=getattr(args, "citizen", None))
+            citizen=getattr(args, "citizen", None),
+            bind_token=getattr(args, "bind_token", None))
     except ValueError as e:
         conn.close()
         print(f"错误：{e}", file=sys.stderr)
@@ -13926,6 +14002,9 @@ def main():
     sess = p.add_subparsers(dest="session_action", required=True)
 
     sp = sess.add_parser("start", help="签发会话凭证（幂等：同会话重跑 → 同一个公民）")
+    sp.add_argument("--bind-token", dest="bind_token", default=None,
+                    help="绑定已有公民时的证明：你现有的 fish token"
+                         "（S-01：不带的话，认领已有身份会被拒绝）")
     sp.add_argument("--project", action="append", default=None, metavar="PREFIX",
                     help="顺带开一个项目档期（如 ANYI）。**可重复给**："
                          "一个会话可以同时在多个项目上开档（--project A --project B）")

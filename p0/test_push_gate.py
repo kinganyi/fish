@@ -53,10 +53,11 @@ class PushGateTest(unittest.TestCase):
         out = self._gates([_cand("a", 0.9), _cand("b", 0.3), _cand("c", 0.1)])
         self.assertEqual([c["code"] for c in out], ["a", "b"])
 
-    # P-2
+    # P-2（评审 R-06：元记忆判定改为**结构化自指**——code 前缀属 fish 项目）
     def test_P2_meta_penalty_halves(self):
         self._set("push.meta_penalty", "0.5")
-        out = self._gates([_cand("m", 0.8, project="", title="fish 看板反馈")])
+        out = self._gates([_cand("大肥鱼生命系统-261028-99", 0.8, project="",
+                                 title="看板假在场修复")])
         self.assertEqual(len(out), 1)
         self.assertAlmostEqual(out[0]["score"], 0.4, places=6)
         self.assertEqual(out[0].get("gated"), "meta_penalty")
@@ -68,13 +69,31 @@ class PushGateTest(unittest.TestCase):
                                  title="fish 项目部署（有项目）")])
         self.assertAlmostEqual(out[0]["score"], 0.8, places=6)
 
-    # P-3
+    # P-3（评审 R-01：必须用**真实**语料候选的 kind=conv_related，不能用虚构的 "corpus"）
     def test_P3_corpus_off_by_default(self):
-        out = self._gates([_cand("c", 0.9, kind="corpus")])
-        self.assertEqual(out, [], "语料默认不进（N7：记忆与语料可信度不同级）")
+        real = {"code": "conv:cli:abc#line=1", "kind": "conv_related",
+                "score": 0.9, "title": "x", "project": None}
+        self.assertEqual(self._gates([dict(real)]), [],
+                         "语料默认不进（N7：与记忆可信度不同级）")
         self._set("push.corpus_enabled", "1")
-        out = self._gates([_cand("c", 0.9, kind="corpus")])
-        self.assertEqual(len(out), 1)
+        self.assertEqual(len(self._gates([dict(real)])), 1)
+
+    # P-6（评审 R-06：通用词不误伤）
+    def test_P6_generic_words_not_penalized(self):
+        self._set("push.meta_penalty", "0.5")
+        for title in ("看板方法与推送通知的取舍", "依赖注入的三层写法",
+                      "Fish Audio TTS 接入"):
+            out = self._gates([_cand("g", 0.8, project="", title=title)])
+            self.assertAlmostEqual(out[0]["score"], 0.8, places=6,
+                                   msg=f"{title} 被误判成元记忆")
+
+    # P-7（评审 R-06：真元记忆仍要降权——结构化自指）
+    def test_P7_real_meta_still_penalized(self):
+        self._set("push.meta_penalty", "0.5")
+        out = self._gates([_cand("大肥鱼生命系统-261028-99", 0.8, project="",
+                                 title="看板假在场修复")])
+        self.assertAlmostEqual(out[0]["score"], 0.4, places=6)
+        self.assertEqual(out[0].get("gated"), "meta_penalty")
 
     # P-4
     def test_P4_does_not_mutate_input(self):

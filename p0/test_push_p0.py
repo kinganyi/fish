@@ -733,7 +733,8 @@ CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL,
                        "query", "ranker", "role"},
         }
         for t in mcp_server.TOOLS:
-            self.assertEqual(set(t["inputSchema"]["properties"]), expect[t["name"]] | {"token"},
+            extra = {"token"} | ({"bind_token"} if t["name"] == "session_start" else set())
+            self.assertEqual(set(t["inputSchema"]["properties"]), expect[t["name"]] | extra,
                              f"{t['name']} 的入参变了（冻结字段 + 可选 token + inject 的 project）")
             self.assertNotIn("token", t["inputSchema"].get("required") or [],
                              f"{t['name']} 把 token 变成必填了：旧调用会当场断")

@@ -558,6 +558,10 @@
   "description": "在 MCP 面直接签发一条会话凭证（token），**明文只返回这一次**。\n\n为什么需要它（2026-10-25 加，外部评估 `EVAL-261025-05`）：在此之前 MCP 面**没有任何口子能产出 token**——AI 只能离开 MCP 去跑 CLI，而 CLI 那侧的会话键与 MCP 不同，会建成**另一个公民**，两条通道的归属从此对不上且无法合并。\n\n两种用法：\n　· 已登记过 → 传 citizen（你在 register 回执里拿到的 citizen_id）\n　· 还没登记 → 传 display_name，本工具会建公民并直接签发\n**session_name 强烈建议传**：它是幂等锚，不传每次都建新公民。",
   "inputSchema": {
    "properties": {
+    "bind_token": {
+     "description": "绑定已有公民时的**证明**：你现有的 fish token（S-01：防止凭可读的 session_name/citizen_id 接管）",
+     "type": "string"
+    },
     "citizen": {
      "description": "绑到**已存在**的公民（register 回执里的 citizen_id）",
      "type": "string"

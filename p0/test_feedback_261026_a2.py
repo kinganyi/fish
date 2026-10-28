@@ -142,7 +142,9 @@ class FB05SessionPrefixTest(_Case):
         self.assertFalse([k for k in keys if k.startswith("self:self:")],
                          f"库里出现了叠加键：{keys}")
         # 幂等：换一种写法（裸名）重跑 → 同一个公民
-        again = fish.start_session(self.conn, alias="fish外部评估", environ={})
+        # S-01：自报级重跑要出示证明（有活 token 时），否则猜名字就能接管
+        again = fish.start_session(self.conn, alias="fish外部评估", environ={},
+                                   bind_token=res["token"])
         self.assertEqual(again["citizen_id"], res["citizen_id"],
                          "self:abc 与 abc 必须命中同一个公民（幂等承诺）")
 
@@ -235,8 +237,10 @@ class FB08SameNameNoticeTest(_Case):
 
     def test_FB08_self_is_not_a_conflict(self):
         """复用同一条会话（同 key）不该把自己报成同名冲突。"""
-        fish.start_session(self.conn, alias="a2-自我", environ={})
-        again = fish.start_session(self.conn, alias="a2-自我", environ={})
+        first = fish.start_session(self.conn, alias="a2-自我", environ={})
+        # S-01：同一会话重跑要带旧 token（有活 token 时必须证明）
+        again = fish.start_session(self.conn, alias="a2-自我", environ={},
+                                   bind_token=first["token"])
         self.assertEqual(again["name_conflicts"], [],
                          "自己不是「另一个同名公民」")
         self.assertTrue(again["created"] is False)

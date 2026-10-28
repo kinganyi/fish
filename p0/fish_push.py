@@ -15,6 +15,7 @@ import time
 
 import fish_activity
 import fish_corpus
+import fish_corpus_rank as corpus_rank   # 语料 kind/语义类别（G4 判定的唯一来源）
 import fish_naming
 import fish_surface
 
@@ -729,14 +730,22 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
     return _with_ctx_project(conn, out[:int(limit)], project)
 
 def _recent_pushed_codes(conn, session_key, *, hours=24, now=None) -> set:
-    """本会话最近 N 小时**已经推过**的编码（去重用；prompt 与 tool_after 共用一份）。"""
-    if not session_key:
-        return set()
+    """本会话最近 N 小时**已经推过**的编码（去重用；prompt 与 tool_after 共用一份）。
+
+    2026-10-28（推送研究 P0-1）：**没有会话身份不等于"没推过"**。旧实现直接返回空集，
+    而 tool_after 通道（生产 push_log 的 80.6%）恰恰没有 session_key → 去重完全失效
+    （实测同一记忆被推 1,554 次、间隔中位 2 分钟）。缺 session_key 时改为**全局**去重：
+    宁可少推，不可重复打扰。
+    """
     window = int(hours or 0)
     if window <= 0:
         return set()
     now_dt = now or datetime.datetime.now(datetime.timezone.utc)
     cutoff = (now_dt - datetime.timedelta(hours=window)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if not session_key:
+        return {r[0] for r in conn.execute(
+            "SELECT DISTINCT code FROM push_log WHERE pushed_at >= ? "
+            "AND code IS NOT NULL", (cutoff,)).fetchall()}
     return {r[0] for r in conn.execute(
         "SELECT DISTINCT code FROM push_log WHERE session_key=? AND pushed_at >= ? "
         "AND code IS NOT NULL", (session_key, cutoff)).fetchall()}
@@ -1205,16 +1214,41 @@ def _cfg_float(conn, key, default) -> float:
         return float(default)
 
 
-#: 元记忆的标题/理由特征（06 号报告 BUG-2：讲述 fish 自身的记忆极易被关键词命中）
-_META_HINTS = ("fish", "大肥鱼", "注入", "看板", "推送", "记忆系统")
+#: 元记忆的**专有**特征（评审 R-06：不能用"注入/看板/推送"这类通用词——
+#: 正常笔记「看板方法与推送通知的取舍」会同时命中两词而被误降权）。
+#: "看板/推送/注入/记忆系统"一律不参与；它们要么由 code 前缀自指判定，要么不判。
+_META_HINTS = ("fish", "大肥鱼")
 
 
 def _is_meta_candidate(cand) -> bool:
-    """元记忆：讲述 fish 自身、且**没有项目归属**（有项目的不是自指）。"""
+    """元记忆：**结构化自指**（评审 R-06：不能用通用词误伤正常笔记）。
+
+    判定：① 有项目归属 → 不是；② `code` 前缀是 fish 项目 → 是；
+    ③ 否则要求 **title 里同时命中 ≥2 个**提示词（`reason` 是生成侧文案，不参与）。
+    """
     if str(cand.get("project") or "").strip():
         return False
-    text = f"{cand.get('title') or ''} {cand.get('reason') or ''}".lower()
-    return any(hint in text for hint in _META_HINTS)
+    code = str(cand.get("code") or "").lower()
+    if code.startswith(("大肥鱼生命系统", "fish-", "fish:")):
+        return True
+    title = str(cand.get("title") or "").lower()
+    return sum(1 for hint in _META_HINTS if hint in title) >= 2
+
+
+def _is_corpus_candidate(cand) -> bool:
+    """语料候选（评审 R-01：真实 `kind` 是 `conv_related`，不是 `corpus`）。
+
+    三个来源任一命中即算：`kind == CORPUS_KIND` / `kind_class == KIND_CLASS_CORPUS`
+    / `semantic_kind(cand) == KIND_CLASS_CORPUS`（后者是重排与门槛共用的唯一语义来源）。
+    """
+    if str(cand.get("kind") or "") == corpus_rank.CORPUS_KIND:
+        return True
+    if str(cand.get("kind_class") or "") == corpus_rank.KIND_CLASS_CORPUS:
+        return True
+    try:
+        return corpus_rank.semantic_kind(cand) == corpus_rank.KIND_CLASS_CORPUS
+    except Exception:      # noqa: BLE001 —— 判定失败按"不是语料"（不误杀）
+        return False
 
 
 def _apply_push_gates(conn, cands) -> list:
@@ -1234,8 +1268,8 @@ def _apply_push_gates(conn, cands) -> list:
     for cand in cands:
         if not isinstance(cand, dict):
             continue
-        if str(cand.get("kind") or "") == "corpus" and not corpus_on:
-            continue                                   # G4
+        if not corpus_on and _is_corpus_candidate(cand):
+            continue                                   # G4（评审 R-01：真实 kind 是 conv_related）
         score = float(cand.get("score") or 0.0)
         if penalty < 1.0 and _is_meta_candidate(cand):
             cand = dict(cand)                          # G3：不改入参

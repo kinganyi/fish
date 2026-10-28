@@ -509,7 +509,9 @@ class FishIdentityP1bTest(unittest.TestCase):
         token_s, out_s = self._start(root, clean_env(), "--alias", "self-dev")
         self.assertEqual(field_of(out_s, "evidence"), "self-reported")
         self.assertEqual(field_of(out_s, "session_key"), "self:self-dev")
-        _, out_s2 = self._start(root, clean_env(), "--alias", "self-dev")
+        # S-01：自报级重跑要证明（有活 token 时）——无活 token 才允许恢复重连
+        _, out_s2 = self._start(root, clean_env(), "--alias", "self-dev",
+                                "--bind-token", token_s)
         self.assertEqual(field_of(out_s2, "citizen_id"), field_of(out_s, "citizen_id"),
                          "自报级也要幂等：同一个别名重跑 → 同一个公民（18 §10）")
         # ③ 宿主配置的会话名（FISH_SESSION_ACTOR）也只是自报级
