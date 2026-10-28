@@ -346,6 +346,12 @@ CONFIG_DEFAULTS = {
     # P1-2（2026-10-29）：RRF 融合开关。默认**关**——把"分数直排"换成"按名次融合"是
     # 行为变化，要用户观察后再手动开（`fish config set push.rrf_enabled true`）。
     "push.rrf_enabled": (False, "bool", None),
+    # P2 阶段（2026-10-29）：**三因子打分**（Generative Agents：recency×importance×relevance）。
+    # 默认**关**——它会改排序，等用户观察后再开。三个权重都可配（建议起点 0.2/0.3/0.5）。
+    "push.factors_enabled": (False, "bool", None),
+    "push.factor_recency": (0.2, "float", None),
+    "push.factor_importance": (0.3, "float", None),
+    "push.factor_relevance": (0.5, "float", None),
     # 同会话 24h 内不重复推同一编码（与 _recent_pushed_codes 同一口径）。
     "push.prompt_exclude_hours": (24, "int", None),
 }

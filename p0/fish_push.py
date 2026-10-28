@@ -8,6 +8,7 @@
 """
 
 import datetime
+import math
 import os
 import re
 import sqlite3
@@ -1252,8 +1253,64 @@ def build_prompt_candidates(conn, root, *, prompt, citizen_id=None, session_key=
     # 直接 `sort(-score)` 等于拿三把尺子量同一件东西。RRF 只依赖**名次**（k=60），
     # 天然免疫量纲差异。默认**关**（`push.rrf_enabled`）——行为变化大，观察后再开。
     out = _rrf_fuse(out) if _rrf_enabled(conn) else out
+    # P2 阶段：三因子（recency×importance×relevance）——同样默认关，观察后再开。
+    out = _apply_factors(conn, out) if _factors_enabled(conn) else out
     out.sort(key=lambda c: (-c["score"], c["code"]))
     return _with_ctx_project(conn, out[:max(int(limit), 1)], project)
+
+
+def _factors_enabled(conn) -> bool:
+    """`push.factors_enabled`（默认 False：保持既有排序，零回归）。"""
+    try:
+        return bool(get_config(conn, "push.factors_enabled"))
+    except Exception:       # noqa: BLE001
+        return False
+
+
+def _factor_weights(conn) -> dict:
+    """三个可配权重（`push.factor_recency/importance/relevance`）。"""
+    def _w(key, default):
+        try:
+            return float(get_config(conn, key))
+        except Exception:   # noqa: BLE001
+            return default
+    return {"recency": _w("push.factor_recency", 0.2),
+            "importance": _w("push.factor_importance", 0.3),
+            "relevance": _w("push.factor_relevance", 0.5)}
+
+
+def _apply_factors(conn, cands, weights=None):
+    """三因子打分（P2 阶段，Generative Agents: recency × importance × relevance）。
+
+    为什么放在 RRF 之后：**RRF 解决跨路公平**（只排名次），三因子解决**路内重要性**。
+    三个因子全部来自已有数据、不新造模型：
+      · recency    = `cand["freshness"]["factor"]`（`memory_freshness` 算的；
+                     rule/identity/lesson 恒 1.0，天然免疫年龄惩罚）
+      · importance = `access_count` 的 log 归一（50 次封顶）——"全局热度"的代理
+      · relevance  = `cand["relevance"]`（有则用）否则 RRF/初排分
+
+    权重可配、默认关（`push.factors_enabled`）；返回新候选（不改入参）。
+    """
+    w = weights or _factor_weights(conn)
+    out = []
+    for cand in cands:
+        rec = float((cand.get("freshness") or {}).get("factor", 1.0))
+        rel = float(cand.get("relevance") or cand.get("score") or 0.0)
+        row = conn.execute("SELECT access_count FROM code_index WHERE code=?",
+                           (cand.get("code"),)).fetchone()
+        acc = int((row[0] if row else 0) or 0)
+        imp = math.log1p(acc) / math.log1p(50.0)      # 50 次封顶 → [0,1]
+        rel = max(0.0, min(rel, 1.0))
+        score = (max(rel, 0.01) ** w["relevance"]
+                 * max(imp, 0.01) ** w["importance"]
+                 * max(rec, 0.01) ** w["recency"])
+        cand = dict(cand)
+        cand["score"] = round(min(score, 1.0), 6)
+        cand["factors"] = {"recency": round(rec, 4),
+                           "importance": round(imp, 4),
+                           "relevance": round(rel, 4)}
+        out.append(cand)
+    return out
 
 
 def _rrf_enabled(conn) -> bool:
