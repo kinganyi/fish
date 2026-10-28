@@ -1668,7 +1668,14 @@ def migrate(conn: sqlite3.Connection):
     conn.commit()
 
 
-def append_event(conn, etype, actor, subject, payload, cause=None) -> int:
+def append_event(conn, etype, actor, subject, payload, cause=None, *,
+                 commit=True) -> int:
+    """追加一条事件。
+
+    `commit=True`（默认）保持旧行为：事件写进去就提交。
+    **`commit=False` 让调用方自己控制事务边界**（外部审查 🔴9：旧实现把 commit 焊死在
+    这里，上层没法把"业务写 + 事件"组成一个事务——merge/retire 的归属变更因此不可重放）。
+    """
     cur = conn.execute(
         "INSERT INTO events (event_id, ts, type, actor, subject, payload, cause, schema) "
         "VALUES (?,?,?,?,?,?,?,?)",
@@ -1676,7 +1683,8 @@ def append_event(conn, etype, actor, subject, payload, cause=None) -> int:
          json.dumps(subject, ensure_ascii=False), json.dumps(payload, ensure_ascii=False),
          cause, "evt@1"),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.lastrowid
 
 
@@ -8653,8 +8661,9 @@ def citizen_merge(conn, *, src, dst, apply=False) -> dict:
             moved[f"{name}.{col}"] = int(cur.rowcount or 0)
         conn.execute("UPDATE citizens SET status=? WHERE citizen_id=?",
                      (f"merged_into:{dst_id}", src_id))
+        # 🔴9（外部审查）：事件与业务写同一事务（append_event 不再自己 commit）
         append_event(conn, "citizen.merged", {"citizen_id": dst_id}, src_id,
-                     {"src": src_id, "dst": dst_id, "moved": moved})
+                     {"src": src_id, "dst": dst_id, "moved": moved}, commit=False)
         conn.commit()
     except Exception:
         conn.rollback()          # 单事务：半迁移绝不留盘（评审 R-02 的核心）
@@ -8730,16 +8739,18 @@ def cmd_citizen_retire(args):
     # P1（外部审查 🔴11，2026-10-29）：退役必须**吊销**该公民的活凭证——
     # 否则"退役"只是标签，bearer token 仍能调用（实测 RETIRED_TOKEN_VALID）。
     revoked = revoke_session_tokens(conn, citizen_id=args.citizen_id)
-    conn.commit()
-    if revoked:
-        print(f"（同时吊销 {revoked} 条活凭证）")
+    # 🔴9（外部审查）：状态变更、吊销与事件**同一个事务**——中途失败时
+    # "退役了但没事件"这种半状态不可接受（事件是重建的依据）。
     append_event(conn, "citizen.retired",
                  {"citizen_id": "system", "evidence_level": "signed"},
                  {"kind": "citizen", "id": args.citizen_id},
                  {"display_name": name, "kind": kind,
                   "reason": args.reason or "manual",
                   "migrated_to": args.migrate_to,
-                  "memories": n_mem})
+                  "memories": n_mem}, commit=False)
+    conn.commit()
+    if revoked:
+        print(f"（同时吊销 {revoked} 条活凭证）")
     print(f"已退役：{name}（{args.citizen_id}）— {args.reason or 'manual'}")
     conn.close()
 
