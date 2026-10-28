@@ -164,10 +164,10 @@ def desired_hooks(host: str, *, folder=None, python: str = None) -> dict:
             "UserPromptSubmit": [{"hooks": [
                 _hook("fish_prompt_hook.py", "--host dsh", 10, folder, py)]}],
             "PreToolUse": [{"matcher": DSH_PRETOOL_MATCHER,
-                            "hooks": [_hook("fish_pretool_hook.py", "--host dsh", 10,
+                            "hooks": [_hook("fish_pretool_hook.py", "--host dsh", 3,
                                             folder, py)]}],
             "PostToolUse": [{"hooks": [
-                _hook("fish_push_hook.py", "--host dsh --collect-activity", 10, folder, py)]}],
+                _hook("fish_push_hook.py", "--host dsh --collect-activity", 3, folder, py)]}],
         }
     if host == "workbuddy":
         return {
@@ -175,10 +175,10 @@ def desired_hooks(host: str, *, folder=None, python: str = None) -> dict:
             "UserPromptSubmit": [{"hooks": [
                 _hook("fish_prompt_hook.py", "--host workbuddy", 10, folder, py)]}],
             "PreToolUse": [{"matcher": WB_PRETOOL_MATCHER,
-                            "hooks": [_hook("fish_pretool_hook.py", "--host workbuddy", 10,
+                            "hooks": [_hook("fish_pretool_hook.py", "--host workbuddy", 3,
                                             folder, py)]}],
             "PostToolUse": [{"matcher": WB_POSTTOOL_MATCHER,
-                             "hooks": [_hook("fish_posttool_hook.py", "--host workbuddy", 10,
+                             "hooks": [_hook("fish_posttool_hook.py", "--host workbuddy", 3,
                                              folder, py)]}],
         }
     raise ValueError(f"未知宿主 {host!r}（可用：{', '.join(TARGETS)}）")

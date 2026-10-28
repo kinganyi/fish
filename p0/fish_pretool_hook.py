@@ -40,6 +40,7 @@ sys.path.insert(0, str(HERE))
 import hook_io  # noqa: E402 —— 统一 stdout 出口（编码只在一处决定）
 import fish_activity  # noqa: E402 —— 快照/撞车/审计的共享核心（不 import fish）
 import fish_surface  # noqa: E402 —— 路径归一（唯一一份）
+import hook_fastpath  # noqa: E402 —— P0-⑥ 快通道（关闭态秒退/冷却；只 stdlib）
 
 # 数据目录：默认本目录下的 data；可用 FISH_DATA 覆盖（测试隔离用）。
 DATA = Path(os.environ.get("FISH_DATA") or (HERE / "data"))
@@ -198,6 +199,11 @@ def own_citizen_of(data_dir, session_key):
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     host = _host_from_argv(argv)
+    # P0-⑥（外部审查 🔴3）：关闭态秒退 + 冷却（与 posttool 同一口径）。
+    if not hook_fastpath.enabled(DATA, "push.enabled", True):
+        return 0
+    if hook_fastpath.cooldown_remaining(DATA, "pretool"):
+        return 0
     try:
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     except Exception:      # noqa: BLE001

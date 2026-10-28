@@ -42,6 +42,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import hook_io  # noqa: E402 —— 统一 stdout 出口（编码只在一处决定）
 import fish_activity  # noqa: E402 —— 采集/心跳/计数的共享核心（不 import fish）
+import hook_fastpath  # noqa: E402 —— P0-⑥ 快通道（关闭态秒退/冷却；只 stdlib）
 
 # 数据目录：默认本目录下的 data；可用 FISH_DATA 覆盖（测试隔离用）。
 DATA = Path(os.environ.get("FISH_DATA") or (HERE / "data"))
@@ -115,6 +116,12 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     host = _host_from_argv(argv)
     collect = "--no-collect-activity" not in argv
+    # P0-⑥（外部审查 🔴3）：关闭态秒退 + 冷却——在 import fish / 读 stdin / 起子进程之前。
+    # 这是"旁路不该有权阻塞主流程"的收口：关掉的功能必须**秒**退，不能拖着等 10s。
+    if not hook_fastpath.enabled(DATA, "push.enabled", True):
+        return 0
+    if hook_fastpath.cooldown_remaining(DATA, "posttool"):
+        return 0
     try:
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     except Exception:      # noqa: BLE001
