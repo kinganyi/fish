@@ -652,6 +652,17 @@ def search_kb(conn, *, query, project=None, limit=5, exclude=(), vault_id=None) 
               "JOIN kb_vault v ON v.vault_id = kb_index.vault_id "
               "WHERE kb_fts MATCH ? AND " + where)
     total = int(conn.execute("SELECT COUNT(*)" + source, params).fetchone()[0] or 0)
+    if not total and len(tokens) > 1:
+        # 外部审查 🔴1（2026-10-28）：长句被**全 AND** 压成空（"漫剧剧本怎么写" → 0 命中，
+        # 而 legacy 字面路径有 2 个候选）。两段式：AND 优先保精度，0 命中才回退 OR 保召回。
+        # 回退必须**如实标记**（meta.fallback），否则"降级"又变成不可观测的黑洞。
+        expr_or = " OR ".join('"' + t.replace('"', '""') + '"' for t in tokens)
+        params_or = [expr_or] + params[1:]
+        total = int(conn.execute(
+            "SELECT COUNT(*)" + source, params_or).fetchone()[0] or 0)
+        if total:
+            params = params_or
+            meta["fallback"] = "or_retry"
     meta["total_matched"] = total
     if not total:
         return {"hits": [], "meta": meta}

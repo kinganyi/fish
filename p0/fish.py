@@ -8321,8 +8321,13 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
     final = count_tokens(pack)
     over_budget = final > budget_orig
     if over_budget:
-        # 响亮失败：最小注入包仍超预算时，不假装成功
+        # 外部审查 🔴2（2026-10-28 晚）：旧实现把"仍超预算"只写进 `meta.trimmed`，
+        # 而尾行在它**之前**就生成了 → **包尾永远看不到这一行**（读者会以为包是完整的）。
+        # 修法：超支时把声明**追加进包正文**并重算 final（meta 与正文同源同值）。
         trimmed.append(f"仍超预算({final}>{budget_orig})")
+        pack = (pack.rstrip("\n")
+                + f"\n（仍超预算：{final}>{budget_orig} tokens；最小包已无可裁段）\n")
+        final = count_tokens(pack)
 
     meta = {
         "tokens": final,

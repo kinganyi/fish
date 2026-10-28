@@ -398,12 +398,22 @@ class PushModuleContractTest(unittest.TestCase):
             return None
 
     def test_j8_function_bodies_semantically_identical(self):
-        """J8：T02 拆包前后**所有公共顶层定义** AST 等价（评审 🟠-4/5 的收口）。
+        """J8：T02 拆包前后**公共函数/类定义** AST 等价（评审 🟠-4/5 的收口）。
 
         **基准是 T02 提交那一刻**（`da8d24f` 及其父），不是"现在"——否则 T03/T04/T05/B
         的后续改动会被误算成"搬运违例"。
         优先本地备份；没有则从 git blob 取（发布树无 `历史版本/`，评审 🟠-4）。
         比对**全交集**（实测 386 个定义），而不是只比 12 个搬走的函数（评审 🟠-5）。
+
+        **覆盖边界（外部审查 🔴12 的收口，2026-10-28 晚明确）**：
+          覆盖 —— 顶层 `FunctionDef/AsyncFunctionDef/ClassDef` 的 **body**（含函数体、
+                  嵌套函数与全部语句）；这是"搬运没改行为"的主证据。
+          不覆盖 —— 模块级 `Import/ImportFrom`、`Assign/AnnAssign`、`If/Try`（条件定义）。
+                  拆包**必然**改 import（`fish.X` → 直接 import）与常量来源，逐字节比会把
+                  "正确的拆包"判成违例；这些由 J1b（re-export 清单双向相等）、J7（同一
+                  对象）、J2/J6（依赖方向）与 1,587 条行为判据兜底。
+          一句话：**J8 保证"函数与类的定义等价"，不保证"整个模块字节等价"**——引用它时
+          必须带上这句限定（审查官指出：一个连审查者都会误读的判据，其保证力不应被夸大）。
         """
         pre = P0 / "历史版本" / "fish.py.20261027-t02-pre.bak"
         if pre.exists():
