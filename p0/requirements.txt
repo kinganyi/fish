@@ -1,0 +1,14 @@
+# fish（大肥鱼生命系统）依赖声明
+#
+# 为什么必须有这个文件（外部审查 2026-10-28 🟠-A）：
+#   本仓 5 个测试文件顶层 `import zstandard`，但仓里没有任何依赖声明。
+#   换一台没装 zstandard 的机器时，这 5 个文件会被 unittest **静默丢弃**
+#   （不是 skip、不是红，是"不存在"），`Ran` 会从 1586 变 1337 —— 249 条判据
+#   凭空消失，而报告/pipeline 不会报警。
+#
+# 安装：python -m pip install -r requirements.txt
+# 版本口径：zstandard 0.25.0 是 2026-10-28 实测可用的版本（本机 Python 3.11.9 与 3.13 均可）。
+zstandard>=0.25.0
+
+# 说明：其余依赖均来自 Python 标准库（sqlite3 / fts5 / hashlib / json / http）。
+# 不引入 pandas/numpy 等：fish 的核心路径是纯 stdlib，保持可离线、可打包。

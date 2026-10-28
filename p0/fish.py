@@ -5453,24 +5453,26 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
     proof = str(bind_token or os.environ.get("FISH_SESSION_BIND_TOKEN") or "").strip()
 
     def _prove(target_id):
-        if not proof:
-            # S-01 复核（2026-10-28 晚）：**有活凭证**的公民才必须证明；没有活凭证的
-            # 允许"恢复重连"（token 过期/被吊销后，AI 重启仍应拿回自己的身份——
-            # 否则正常使用会被挡死）。攻击者能利用的窗口只剩"受害者已断线"。
-            live = conn.execute(
-                "SELECT 1 FROM session_tokens WHERE citizen_id=? AND revoked_at IS NULL "
-                "AND (expires_at IS NULL OR expires_at > ?) LIMIT 1",
-                (target_id, now_utc())).fetchone()
-            if live:
-                raise ValueError(
-                    "绑定已有公民需要证明：fish session start --citizen <id> "
-                    "--bind-token <你现有的 fish token>（或设 FISH_SESSION_BIND_TOKEN）")
+        # S-01 的证明口径（2026-10-28 晚，按外部审查 🔴4 修正）：
+        # **持有过**即证明——接受该公民的**任一历史 token**（含已轮换/已过期/已吊销）。
+        # 旧口径要求"有效 token"，而轮换紧接着就吊销它 → 第二次重绑永久锁死
+        # （只能新建公民，身份分裂加剧——正是 S-01 要消灭的问题）。
+        if proof:
+            info = lookup_session_token(conn, proof)
+            if info is None:
+                raise ValueError("bind_token 从未签发过（不是这个系统的凭证）")
+            if info["citizen_id"] != target_id:
+                raise ValueError("bind_token 不属于目标公民（拒绝：防接管）")
             return
-        holder = validate_session_token(conn, proof)
-        if not holder:
-            raise ValueError("bind_token 无效、已吊销或已过期")
-        if holder != target_id:
-            raise ValueError("bind_token 不属于目标公民（拒绝：防接管）")
+        # 没给证明：有活凭证的公民要求证明；无活凭证（过期/吊销/从未签发）允许恢复重连
+        live = conn.execute(
+            "SELECT 1 FROM session_tokens WHERE citizen_id=? AND revoked_at IS NULL "
+            "AND (expires_at IS NULL OR expires_at > ?) LIMIT 1",
+            (target_id, now_utc())).fetchone()
+        if live:
+            raise ValueError(
+                "绑定已有公民需要证明：fish session start --citizen <id> "
+                "--bind-token <你现有的 fish token>（或设 FISH_SESSION_BIND_TOKEN）")
 
     if forced:
         row = conn.execute(

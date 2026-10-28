@@ -89,6 +89,18 @@ class SessionBindTest(unittest.TestCase):
         again = fish.start_session(self.conn, environ=env, kind="visitor")
         self.assertEqual(again["citizen_id"], first["citizen_id"])
 
+    # S-7（外部审查 🔴4）：第二次、第三次重绑都必须成功——旧 token 已被轮换吊销，
+    # 但"持有过"就是证明。旧实现要求"有效 token"，与轮换互斥 → 永久锁死。
+    def test_S7_rebind_with_rotated_token_works(self):
+        first = fish.start_session(self.conn, alias="rebind-ai", kind="visitor")
+        second = fish.start_session(self.conn, alias="rebind-ai", kind="visitor",
+                                    bind_token=first["token"])
+        self.assertEqual(second["citizen_id"], first["citizen_id"])
+        # 第三次：first 的 token 此时已被第二次轮换吊销，仍然可以用它重绑
+        third = fish.start_session(self.conn, alias="rebind-ai", kind="visitor",
+                                   bind_token=first["token"])
+        self.assertEqual(third["citizen_id"], first["citizen_id"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
