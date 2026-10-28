@@ -82,6 +82,32 @@ class ByRelevanceTest(unittest.TestCase):
         self.assertEqual(a.count("\t匹配:"), b.count("\t匹配:"),
                          "两种排序的命中条数应一致（同一库同一词）")
 
+    # B-5（外部审查 R-05：scope 必须真的生效）
+    def test_B5_scope_title_does_not_match_body_only(self):
+        conn = fish.connect(self.data)
+        try:
+            all_rows, _ = fish.search_by_relevance(conn, "独特词甲", scope="all")
+            title_rows, _ = fish.search_by_relevance(conn, "独特词甲", scope="title")
+        finally:
+            conn.close()
+        self.assertTrue(all_rows, "all 应命中正文里的词")
+        self.assertEqual(title_rows, [], "scope=title 不该命中只在正文的词")
+
+    # B-6（外部审查 R-05：--code 不许被静默忽略）
+    def test_B6_code_is_honored(self):
+        conn = fish.connect(self.data)
+        try:
+            rows, _ = fish.search_by_relevance(conn, "", code="demo-261028-01")
+        finally:
+            conn.close()
+        self.assertEqual([r[0] for r in rows], ["demo-261028-01"])
+
+    # B-7（外部审查 R-05：tags 的 % / _ 不许当通配符）
+    def test_B7_tag_wildcards_are_escaped(self):
+        pat = fish.tag_like_pattern("a_b")
+        self.assertIn("\\_", pat, f"下划线必须转义：{pat}")
+        self.assertIn("a_b", fish.tag_like_pattern("a_b").replace("\\_", "_"))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

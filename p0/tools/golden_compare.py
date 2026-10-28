@@ -250,7 +250,9 @@ def main() -> int:
     days = collect_days([old1, new1] + ([old2] if old2 else []))
 
     # ---- 第一关：掩码必须吃掉"同一版本两遍之间"的全部噪声（否则判定是假的）
-    noise = {"available": old2 is not None, "identical": True, "hits": {},
+    # 外部审查 🟠-B3（2026-10-29）：**缺 run2 = 判不到，不是"噪声一致"**。
+    # 旧实现预置 `identical: True`，于是"只有一遍对照"照样 PASS（fail-open）。
+    noise = {"available": old2 is not None, "identical": old2 is not None, "hits": {},
              "raw_diff_slugs": []}
     if old2 is not None:
         same_noise, noise_diffs, noise_reading = compare_pair(

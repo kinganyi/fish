@@ -1,8 +1,8 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """⑥ recall 统计行判据（BUG-5 收口）：区分"没有"与"没搜到"。
 
-R-1 命中时：输出含「扫描 N 条 ｜ 编码 a ｜ 标题 b ｜ 正文 c ｜ 返回 d」
+R-1 命中时：输出含「命中 N 条 ｜ 编码 a ｜ 标题 b ｜ 正文 c ｜ 返回 d」
 R-2 未命中时：统计行**仍然打印**（说明扫描了多少），不是只给"未找到"
 R-3 计数自洽：标题 + 正文 + 编码 == 返回数（每行只可能落一个来源桶）
 """
@@ -68,7 +68,7 @@ class RecallStatsTest(unittest.TestCase):
     # R-1
     def test_R1_stats_line_on_hit(self):
         out = self._recall("独特词甲")
-        self.assertIn("扫描", out)
+        self.assertIn("命中", out)
         self.assertIn("标题", out)
         self.assertIn("正文", out)
         self.assertIn("返回", out)
@@ -76,12 +76,12 @@ class RecallStatsTest(unittest.TestCase):
     # R-2
     def test_R2_stats_line_on_miss(self):
         out = self._recall("根本不存在的词ZZZ")
-        self.assertIn("扫描", out, "未命中也要给统计（否则分不清没有 vs 没搜到）")
+        self.assertIn("命中", out, "未命中也要给统计（否则分不清没有 vs 没搜到）")
 
     # R-3
     def test_R3_counts_are_self_consistent(self):
         out = self._recall("独特词")
-        line = [ln for ln in out.splitlines() if ln.startswith("> 扫描")][0]
+        line = [ln for ln in out.splitlines() if ln.startswith("> 命中")][0]
         nums = {}
         for part in line.lstrip("> ").split("｜"):
             key, _, value = part.strip().partition(" ")

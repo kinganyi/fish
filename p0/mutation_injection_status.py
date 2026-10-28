@@ -120,6 +120,13 @@ def main() -> int:
     print("=" * 70)
     print(f"最终 fish.py sha256 = {sha(FISH)[:16]}…（与基线{'一致' if sha(FISH) == base else '不一致'}）")
     BAK.unlink(missing_ok=True)
+    # 外部审查 🟠-B2（2026-10-29）：SKIP / MISS 必须让进程非 0（同 workspace_normalize）。
+    bad = [mid for mid, _desc, _o, _n, status in
+           ((r[0], r[1], None, None, r[3]) for r in results)
+           if str(status).startswith(("SKIP", "MISS", "变异没生效"))]
+    if bad:
+        print(f"✗ {len(bad)} 个变异未真正执行/未生效：{bad}")
+        return 2
     return 0
 
 

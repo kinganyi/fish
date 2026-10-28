@@ -103,6 +103,13 @@ def main() -> int:
     final = sha(FISH)
     print(f"最终 sha256 = {final[:16]}…（与基线{'一致' if final == base else '不一致'}）")
     BAK.unlink(missing_ok=True)
+    # 外部审查 🟠-B2（2026-10-29）：SKIP / MISS 必须让进程**非 0**——
+    # 旧实现无条件 `return 0`，于是"锚点缺失"被读成"变异通过"（工具在说谎）。
+    bad = [mid for mid, _desc, status in results
+           if str(status).startswith(("SKIP", "MISS", "变异没生效"))]
+    if bad:
+        print(f"✗ {len(bad)} 个变异未真正执行/未生效：{bad}")
+        return 2
     return 0
 
 

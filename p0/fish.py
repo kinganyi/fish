@@ -6354,32 +6354,51 @@ def cmd_supersede(args):
         conn.close()
 
 
-def search_by_relevance(conn, query, *, limit=10, project=None, tags=None):
+def search_by_relevance(conn, query, *, limit=10, project=None, tags=None,
+                        scope="all", code=None):
     """按 bm25 相关度检索（⑥ `--by relevance`，BUG-5 的收口）。
 
     与 `search_memories` 的分工：那个是"编码 > 标题 > 正文"的**优先级**排序
     （可预期、可复现，默认）；这里是 FTS5 的 bm25（更接近"问什么答什么"）。
     两条路共享同一份 `memory_fts`，都只读；默认仍是 priority（既有判据零回归）。
     返回与 `search_memories` 同形 `(rows, src_of)`，让 `cmd_recall` 直接复用下游。
+
+    **四口径与默认搜索对齐**（外部审查 R-05/P，2026-10-29）：
+      · `project` 展开别名（同一个 `resolve_project_names`，`recall --project cdql`
+        要能看到 `CDQL` 的记忆）；
+      · `tags` 用 `tag_like_pattern` + `LIKE_ESCAPE_SQL`（`%`/`_` 不当通配符）；
+      · `scope`：all/title/body 真正生效（FTS 列前缀）；
+      · `code`：给了就按编码精确查（旧实现**静默忽略** `--code`）。
     """
-    expr = fts_match_expr(query)
-    if expr is None:
-        return [], {}
     where = " AND ci.status = 'active'"
-    params = [expr]
-    if project:
-        where += " AND ci.project = ?"
-        params.append(str(project))
-    if tags:
-        needle = tags if isinstance(tags, str) else ",".join(str(t) for t in tags)
-        where += " AND ci.tags LIKE ?"
-        params.append(f"%{needle}%")
-    sql = ("SELECT ci.code, ci.title, ci.project, ci.mem_type, ci.status, "
-           "ci.file_path, ci.dormant, 'bm25' "
-           "FROM memory_fts JOIN code_index ci ON ci.code = memory_fts.code "
-           "WHERE memory_fts MATCH ?" + where +
-           " ORDER BY bm25(memory_fts) LIMIT ?")
-    rows = conn.execute(sql, params + [int(limit)]).fetchall()
+    params = []
+    if code:
+        where += " AND ci.code = ?"
+        params.append(str(code))
+    _pnames = resolve_project_names(conn, project) if project else []
+    if _pnames:
+        where += " AND ci.project IN (" + ",".join("?" * len(_pnames)) + ")"
+        params.extend(_pnames)
+    for _t in ([tags] if isinstance(tags, str) else (tags or [])):
+        if _t:
+            where += " AND ci.tags LIKE ?" + LIKE_ESCAPE_SQL
+            params.append(tag_like_pattern(_t))
+    expr = fts_match_expr(query) if str(query or "").strip() else None
+    if expr and scope == "title":
+        expr = f"title_idx:({expr})"
+    elif expr and scope == "body":
+        expr = f"body_idx:({expr})"
+    cols = ("SELECT ci.code, ci.title, ci.project, ci.mem_type, ci.status, "
+            "ci.file_path, ci.dormant, 'bm25' ")
+    if expr:
+        sql = (cols + "FROM memory_fts JOIN code_index ci ON ci.code = memory_fts.code "
+               "WHERE memory_fts MATCH ?" + where +
+               " ORDER BY bm25(memory_fts) LIMIT ?")
+        rows = conn.execute(sql, [expr] + params + [int(limit)]).fetchall()
+    else:
+        # 只有 code/项目/标签、没有 query：按编码/项目列（不硬塞一个空 MATCH）
+        sql = cols + "FROM code_index ci WHERE 1=1" + where + " LIMIT ?"
+        rows = conn.execute(sql, params + [int(limit)]).fetchall()
     return rows, {r[0]: "bm25" for r in rows}
 
 
@@ -6432,20 +6451,28 @@ def cmd_recall(args):
     ensure_fts(conn, Path(args.root))
     if (getattr(args, "by", "priority") or "priority") == "relevance" and q:
         rows, src_of = search_by_relevance(conn, q, limit=limit,
-                                           project=project, tags=tags)
+                                           project=project, tags=tags,
+                                           scope=getattr(args, "scope", "all"),
+                                           code=code)
     else:
         rows, src_of = search_memories(
             conn, query=q, code=code, project=project, tags=tags,
             scope=getattr(args, "scope", "all"), limit=limit)
-    # ⑥ 统计行（BUG-5 的收口，2026-10-28）：区分"没有"与"没搜到"——按匹配来源计数。
-    total_scanned = count_memories(conn, project=project, tags=tags)
+    # ⑥ 统计行（外部审查 R-03/Q 的收口，2026-10-29）：
+    # 旧实现把"匹配来源分布（含被 status/superseded 过滤掉的）"与"返回条数"并排写，
+    # 读者会做加法——真实库出现过 `8+7=15≠10`；而"扫描 N 条"是项目/标签的**全库量**、
+    # 与 query 无关，于是出现更荒谬的 `扫描 0 条 ｜ … ｜ 返回 3`（`--code` 搜索时）。
+    # 新口径：**只按最终 rows 重建**——"命中"就是这次真正匹配并返回的条数。
     hit_counts = {"编码": 0, "标题": 0, "正文": 0}
-    for src in (src_of or {}).values():
-        key = "编码" if "编码" in str(src) else (
-            "标题" if "标题" in str(src) else "正文")
+    for _row in rows:
+        src_text = str(_row[7]) if len(_row) > 7 else ""
+        key = ("编码" if "编码" in src_text
+               else "标题" if "标题" in src_text else "正文")
         hit_counts[key] += 1
-    stats_line = (f"> 扫描 {total_scanned} 条 ｜ 编码 {hit_counts['编码']} ｜ "
-                  f"标题 {hit_counts['标题']} ｜ 正文 {hit_counts['正文']} ｜ 返回 {len(rows)}")
+    total_hit = sum(hit_counts.values())
+    stats_line = (f"> 命中 {total_hit} 条 ｜ 编码 {hit_counts['编码']} ｜ "
+                  f"标题 {hit_counts['标题']} ｜ 正文 {hit_counts['正文']} ｜ "
+                  f"返回 {len(rows)}")
     if not rows:
         cand = recent_fallback(conn, project=project, tags=tags)
         print(f"未找到「{q}」。最近的条目：")
