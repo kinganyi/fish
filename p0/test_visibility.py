@@ -91,6 +91,27 @@ class VisibilityTest(unittest.TestCase):
             "SELECT visibility FROM code_index WHERE code=?", (code,)).fetchone()
         self.assertEqual(row[0], "private")
 
+    # V-5（评审 🔴1 的守卫）：**CLI 自己声明过的 `public`** 也必须被拒，且不能留空号/孤儿
+    def test_V5_rejection_happens_before_code_allocation(self):
+        """拒绝必须发生在 `next_code` 之前。
+
+        评审官实测：旧版校验在分配编码与正文落盘**之后** →
+        `--visibility public` 崩溃的同时烧掉一个编码号（last_seq 1→2）
+        并在磁盘上留一个孤儿正文文件（编码不可回收，这条不变量本函数为
+        `occurred_at` / `project_writable` 都写过）。
+        """
+        def last_seq():
+            return self.conn.execute(
+                "SELECT last_seq FROM code_registry WHERE prefix='VIS'").fetchone()[0]
+
+        before = last_seq()
+        with self.assertRaises(ValueError):
+            self._remember("cli 声明过的 public", "public")
+        after = last_seq()
+        self.assertEqual(before, after, "拒绝必须发生在 next_code 之前（不能烧号）")
+        orphans = list((self.root / "projects" / "VIS").glob("*cli*"))
+        self.assertEqual(orphans, [], f"拒绝不能留孤儿正文文件：{orphans}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

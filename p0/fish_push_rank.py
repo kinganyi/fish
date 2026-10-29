@@ -56,14 +56,16 @@ def _apply_factors(conn, cands, weights=None):
     out = []
     for cand in cands:
         rec = float((cand.get("freshness") or {}).get("factor", 1.0))
-        rel = float(cand.get("relevance") or cand.get("score") or 0.0)
+        _rel = cand.get("relevance")
+        rel = float(cand.get("score") or 0.0) if _rel is None else float(_rel)
         # 外部审查 🟠4（2026-10-29）：**非记忆类不吃 importance**。
         # kb/语料/看板候选在 `code_index` 里没有行 → acc=0 → imp=0 → 恒乘 0.2512，
         # 会把本来能过 `score_floor` 的候选直接压死，于是"开了三因子"被误读成
         # "相关度不够"。importance 的语义是"**这条记忆**被读过多少次"，
         # 对知识库文件/对话片段/看板本来就不适用 → 给中性值 1.0。
         kind = str(cand.get("kind") or "")
-        if kind in ("kb", "corpus", "conv", "conv_related", "board", "situational"):
+        if kind in ("kb", "kb_related", "corpus", "conv",
+                    "conv_related", "board", "situational"):
             imp = 1.0
         else:
             row = conn.execute("SELECT access_count FROM code_index WHERE code=?",
@@ -195,7 +197,7 @@ def _mmr_select(conn, cands, quota, *, lam=None):
         # 0.4 时该阈值降到 0.171（仍挡近重复，但不至于误伤同项目的正常候选）。
         try:
             sim_same = float(get_config(conn, "push.mmr_same_project_sim"))
-        except Exception:   # noqa: BLE001
+        except KeyError:    # 键未登记 → 用默认（类型错/坏值要响亮失败）
             sim_same = 0.4
         same = sim_same if (a.get("kind") == b.get("kind")
                             and (a.get("project") or "") == (b.get("project") or "")) else 0.0

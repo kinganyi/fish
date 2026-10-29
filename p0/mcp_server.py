@@ -918,7 +918,11 @@ class FishServer:
             self.conn, query=q, code=code, project=project,
             tags=tags, scope=a.get("scope", "all"),
             limit=int(a.get("limit", 10)),
-            include_superseded=include_superseded)
+            include_superseded=include_superseded,
+            # 评审 🟠3（2026-10-29）：这条路径原本不传 viewer，导致开关打开后
+            # `private` 对**所有人**（含 owner）不可见。传上调用者身份是唯一
+            # 让"可选可见性"在 MCP 侧有意义的接线。
+            viewer_citizen_id=(ident.citizen_id if ident else None))
         label = q or a.get("code") or a.get("project") or ""
         if not rows:
             # 回退列表必须遵守同样的过滤（2026-10-22 反馈 ANYI-261022-114：

@@ -356,6 +356,9 @@ CONFIG_DEFAULTS = {
     # 它们会改变"推哪几条"，需要观察后再开。
     "push.mmr_enabled": (False, "bool", None),
     "push.mmr_lambda": (0.7, "float", None),    # λ：相关 vs 多样的折中（0.7 = 偏相关）
+    # 同 kind+同 project 的相似度（λ=0.7 时等价于给同项目候选加 `0.4286×sim` 的惩罚）。
+    # 0.8 → 惩罚 0.343（会把高分同项目条目压掉）；0.4 → 0.171（挡近重复，不误伤）。
+    "push.mmr_same_project_sim": (0.4, "float", None),
     "push.value_floor": (0.0, "float", None),   # 0 = 关；开了按 importance×relevance 卡
     # 隐私开关（2026-10-29 · 用户拍板：private 是**可选项**、不强制）。
     #

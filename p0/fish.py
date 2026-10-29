@@ -2100,6 +2100,15 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
     # 先校验时间参数：它若非法，必须在分配编码、落盘之前就失败，
     # 否则会留下一个空号 + 一个孤儿正文文件（编码一经分配不可回收）。
     occurred_at = normalize_occurred_at(occurred_at)
+    # visibility 归一与校验（2026-10-29，评审 🔴1）——**必须与 occurred_at 同在
+    # `next_code` 之前**：校验若发生在编码分配之后，拒绝时会烧掉一个编码号 + 留下
+    # 一个孤儿正文文件（评审实测 `--visibility public` → last_seq 被烧 + 孤儿文件）。
+    # "编码一经分配不可回收"这条不变量，本函数已为 occurred_at / project_writable
+    # 各写过一次，这是第三处。
+    visibility = str(visibility or "shared").strip().lower()
+    if visibility not in ("shared", "private"):
+        raise ValueError(
+            f"未知 visibility={visibility!r}（可用值：shared / private）")
     # 项目可写性（2026-10-25 · 阶段 D）：closed / retired 拒绝写入。
     # 为什么拦在**这里**而不是 MCP 层：`record_memory` 是唯一写入口（CLI 与 MCP 共用），
     # 拦在别处必然有一条路径漏掉——那正是"两条路径必须共用一份写入逻辑"的原始教训。
@@ -2148,13 +2157,6 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
     # 2026-10-22 修 07 D-11：旧版 payload 不含 occurred_at，导致"忠实重建"在事件层面不可能。
     # 时间事实：occurred_at 已在函数开头校验归一；recorded_at 就是"现在"。
     recorded_at = now_utc()
-    # visibility 归一与校验（2026-10-29，用户拍板"private 是**可选**项、不强制"）。
-    # 校验的必要性：旧实现把任意字符串直接写进库（`visibility='机密'` 也能存），
-    # 而读侧过滤只认 `private` —— 一个拼错的值会**静默变成 shared**（该藏的没藏）。
-    visibility = str(visibility or "shared").strip().lower()
-    if visibility not in ("shared", "private"):
-        raise ValueError(
-            f"未知 visibility={visibility!r}（可用值：shared / private）")
     conn.execute(
         "INSERT INTO code_index (code,title,project,owner,mem_type,visibility,status,tags,"
         "file_path,occurred_at,recorded_at,access_count,dormant,session_actor,attachments) "
@@ -3553,7 +3555,7 @@ def _filter_by_visibility(conn, found, viewer_citizen_id):
     marks = ",".join("?" * len(codes))
     hidden = {r[0] for r in conn.execute(
         "SELECT code FROM code_index WHERE code IN (" + marks + ") "
-        "AND LOWER(COALESCE(visibility,'shared'))='private' "
+        "AND LOWER(TRIM(COALESCE(visibility,'shared')))='private' "
         "AND COALESCE(owner,'')<>?", codes + [str(viewer_citizen_id or "")]).fetchall()}
     return {c: r for c, r in found.items() if c not in hidden}
 
@@ -14087,7 +14089,8 @@ def main():
     p.add_argument("--body", default="")
     p.add_argument("--type", default="fact",
                    choices=["identity", "rule", "fact", "episode", "lesson", "artifact"])
-    p.add_argument("--visibility", default="shared", choices=["private", "shared", "public"])
+    p.add_argument("--visibility", default="shared", choices=["private", "shared"],
+                   help="private=只给 owner 看（可选标签；执行层未完成，见 fish_common）")
     p.add_argument("--tags", nargs="*", default=[])
     p.add_argument("--owner", default=None,
                    help="公民 ID（不是显示名）。缺省=系统主人（citizens.is_owner）")
