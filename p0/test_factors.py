@@ -78,6 +78,30 @@ class FactorScoreTest(unittest.TestCase):
         order = [c["code"] for c in sorted(out, key=lambda c: -c["score"])]
         self.assertEqual(order[0], "M-C", "freshness=1.0 的该排第一")
 
+    # F-5（外部审查 🟠4 的守卫）：**非记忆类不吃 importance**
+    def test_F5_non_memory_kinds_skip_importance(self):
+        """kb/语料候选在 `code_index` 里没有行 → 若按 importance 算就是恒乘 0.2512。
+
+        0.2512 = 0.01^0.3（`max(imp, 0.01)` 的下界），会把本来能过
+        `score_floor` 的候选直接压死，而报告会误写成"相关度不够"。
+        variation=M9（把这个分支改成 `if False`）必红。
+        """
+        cands = [
+            {"code": "kb:库:笔记.md", "kind": "kb", "score": 0.5},
+            {"code": "conv:x#1", "kind": "conv_related", "score": 0.5},
+            {"code": "board:项目", "kind": "board", "score": 0.5},
+        ]
+        out = fish_push._apply_factors(
+            self.conn, cands,
+            weights={"recency": 0.0, "importance": 1.0, "relevance": 0.0})
+        for c in out:
+            self.assertEqual(
+                c["factors"]["importance"], 1.0,
+                f"{c['code']} 是非记忆类，importance 必须中性 1.0"
+                f"（实际 {c['factors']['importance']} → 被恒乘 0.2512）")
+            self.assertAlmostEqual(c["score"], 1.0, places=6,
+                                   msg=f"{c['code']} 的分数被 importance 惩罚了")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

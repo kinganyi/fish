@@ -33,7 +33,10 @@ r"""每日任务：生成使用报告 + 生成一份可独立打开的数据库�
 
 计划任务注册（用户级，不需要管理员）：
   schtasks /create /tn "fish_daily_report" /sc daily /st 23:00 ^
-    /tr "\"C:\Users\15596\AppData\Local\Programs\Python\Python311\python.exe\" \"I:\app\DSH-Home\workspace\learn\大肥鱼生命系统\p0\daily_report.py\""
+    /tr "\"<python.exe>\" \"<本目录>\daily_report.py\""
+
+  把 <python.exe> 换成 `sys.executable` 输出的路径、<本目录> 换成仓库里 p0 的实际路径。
+  （示例不写死本机路径：这是文档，不是代码；写死了别人没法照抄。）
 """
 import argparse
 import datetime

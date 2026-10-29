@@ -357,11 +357,19 @@ CONFIG_DEFAULTS = {
     "push.mmr_enabled": (False, "bool", None),
     "push.mmr_lambda": (0.7, "float", None),    # λ：相关 vs 多样的折中（0.7 = 偏相关）
     "push.value_floor": (0.0, "float", None),   # 0 = 关；开了按 importance×relevance 卡
-    # 隐私开关（2026-10-29 · 用户拍板）：**都默认关**——先做成开关、不启用隔离。
-    #   · visibility_enforced：`code_index.visibility='private'` 的条目**只对 owner 可见**。
-    #     现在这个字段是**纯标签**（写入有、读路径不查；生产 351 条全 shared）。
-    #     打开它要求读路径（recall/推送/neighbors）全面加 owner 过滤，改动面大。
-    #   · memory_citizen_isolation：记忆推送**按公民隔离**（现在 93.2% 历史推送跨 owner）。
+    # 隐私开关（2026-10-29 · 用户拍板：private 是**可选项**、不强制）。
+    #
+    # ⚠️ **执行层未完成**（安全审计 2026-10-29，完整报告见 `62-可见性安全审计`）。
+    #    实测结论：**打开它比不开更糟**——不是"只做了一半"，是**双向失效**：
+    #      · 藏不住：只堵了 `search_memories` 一条路，另有 10 条读路径照旧返回
+    #        private（`read_body` 全文、`resolve_code` 元数据、`recall` 的
+    #        `recent_fallback` 回退、`list`/列出模式、`neighbors`、`inject` 注入包四段、
+    #        `recall --by relevance`、推送管线五处、`fish://index` 资源面）；
+    #      · 自己看不到：`viewer_citizen_id` 全仓 **0 个生产调用点** —— 打开后
+    #        连 owner 自己都查不到（实测 `命中 0 条`）。
+    #    所以**默认关、且请勿打开**，直到接线与其余读路径补齐。
+    #   · memory_citizen_isolation：**死开关**（声明了但全仓零读取）。保留它只是为了
+    #     让"将来要隔离"这件事有名字；实现前**不要**把它当成已生效的隔离。
     "privacy.visibility_enforced": (False, "bool", None),
     "privacy.memory_citizen_isolation": (False, "bool", None),
     # 同会话 24h 内不重复推同一编码（与 _recent_pushed_codes 同一口径）。

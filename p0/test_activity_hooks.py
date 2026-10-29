@@ -174,7 +174,9 @@ class PrivacyTest(HookBase):
 
     # ── QA Round 1 追加的三条判据（E1.8 / P3）────────────────────────────
 
-    LEAK_TOKEN = "fsh_QAROUND2LEAK1234567890"
+    # 假凭证样本（**故意显眼**）：任何 secret scanner 都该一眼看出这是夹具，
+    # 而不是把它当成真 token 拦下来。真 token 是 fsh_ + 43 位，这里只有 30 位。
+    LEAK_TOKEN = "fsh_FAKE_FIXTURE_NOT_A_REAL_TOKEN_0000"
 
     def test_detour_log_never_writes_command(self):
         """E1.8：`command` 只参与**匹配**，绝不落盘（设计 §10.3）。

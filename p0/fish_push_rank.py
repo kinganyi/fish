@@ -57,10 +57,19 @@ def _apply_factors(conn, cands, weights=None):
     for cand in cands:
         rec = float((cand.get("freshness") or {}).get("factor", 1.0))
         rel = float(cand.get("relevance") or cand.get("score") or 0.0)
-        row = conn.execute("SELECT access_count FROM code_index WHERE code=?",
-                           (cand.get("code"),)).fetchone()
-        acc = int((row[0] if row else 0) or 0)
-        imp = math.log1p(acc) / math.log1p(50.0)      # 50 次封顶 → [0,1]
+        # 外部审查 🟠4（2026-10-29）：**非记忆类不吃 importance**。
+        # kb/语料/看板候选在 `code_index` 里没有行 → acc=0 → imp=0 → 恒乘 0.2512，
+        # 会把本来能过 `score_floor` 的候选直接压死，于是"开了三因子"被误读成
+        # "相关度不够"。importance 的语义是"**这条记忆**被读过多少次"，
+        # 对知识库文件/对话片段/看板本来就不适用 → 给中性值 1.0。
+        kind = str(cand.get("kind") or "")
+        if kind in ("kb", "corpus", "conv", "conv_related", "board", "situational"):
+            imp = 1.0
+        else:
+            row = conn.execute("SELECT access_count FROM code_index WHERE code=?",
+                               (cand.get("code"),)).fetchone()
+            acc = int((row[0] if row else 0) or 0)
+            imp = math.log1p(acc) / math.log1p(50.0)      # 50 次封顶 → [0,1]
         rel = max(0.0, min(rel, 1.0))
         score = (max(rel, 0.01) ** w["relevance"]
                  * max(imp, 0.01) ** w["importance"]
@@ -142,13 +151,18 @@ def _value_ok(cand, floor) -> bool:
     `push.value_floor=0.1` 打开后，**整条推送变空**（"漫剧剧本怎么写"一个候选
     都不剩）——配置看起来"成功"，实际上是**把自己关掉了**。
 
-    新内容有**先天价值**：给 importance 一个 0.3 的底（读得越多越接近 1.0）。
+    新内容有**先天价值**：给 importance 一个 0.15 的底（0.3 太高——见下）。
     缺 factors 的候选按 1.0 放过，不误杀。
+
+    **0.3 → 0.15**（外部审查 🟠3，2026-10-29）：0.3 底时，prompt 通道的
+    `min_rel=0.6` 让最低 value = 0.6×0.3 = 0.18 > floor 0.1 → **价值门恒真（空转）**。
+    0.15 底下：`rel=0.6, imp=0` → 0.09 < 0.1 → **能挡**（有判别力）；
+    `rel=0.9, imp=0` → 0.135 > 0.1 → **放行**（先天价值仍在）。
     """
     f = cand.get("factors") or {}
     imp = float(f.get("importance", 1.0))
     rel = float(f.get("relevance", cand.get("score") or 1.0))
-    return (rel * (0.3 + 0.7 * max(0.0, min(imp, 1.0)))) >= floor
+    return (rel * (0.15 + 0.85 * max(0.0, min(imp, 1.0)))) >= floor
 
 
 def _mmr_enabled(conn) -> bool:
@@ -175,8 +189,16 @@ def _mmr_select(conn, cands, quota, *, lam=None):
             lam = 0.7
 
     def _sim(a, b):
-        same = 0.8 if (a.get("kind") == b.get("kind")
-                       and (a.get("project") or "") == (b.get("project") or "")) else 0.0
+        # 外部审查 🟠5（2026-10-29）：同 kind+同 project 的相似度从 **0.8 → 0.4**。
+        # 0.8 在 λ=0.7 时等价于给同项目候选加 **0.343 的分数惩罚**（推导：
+        # B(同项目) 胜 C(异项目) 需 s_B > s_C + 0.343），会把高分同项目条目系统性压掉；
+        # 0.4 时该阈值降到 0.171（仍挡近重复，但不至于误伤同项目的正常候选）。
+        try:
+            sim_same = float(get_config(conn, "push.mmr_same_project_sim"))
+        except Exception:   # noqa: BLE001
+            sim_same = 0.4
+        same = sim_same if (a.get("kind") == b.get("kind")
+                            and (a.get("project") or "") == (b.get("project") or "")) else 0.0
         ta = set(str(a.get("title") or ""))
         tb = set(str(b.get("title") or ""))
         jac = (len(ta & tb) / float(len(ta | tb))) if (ta or tb) else 0.0

@@ -4,12 +4,19 @@
 import datetime
 import json
 import shutil
+import os
+import sys
 from pathlib import Path
 
-CFG = Path(r"C:\Users\15596\.workbuddy\mcp.json")
-PY = r"C:\Users\15596\AppData\Local\Programs\Python\Python311\python.exe"
-SERVER = r"I:\app\DSH-Home\workspace\learn\大肥鱼生命系统\p0\mcp_server.py"
-DATA = r"I:\app\DSH-Home\workspace\learn\大肥鱼生命系统\p0\data"
+# 2026-10-29（发布前脱敏）：路径不再硬编码本机绝对路径。
+# 环境变量优先（便于在不标准的环境里跑），否则用"脚本所在目录 / 家目录"这两个
+# 任何克隆都能算出来的值——别人 clone 下来直接能跑，本机也照旧。
+HERE = Path(__file__).resolve().parent
+CFG = Path(os.environ.get("FISH_WORKBUDDY_CFG",
+                          Path.home() / ".workbuddy" / "mcp.json"))
+PY = os.environ.get("FISH_PYTHON", sys.executable)
+SERVER = str(HERE / "mcp_server.py")
+DATA = str(HERE / "data")
 
 FISH = {
     "type": "stdio",

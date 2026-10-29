@@ -4,11 +4,15 @@
 import datetime
 import json
 import shutil
+import os
+import sys
 from pathlib import Path
 
-CFG = Path(r"C:\Users\15596\.workbuddy\settings.json")
-PY = "C:/Users/15596/AppData/Local/Programs/Python/Python311/python.exe"
-HOOK = "I:/app/DSH-Home/workspace/learn/大肥鱼生命系统/p0/fish_session_hook.py"
+HERE = Path(__file__).resolve().parent
+CFG = Path(os.environ.get("FISH_WORKBUDDY_CFG",
+                          Path.home() / ".workbuddy" / "settings.json"))
+PY = os.environ.get("FISH_PYTHON", sys.executable)
+HOOK = str(HERE / "fish_session_hook.py")
 
 ENTRY = {
     "hooks": [{

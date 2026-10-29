@@ -21,7 +21,8 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-PUBLIC = Path(os.environ.get("FISH_PUBLIC", r"I:\app\fish-public"))
+# 公开包目录：环境变量优先；默认放家目录下（不写本机绝对路径）
+PUBLIC = Path(os.environ.get("FISH_PUBLIC", Path.home() / "fish-public"))
 CMD_RE = re.compile(r"python\s+p0/fish\.py\s+([a-z][a-z0-9\-]*)")
 
 

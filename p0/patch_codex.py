@@ -10,12 +10,16 @@ Codex 配置格式依据（2026-10-22 核对）：
 import datetime
 import shutil
 import tomllib
+import os
+import sys
 from pathlib import Path
 
-CFG = Path(r"I:\app\codex\config.toml")
+HERE = Path(__file__).resolve().parent
+CFG = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
 PY = r"C:\Users\15596\AppData\Local\Programs\Python\Python311\python.exe"
-SERVER = r"I:\app\DSH-Home\workspace\learn\大肥鱼生命系统\p0\mcp_server.py"
-DATA = r"I:\app\DSH-Home\workspace\learn\大肥鱼生命系统\p0\data"
+SERVER = str(HERE / "mcp_server.py")
+DATA = str(HERE / "data")
+PY = os.environ.get("FISH_PYTHON", sys.executable)
 
 BLOCK = f"""
 

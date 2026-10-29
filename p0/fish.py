@@ -2148,6 +2148,13 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
     # 2026-10-22 修 07 D-11：旧版 payload 不含 occurred_at，导致"忠实重建"在事件层面不可能。
     # 时间事实：occurred_at 已在函数开头校验归一；recorded_at 就是"现在"。
     recorded_at = now_utc()
+    # visibility 归一与校验（2026-10-29，用户拍板"private 是**可选**项、不强制"）。
+    # 校验的必要性：旧实现把任意字符串直接写进库（`visibility='机密'` 也能存），
+    # 而读侧过滤只认 `private` —— 一个拼错的值会**静默变成 shared**（该藏的没藏）。
+    visibility = str(visibility or "shared").strip().lower()
+    if visibility not in ("shared", "private"):
+        raise ValueError(
+            f"未知 visibility={visibility!r}（可用值：shared / private）")
     conn.execute(
         "INSERT INTO code_index (code,title,project,owner,mem_type,visibility,status,tags,"
         "file_path,occurred_at,recorded_at,access_count,dormant,session_actor,attachments) "
@@ -3515,8 +3522,45 @@ def compute_session_profile(conn, *, session_actor=None, citizen_id=None,
 
 
 
+def _visibility_enforced(conn) -> bool:
+    """`privacy.visibility_enforced`（默认 False = 只当标签，不执行过滤）。"""
+    try:
+        return bool(get_config(conn, "privacy.visibility_enforced"))
+    except Exception:       # noqa: BLE001 —— 配置坏了就当关
+        return False
+
+
+def _filter_by_visibility(conn, found, viewer_citizen_id):
+    """按 `visibility` 过滤检索结果（**可选**；用户 2026-10-29 拍板"做成开关、不强制"）。
+
+    规则（**开关打开时**）：
+      · `visibility='private'` 且 `owner == viewer` → 保留
+      · `visibility='private'` 且无 viewer / owner 不匹配 → 剔除
+      · 其它（shared / NULL / 未知值）→ 保留
+
+    开关**关着**时原样返回（逐字节等价旧行为，这是默认状态）。
+    语义选择说明：没给 viewer 时**一律剔除 private**（宁严勿松）——猜错方向
+    是"泄露"，而猜另一个方向只是"少看见一条自己的东西"，代价不对称。
+
+    批量查询（一次 SQL）而不是逐条查：`search_memories` 是每次 recall 都走的
+    热路径，逐条查会变成 N+1（评审 🟡11 同款问题）。
+    """
+    if not found or not _visibility_enforced(conn):
+        return found
+    codes = [c for c in found if c]
+    if not codes:
+        return found
+    marks = ",".join("?" * len(codes))
+    hidden = {r[0] for r in conn.execute(
+        "SELECT code FROM code_index WHERE code IN (" + marks + ") "
+        "AND LOWER(COALESCE(visibility,'shared'))='private' "
+        "AND COALESCE(owner,'')<>?", codes + [str(viewer_citizen_id or "")]).fetchall()}
+    return {c: r for c, r in found.items() if c not in hidden}
+
+
 def search_memories(conn, *, query=None, code=None, project=None, tags=None,
-                    scope="all", limit=10, include_superseded=False):
+                    scope="all", limit=10, include_superseded=False,
+                    viewer_citizen_id=None):
     """检索记忆——**CLI 与 MCP 共用的唯一读入口**（ADR-005）。
 
     排序优先级：精确编码 > 编码片段 > 标题命中 > 正文命中。
@@ -3599,6 +3643,8 @@ def search_memories(conn, *, query=None, code=None, project=None, tags=None,
             params.append(tag_like_pattern(t))
 
     found = {r[0]: r for r in conn.execute(sql, params)}
+    # 可选可见性过滤（默认关；开关打开时才按 owner 剔除 private）
+    found = _filter_by_visibility(conn, found, viewer_citizen_id)
     rows = []
     for c in order:
         if c in found:
@@ -9971,7 +10017,15 @@ def rebuild_projection(conn, root: Path) -> dict:
             "status,tags,file_path,occurred_at,recorded_at,session_actor,attachments) "
             "VALUES (?,?,?,?,?,?,'active',?,?,?,?,?,?)",
             (code, p.get("title"), project, owner,
-             p.get("mem_type", "fact"), p.get("visibility", "shared"),
+             p.get("mem_type", "fact"),
+             # G-06（安全审计 2026-10-29）：旧版 `p.get("visibility", "shared")`
+             # 在事件**缺键或为 null** 时兜底成 shared —— 生产 322 条事件里有 7 条
+             # 没有 visibility 键（2.2%），一次 rebuild 就会把 private **静默公开**。
+             # 回落到重建前快照里的历史值（owner/attachments 都是这么做的），
+             # 只有"历史也没有"时才用 shared。
+             (p.get("visibility")
+              or (snap.get(code) or {}).get("visibility")
+              or "shared"),
              json.dumps(p.get("tags", []), ensure_ascii=False), file_path,
              occurred, ts, session_actor, atts_s))
         rep["projected"] += 1
