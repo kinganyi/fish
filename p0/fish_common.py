@@ -357,6 +357,13 @@ CONFIG_DEFAULTS = {
     "push.mmr_enabled": (False, "bool", None),
     "push.mmr_lambda": (0.7, "float", None),    # λ：相关 vs 多样的折中（0.7 = 偏相关）
     "push.value_floor": (0.0, "float", None),   # 0 = 关；开了按 importance×relevance 卡
+    # 隐私开关（2026-10-29 · 用户拍板）：**都默认关**——先做成开关、不启用隔离。
+    #   · visibility_enforced：`code_index.visibility='private'` 的条目**只对 owner 可见**。
+    #     现在这个字段是**纯标签**（写入有、读路径不查；生产 351 条全 shared）。
+    #     打开它要求读路径（recall/推送/neighbors）全面加 owner 过滤，改动面大。
+    #   · memory_citizen_isolation：记忆推送**按公民隔离**（现在 93.2% 历史推送跨 owner）。
+    "privacy.visibility_enforced": (False, "bool", None),
+    "privacy.memory_citizen_isolation": (False, "bool", None),
     # 同会话 24h 内不重复推同一编码（与 _recent_pushed_codes 同一口径）。
     "push.prompt_exclude_hours": (24, "int", None),
 }
