@@ -31,6 +31,24 @@ import sys
 import uuid
 from pathlib import Path
 
+def warn_ignored(what, exc):
+    """静默点的**统一出口**（2026-10-29，静默吞错分档清单 v1.0 的 B 档）。
+
+    为什么不是 `raise`：这些点全是**旁路**（表结构探测、图边、签到、报表、锁清理），
+    失败不该打挂主流程——这是既有取舍，不是 bug。
+    为什么不能继续 `pass`：清单给了硬证据——同一函数里一半已迁到 `warn_derived`、
+    一半还是 `pass`，那是**迁移做了一半**；而静默的代价是"出了事没人知道"
+    （本仓已因此误判过两次）。
+
+    放在 `fish_common` 而不是 `fish.py`：领域模块（corpus/push/kb/activity）不许
+    `import fish`（J2/J6），但都 import `fish_common`——这里才是它们的共用出口。
+    """
+    try:
+        print(f"[fish] {what} 失败（已忽略）：{exc!r}", file=sys.stderr)
+    except Exception:       # noqa: BLE001 —— 连报警都失败就放弃
+        pass  # A档：报警器的最后兜底，静默是唯一选择
+
+
 def ulid() -> str:
     ts = int(datetime.datetime.now(datetime.timezone.utc).timestamp() * 1000)
     return f"{ts:013d}{uuid.uuid4().hex[:13].upper()}"

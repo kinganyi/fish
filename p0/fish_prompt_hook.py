@@ -27,6 +27,7 @@ fish 侧仍然生效（双保险，不是二选一）。
 **原始 prompt 绝不落盘、绝不进日志**：状态文件里只有 prompt 的 sha256 前 16 位
 与时间戳；心跳只有长度与 session 哈希（`fish_activity.heartbeat` 的 `_safe_fact`）。
 """
+from fish_common import warn_ignored
 import hashlib
 import json
 import os
@@ -112,8 +113,8 @@ def prompt_gate(session_id: str, prompt: str, data_dir=None, *, now=None) -> dic
         tmp = state_path.with_name(state_path.name + ".tmp")
         tmp.write_text(json.dumps(state), encoding="utf-8")
         os.replace(tmp, state_path)
-    except OSError:
-        pass                     # 状态写不进去 → 只是少一层节流，不影响正确性
+    except OSError as exc:
+        warn_ignored('fish_prompt_hook.py:115 prompt_gate', exc)
     return {"pass": True, "reason": "ok", "digest": digest}
 
 
@@ -164,8 +165,8 @@ def _save_hook_state(path, state) -> None:
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(state), encoding="utf-8")
         os.replace(tmp, path)
-    except OSError:
-        pass                    # 状态写不进去 → 只是少一层冷却，不影响正确性
+    except OSError as exc:
+        warn_ignored('fish_prompt_hook.py:167 _save_hook_state', exc)
 
 
 def _record_attempt(data_dir, status) -> int:

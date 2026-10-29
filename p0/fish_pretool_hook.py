@@ -30,6 +30,7 @@
 （`{ts, session_key, target, decision, hits}`）。误报率就是用这个文件算的——
 没有它，"撞车误报"只能靠感觉。
 """
+from fish_common import warn_ignored
 import json
 import os
 import sys
@@ -192,8 +193,8 @@ def own_citizen_of(data_dir, session_key):
         if conn is not None:
             try:
                 conn.close()
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                warn_ignored('fish_pretool_hook.py:195 own_citizen_of', exc)
 
 
 def main(argv=None) -> int:

@@ -42,6 +42,7 @@ CLI）与两个 hook（Pre/Post）都调这里——不在任何一处再写第�
 可用的默认值，而不是把 hook 打挂。
 """
 from __future__ import annotations
+from fish_common import warn_ignored
 
 import datetime
 import hashlib
@@ -1004,8 +1005,8 @@ def _merge_entries_by_identity(entries):
                     cur["dir"] = a.get("dir") or cur.get("dir")
                 try:
                     cur["count"] = max(int(cur.get("count") or 0), int(a.get("count") or 0))
-                except (TypeError, ValueError):
-                    pass
+                except (TypeError, ValueError) as exc:
+                    warn_ignored('fish_activity.py:1007 _merge_entries_by_identity', exc)
         if (e.get("last_seen") or "") > (item.get("last_seen") or ""):
             item["last_seen"] = e.get("last_seen")
         if (e.get("auto_source") or "") >= (item.get("auto_source") or ""):
@@ -1130,8 +1131,8 @@ def build_snapshot(conn, *, out_path, window_min=90, now=None, project=None) -> 
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=1), encoding="utf-8")
         os.replace(tmp, path)       # 原子替换：读侧永远看不到半写的文件
-    except OSError:
-        pass                        # 写不进去 → 旧快照保留（PreToolUse 最坏漏报=放行）
+    except OSError as exc:
+        warn_ignored('fish_activity.py:1133 module', exc)
     return snapshot
 
 

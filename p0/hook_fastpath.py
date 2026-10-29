@@ -23,6 +23,7 @@ hook 每轮都要**起一个 Python 进程**，所以"启动成本"就是它的�
 
 状态文件写不进去 → 只是少一层冷却，**不影响正确性**（不抛错、不打印）。
 """
+from fish_common import warn_ignored
 import json
 import sqlite3
 import time
@@ -42,8 +43,8 @@ def _read_state(path: Path) -> dict:
     try:
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8")) or {}
-    except (OSError, ValueError):
-        pass
+    except (OSError, ValueError) as exc:
+        warn_ignored('hook_fastpath.py:45 _read_state', exc)
     return {}
 
 
@@ -51,8 +52,8 @@ def _write_state(path: Path, state: dict) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-    except OSError:
-        pass                     # 写不进去 = 少一层冷却，不影响正确性
+    except OSError as exc:
+        warn_ignored('hook_fastpath.py:54 _write_state', exc)
 
 
 def enabled(data_dir, key: str, default: bool = True) -> bool:

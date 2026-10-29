@@ -30,6 +30,7 @@ stdout 只允许输出 hook 协议要求的 JSON；日志走 stderr。
 session_key 的旧凭证——hook 每次会话开始都签一次，会把 MCP 侧刚签发的 token
 一起吊销。"查身份"不该有写副作用。
 """
+from fish_common import warn_ignored
 import json
 import os
 import subprocess
@@ -135,8 +136,8 @@ def audit(note):
                 "mode": MODE,
                 "note": note,
             }, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
+    except Exception as exc:
+        warn_ignored('fish_session_hook.py:138 audit', exc)
 
 
 def main():
@@ -144,8 +145,8 @@ def main():
     req = {}
     try:
         req = json.load(sys.stdin)
-    except Exception:
-        pass
+    except Exception as exc:
+        warn_ignored('fish_session_hook.py:147 main', exc)
 
     if MODE == "inject":
         cid, why = _session_citizen(req)

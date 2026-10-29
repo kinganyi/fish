@@ -225,8 +225,8 @@ def release_lock(root, payload) -> None:
         return
     try:
         path.unlink()
-    except OSError:
-        pass
+    except OSError as exc:
+        fish_common.warn_ignored('fish_corpus.py:228 release_lock', exc)
 
 
 # ------------------------------------------------------------------ 采集
@@ -894,8 +894,8 @@ def _log_access(conn, *, root=None, action, via, query=None, result_count=None,
         if wconn is not None:
             try:
                 wconn.close()
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as exc:
+                fish_common.warn_ignored('fish_corpus.py:897 _log_access', exc)
 
 
 def search(q, terms=None, filters=None, limit=SEARCH_DEFAULT_LIMIT, budget_tokens=None,

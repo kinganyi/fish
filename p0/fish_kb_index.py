@@ -56,7 +56,7 @@ from pathlib import Path
 
 import fish_kb
 
-from fish_common import fts_match_expr, fts_text, index_tokens, iso_local, now_utc
+from fish_common import warn_ignored, fts_match_expr, fts_text, index_tokens, iso_local, now_utc
 
 # ------------------------------------------------------------------ 常量
 
@@ -347,8 +347,8 @@ def _kb_index_set_run_state(conn, state) -> None:
             "INSERT INTO config (key, value) VALUES ('kb.index_run', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(state),))
         conn.commit()
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as exc:
+        warn_ignored('fish_kb_index.py:350 _kb_index_set_run_state', exc)
 
 
 def _kb_index_is_note(rel) -> bool:
@@ -815,8 +815,8 @@ def kb_index_fresh(conn, *, max_age_hours=KB_INDEX_DEFAULT_MAX_AGE_HOURS) -> dic
         run = conn.execute("SELECT value FROM config WHERE key='kb.index_run'").fetchone()
         if run and str(run[0]) == "running":
             return out
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as exc:
+        warn_ignored('fish_kb_index.py:818 kb_index_fresh', exc)
     row = conn.execute("SELECT COUNT(*), MAX(indexed_at) FROM kb_index "
                        "WHERE status='active'").fetchone()
     out["active_rows"] = int((row[0] if row else 0) or 0)

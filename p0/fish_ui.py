@@ -43,6 +43,7 @@ fish 的设计哲学是"单机 SQLite，无外部服务依赖"。为了一屏仪
 - **CORS 只对本机放行**：方便界面在别的端口（或 file://）时联调。
 """
 from __future__ import annotations
+from fish_common import warn_ignored
 
 import argparse
 import json
@@ -542,8 +543,8 @@ class Handler(BaseHTTPRequestHandler):
                 if "minutes" in q:
                     try:
                         minutes = max(1, min(1440, int(q["minutes"][0])))
-                    except ValueError:
-                        pass
+                    except ValueError as exc:
+                        warn_ignored('fish_ui.py:545 module', exc)
                 self._send(200, build_scene(self.db_path, minutes))
             elif path == "/api/activity":
                 q = parse_qs(parsed.query)

@@ -26,6 +26,7 @@ import fish_common                        # 静默清零出口（模块引用，
 import fish_corpus_rank as rank_mod      # 特征名/刻度/默认权重/Normalize 只有这一份
 
 from fish_common import (
+    warn_ignored,
     _alias_map,
     _utc_str,
     _walk_alias,
@@ -72,8 +73,8 @@ def _diag(conn, key, raw, fallback, reason):
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-    except (OSError, sqlite3.Error, TypeError, ValueError):
-        pass
+    except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+        warn_ignored('fish_push_rerank.py:75 _diag', exc)
 
 def _cfg_any(conn, key, default):
     """读配置：config 表原值 → 按**默认值的类型** cast；转不动/超范围 → 默认 + 一条诊断。

@@ -45,6 +45,7 @@ from fish_surface import (  # T02：拆包后的跨模块引用
 )
 
 from fish_common import (
+    warn_ignored,
     ATTENTION_OPEN_KEYWORDS,
     ATTENTION_OPEN_WINDOW_DAYS,
     ATTENTION_TITLE_MAX_CHARS,
@@ -716,8 +717,8 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
         out.extend(_activity_overlap_candidates(
             conn, project=project, citizen_id=citizen_id, session_key=session_key,
             now=now_dt))
-    except sqlite3.Error:
-        pass                    # 动作反哺是增强项：库坏了不该让候选整体失败
+    except sqlite3.Error as exc:
+        warn_ignored('fish_push.py:719 module', exc)
 
     # ── G 知识库（P0-1）：vault 命中 → 候选（有 query 才产）────────────────
     # 对外承诺的"做设计时自动推知识库文档"就落在这里：tool_after/inject 用
@@ -1147,8 +1148,8 @@ def search_memories_any(conn, terms, *, project=None, limit=8, include_supersede
                     "SELECT code FROM memory_fts WHERE memory_fts MATCH ? LIMIT 200",
                     (expr,)).fetchall():
                 hits.setdefault(code, set())
-        except sqlite3.Error:
-            pass                         # 表达式非法 → 只保留编码命中，绝不炸
+        except sqlite3.Error as exc:
+            warn_ignored('fish_push.py:1150 search_memories_any', exc)
     if not hits:
         return []
     projects = resolve_project_names(conn, project) if project else []
@@ -1193,8 +1194,8 @@ def build_prompt_candidates(conn, root, *, prompt, citizen_id=None, session_key=
     now_dt = now or datetime.datetime.now(datetime.timezone.utc)
     try:
         ensure_fts(conn, root)      # 空索引自愈（幂等）：老库升级后不重建会"静默查不到"
-    except (sqlite3.Error, OSError, TypeError):
-        pass                        # 自愈失败不该让提示词推送整体失败
+    except (sqlite3.Error, OSError, TypeError) as exc:
+        warn_ignored('fish_push.py:1196 build_prompt_candidates', exc)
     terms = extract_terms(conn, prompt)
     # P0-1：知识库命中与记忆命中**并行**产——记忆没命中不代表知识库没有
     # （"做设计时推知识库文章"恰恰常发生在记忆里没有对应条目时）。

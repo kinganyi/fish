@@ -316,8 +316,8 @@ def write_txn(conn: sqlite3.Connection):
     except BaseException:
         try:
             conn.rollback()
-        except sqlite3.Error:
-            pass
+        except sqlite3.Error as exc:
+            fish_common.warn_ignored('fish_corpus_store.py:319 write_txn', exc)
         raise
     else:
         conn.commit()
@@ -918,8 +918,8 @@ def _set_busy_timeout(conn, value) -> None:
         return
     try:
         conn.execute("PRAGMA busy_timeout=%d" % int(value))
-    except (sqlite3.Error, TypeError, ValueError):
-        pass
+    except (sqlite3.Error, TypeError, ValueError) as exc:
+        fish_common.warn_ignored('fish_corpus_store.py:921 _set_busy_timeout', exc)
 
 
 def secure_erase(conn, *, vacuum: bool = True, retries: int = 2) -> dict:
