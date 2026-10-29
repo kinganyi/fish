@@ -59,6 +59,24 @@ FISH = HERE / "fish.py"
 TOKEN_TTL_HOURS = 24
 
 
+def log_child_stderr(tag, text):
+    """子进程 stderr 落盘（hook 里 stdout 是契约面，不能污染；但也不能丢）。"""
+    if not (text or "").strip():
+        return
+    try:
+        import datetime
+        d = DATA / "_audit"
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "hook-stderr.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+                "tag": tag,
+                "stderr": text[-4000:],
+            }, ensure_ascii=False) + "\n")
+    except Exception as exc:       # noqa: BLE001
+        sys.stderr.write(f"[hook] hook-stderr 落盘失败（已忽略）：{exc!r}\n")
+
+
 def _emit(text: str) -> None:
     """唯一正常出口：委托 `hook_io.emit`（2026-10-25 收敛到统一出口）。
 
@@ -332,6 +350,7 @@ def main() -> int:
             cmd, capture_output=True, text=True, encoding="utf-8",
             errors="replace", env=env, timeout=20,
         )
+        log_child_stderr("fish_dsh_hook.py:proc", proc.stderr)
     except subprocess.TimeoutExpired:
         return _skip("session start 超时")
     except Exception as exc:  # noqa: BLE001

@@ -50,6 +50,24 @@ DATA = Path(os.environ.get("FISH_DATA") or (HERE / "data"))
 MODE = os.environ.get("FISH_HOOK_MODE", "inject")
 
 
+def log_child_stderr(tag, text):
+    """子进程 stderr 落盘（hook 里 stdout 是契约面，不能污染；但也不能丢）。"""
+    if not (text or "").strip():
+        return
+    try:
+        import datetime
+        d = DATA / "_audit"
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "hook-stderr.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+                "tag": tag,
+                "stderr": text[-4000:],
+            }, ensure_ascii=False) + "\n")
+    except Exception as exc:       # noqa: BLE001
+        sys.stderr.write(f"[hook] hook-stderr 落盘失败（已忽略）：{exc!r}\n")
+
+
 def _emit(text: str) -> None:
     """输出 additionalContext（委托统一出口：编码只在一处决定）。"""
     hook_io.emit("SessionStart", text)
@@ -112,6 +130,7 @@ def build_pack(citizen_id, session_key=None):
         cmd += ["--session-key", session_key]
     p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
                        env=env, timeout=30)
+    log_child_stderr("fish_session_hook.py:p", p.stderr)
     if p.returncode != 0:
         raise RuntimeError(f"inject 失败: {p.stderr[:300]}")
     return json.loads(p.stdout)["pack"]

@@ -47,6 +47,24 @@ DATA = Path(os.environ.get("FISH_DATA") or (HERE / "data"))
 MIN_PROMPT_CHARS = 4
 
 
+def log_child_stderr(tag, text):
+    """子进程 stderr 落盘（hook 里 stdout 是契约面，不能污染；但也不能丢）。"""
+    if not (text or "").strip():
+        return
+    try:
+        import datetime
+        d = DATA / "_audit"
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "hook-stderr.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+                "tag": tag,
+                "stderr": text[-4000:],
+            }, ensure_ascii=False) + "\n")
+    except Exception as exc:       # noqa: BLE001
+        sys.stderr.write(f"[hook] hook-stderr 落盘失败（已忽略）：{exc!r}\n")
+
+
 def _dbg(msg: str) -> None:
     """诊断输出（仅 FISH_HOOK_DEBUG=1）。默认静默——生产不许往 stderr 写噪音。"""
     if os.environ.get("FISH_HOOK_DEBUG"):
@@ -139,6 +157,7 @@ def ask_fish(raw: str, host: str, data_dir=None, *, timeout: int = 3):
         proc = subprocess.run(cmd, input=raw, capture_output=True, text=True,
                               encoding="utf-8", errors="replace", env=env,
                               timeout=timeout)
+        log_child_stderr("fish_prompt_hook.py:proc", proc.stderr)
     except subprocess.TimeoutExpired as exc:
         _dbg("prompt-push 超时（%ss）：%r" % (timeout, exc))
         return "", "timeout"

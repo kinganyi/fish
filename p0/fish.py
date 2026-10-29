@@ -11874,6 +11874,18 @@ def cmd_board(args):
             # 而且它是静默的——看板上出现一行"安逸在改 fish.py"，而安逸本人在睡觉。
             # 出事之后要靠人肉发现并清理，那正是"默认值把行为记到别人头上"的代价。
             citizen = (getattr(args, "citizen", None) or "").strip()
+            # 2026-10-29（体验复测报告 B1）：`--token` 现在能替代 `--citizen`——
+            # token 是**凭证**（比可读的 citizen_id 更可信），而且这样"签到忘了带
+            # --citizen"不用再去 `whoami` 绕一圈。显式 `--citizen` 仍优先。
+            if not citizen:
+                _tok = (getattr(args, "token", None)
+                        or os.environ.get("FISH_TOKEN") or "").strip()
+                if _tok:
+                    citizen = (validate_session_token(conn, _tok) or "").strip()
+                    if not citizen:
+                        print("错误：--token 无对应公民（凭证不存在/已吊销/已过期）。",
+                              file=sys.stderr)
+                        return 2
             if not citizen:
                 print("错误：board checkin 必须带 --citizen。", file=sys.stderr)
                 print("  签到是「声明我是谁」——不指定就默认记到系统主人头上等于冒充。",
@@ -13931,6 +13943,11 @@ def main():
         bp.add_argument("--key", default="")
         bp.add_argument("--project", default=None)
         bp.add_argument("--period", default=None)
+        # 2026-10-29（体验复测报告 B1）：`board show --token` 曾报 `unrecognized arguments`
+        # ——参数面没注册 = 用户照着别的子命令的习惯敲就踩。统一到公共参数，并**真消费**
+        # （见 `checkin` 段：token 可替代 `--citizen`；`--citizen` 显式给时仍优先）。
+        bp.add_argument("--token", default=None,
+                        help="用这个凭证解析身份（可替代 --citizen；显式 --citizen 优先）")
         return bp
 
     # show：读看板（默认动作）
