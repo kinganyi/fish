@@ -134,11 +134,21 @@ def _value_floor(conn) -> float:
 
 
 def _value_ok(cand, floor) -> bool:
-    """`importance × relevance` 是否过价值门（缺 factors 时按 1.0 放过，不误杀）。"""
+    """价值门：`relevance × (0.3 + 0.7×importance)` 是否过线。
+
+    **为什么 importance 不能是硬零**（2026-10-29 部署验证抓到的真问题）：
+    新记忆 / 从没被读过的条目 `access_count=0` → `importance=0` → 旧公式
+    `importance × relevance = 0` → 被 `value_floor` 一刀切挡掉。实测把
+    `push.value_floor=0.1` 打开后，**整条推送变空**（"漫剧剧本怎么写"一个候选
+    都不剩）——配置看起来"成功"，实际上是**把自己关掉了**。
+
+    新内容有**先天价值**：给 importance 一个 0.3 的底（读得越多越接近 1.0）。
+    缺 factors 的候选按 1.0 放过，不误杀。
+    """
     f = cand.get("factors") or {}
     imp = float(f.get("importance", 1.0))
     rel = float(f.get("relevance", cand.get("score") or 1.0))
-    return (imp * rel) >= floor
+    return (rel * (0.3 + 0.7 * max(0.0, min(imp, 1.0)))) >= floor
 
 
 def _mmr_enabled(conn) -> bool:
