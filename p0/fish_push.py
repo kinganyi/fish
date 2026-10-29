@@ -764,6 +764,11 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
             out = same + other[:3 - len(same)]
 
     out.sort(key=lambda c: (-c["score"], c["code"]))
+    # 外部审查 🔴2（2026-10-29）：**分通道时效门必须挂在真实候选上**。
+    # 旧实现只挂在 `_activity_overlap_candidates` 的返回处，而那里产出的
+    # `activity:...` 候选既没有 `freshness` 也没有 `mtype` → 丢弃数恒为 0
+    # （功能空转；判据却用虚构夹具喂它）。这里才是 inject/tool_after 主通道。
+    out = _apply_stale_floor(conn, out, _push_stale_floor(conn))
     return _with_ctx_project(conn, out[:int(limit)], project)
 
 def _recent_pushed_codes(conn, session_key, *, hours=24, now=None) -> set:
@@ -1046,16 +1051,22 @@ def _apply_stale_floor(conn, cands, floor):
     规则与 prompt **同源**：`STALE_SENSITIVE_TYPES`（fact/episode/artifact）过门槛；
     `FRESHNESS_EXEMPT_TYPES`（rule/identity/lesson）的 factor 恒 1.0，天然免疫
     （免疫是算出来的，不是特判出来的）。kb/看板候选没有 mem_type → 不在这里判。
+
+    **mtype 批量取**（外部审查 🟡11）：逐条 `SELECT` 是 N+1；挂在主通道后
+    40 条候选 = 40 次查询，会把 hook 的 2s 预算顶红（实测 R6a2/R6b）。
     """
+    need = [c for c in cands if c.get("mtype") is None and c.get("code")]
+    if need:
+        codes = [c["code"] for c in need]
+        marks = ",".join("?" * len(codes))
+        known = dict(conn.execute(
+            "SELECT code, mem_type FROM code_index WHERE code IN (" + marks + ")",
+            codes).fetchall())
+        for cand in need:
+            cand["mtype"] = known.get(cand["code"])
     out = []
     for cand in cands:
-        mtype = cand.get("mtype")
-        if mtype is None:
-            row = conn.execute("SELECT mem_type FROM code_index WHERE code=?",
-                               (cand.get("code"),)).fetchone()
-            mtype = row[0] if row else None
-            cand["mtype"] = mtype
-        if str(mtype or "") in STALE_SENSITIVE_TYPES:
+        if str(cand.get("mtype") or "") in STALE_SENSITIVE_TYPES:
             factor = float((cand.get("freshness") or {}).get("factor", 1.0))
             if factor < floor:
                 continue

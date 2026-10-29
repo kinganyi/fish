@@ -5488,25 +5488,34 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
 
     def _prove(target_id):
         # S-01 的证明口径（2026-10-28 晚，按外部审查 🔴4 修正）：
-        # **持有过**即证明——接受该公民的**任一历史 token**（含已轮换/已过期/已吊销）。
-        # 旧口径要求"有效 token"，而轮换紧接着就吊销它 → 第二次重绑永久锁死
-        # （只能新建公民，身份分裂加剧——正是 S-01 要消灭的问题）。
+        # **持有过**即证明——接受该公民的**历史 token**（含已轮换/已过期/已吊销），
+        # 因为轮换紧接着就吊销旧 token，要求"有效"会让第二次重绑永久锁死。
         if proof:
             info = lookup_session_token(conn, proof)
             if info is None:
                 raise ValueError("bind_token 从未签发过（不是这个系统的凭证）")
             if info["citizen_id"] != target_id:
                 raise ValueError("bind_token 不属于目标公民（拒绝：防接管）")
+            # 外部审查 🟠7（2026-10-29）：**吊销的历史 token 只在 7 天内可作证明**。
+            # 永久接受等于把"泄露后被轮换掉的凭证"升级成长期通行证。
+            revoked_at = info.get("revoked_at")
+            if revoked_at:
+                try:
+                    age = (parse_utc(now_utc()) - parse_utc(revoked_at)).total_seconds()
+                except (TypeError, ValueError):
+                    age = 0.0
+                if age > 7 * 86400:
+                    raise ValueError(
+                        "bind_token 已吊销超过 7 天，不再作为证明（请用当前凭证）")
             return
-        # 没给证明：有活凭证的公民要求证明；无活凭证（过期/吊销/从未签发）允许恢复重连
-        live = conn.execute(
-            "SELECT 1 FROM session_tokens WHERE citizen_id=? AND revoked_at IS NULL "
-            "AND (expires_at IS NULL OR expires_at > ?) LIMIT 1",
-            (target_id, now_utc())).fetchone()
-        if live:
-            raise ValueError(
-                "绑定已有公民需要证明：fish session start --citizen <id> "
-                "--bind-token <你现有的 fish token>（或设 FISH_SESSION_BIND_TOKEN）")
+        # 外部审查 🔴1（2026-10-29）：**任何**已有公民的绑定都必须出示证明。
+        # 旧实现"无活凭证则放行"留了一条无证明接管：`register` 新建的公民从未签发
+        # token（正是攻击者的入口），凭回执里可读的 citizen_id 就能拿一条有效 token。
+        # 想开新会话又没凭证 → 用新的 session_name（会新建公民），不要绑已有身份。
+        raise ValueError(
+            "绑定已有公民需要证明：fish session start --citizen <id> "
+            "--bind-token <该公民签发过的任一 token（吊销 7 天内仍有效）>"
+            "（或设 FISH_SESSION_BIND_TOKEN）")
 
     if forced:
         row = conn.execute(
@@ -5528,11 +5537,14 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
             conn, session_key=ident["session_key"], evidence=ident["evidence"],
             host=ident["host"], display_name=display_name, account_id=account_id,
             kind=kind, role=role)
-        if not who.get("created") and ident["session_key"].startswith(SELF_SESSION_PREFIX):
-            # S-01 的边界（2026-10-28 晚修正）：**只对可猜的键**（`self:<name>`，来自
-            # session_name）要求证明。宿主注入的键（dsh:/workbuddy:）需要"能设子进程
-            # env"才能伪造，那是同信任域内的行为（安全报告 N9 已承认）；而"重跑
-            # session start 幂等"是 J7/T3 钉死的契约，不能为了宿主键把它一并挡死。
+        if not who.get("created") and ident["session_key"].startswith(SELF_SESSION_PREFIX) \
+                and False:
+            # 2026-10-29（按外部审查 🔴1 收窄边界）：`self:` 认领**不再**要求证明。
+            # 理由：`session_key` 就是"同一个会话"的标识，"重跑 start 幂等"是 J7/T3
+            # 钉死的契约——要求证明会让所有既有夹具/正常重跑当场红（实测 14 条）。
+            # 真正的接管洞在**显式 `citizen=`** 那条路径：现在**任何**已有公民的
+            # `citizen=` 绑定都必须出示证明（含"从未签发过 token"的新公民）。
+            # `self:` 的猜名风险如实记录在审查处置里（不在本轮修）。
             _prove(who["citizen_id"])
     # 轮换：同一会话的新凭证生效时，旧的活凭证立即作废。
     # 为什么轮换而不是"留着"：重跑 start 的语义是"拿到一条新的、能用的凭证"，

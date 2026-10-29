@@ -45,15 +45,31 @@ class SessionBindTest(unittest.TestCase):
         self.assertTrue(res["created"])
         self.assertTrue(res["session_key"].startswith(fish.SELF_SESSION_PREFIX))
 
-    # S-2
-    def test_S2_anonymous_claim_rejected(self):
+    # S-2（2026-10-29 边界收窄后）：`self:` 重跑 = 同一个会话，**幂等**（J7/T3 契约）。
+    def test_S2_self_alias_rerun_is_idempotent(self):
         first = fish.start_session(self.conn, alias="probe-ai", kind="visitor")
-        with self.assertRaises(ValueError) as ctx:
-            fish.start_session(self.conn, alias="probe-ai", kind="visitor")
-        self.assertIn("证明", str(ctx.exception))
-        # 受害者原 token 没被吊销（拒绝发生在轮换之前）
-        self.assertEqual(fish.validate_session_token(self.conn, first["token"]),
+        again = fish.start_session(self.conn, alias="probe-ai", kind="visitor")
+        self.assertEqual(again["citizen_id"], first["citizen_id"],
+                         "同一 self: 会话重跑必须幂等（否则正常重跑会被挡死）")
+        # 轮换：旧 token 被吊销，新 token 有效
+        self.assertIsNone(fish.validate_session_token(self.conn, first["token"]))
+        self.assertEqual(fish.validate_session_token(self.conn, again["token"]),
                          first["citizen_id"])
+
+    # S-8（外部审查 🔴1）：**从未签发过 token** 的公民（register 的产物）也不能无证明绑定
+    def test_S8_citizen_without_any_token_needs_proof(self):
+        cid = fish.ulid()
+        self.conn.execute(
+            "INSERT INTO citizens (citizen_id, display_name, status) VALUES (?,?,?)",
+            (cid, "victim-no-token", "active"))
+        self.conn.commit()
+        self.assertEqual(self.conn.execute(
+            "SELECT COUNT(*) FROM session_tokens WHERE citizen_id=?", (cid,)
+        ).fetchone()[0], 0)
+        with self.assertRaises(ValueError) as ctx:
+            fish.start_session(self.conn, citizen=cid, alias="x-8", kind="visitor")
+        self.assertIn("证明", str(ctx.exception),
+                      "无活凭证的公民也必须要求证明（旧实现这里放行 = 无证明接管）")
 
     # S-3
     def test_S3_proven_claim_succeeds(self):
