@@ -55,11 +55,25 @@ class MmrValueTest(unittest.TestCase):
 
     # V-1
     def test_V1_value_floor_blocks_low_value(self):
-        low = {"code": "L", "score": 0.5,
-               "factors": {"importance": 0.1, "relevance": 0.2}}
-        high = {"code": "H", "score": 0.5,
+        """价值门的**正确形态**：新内容有先天价值（不能因为"还没被读过"就判零）。
+
+        ★ 判别力由 `_audit/mutation_p2.py` 的 M4 钉住：把 importance 的 0.3 底去掉
+        （恢复 `rel × imp`）→ 第一条断言必红。旧版判据只有"低价值被挡"，
+        两个公式都满足，等于空转（M4 第一次跑就 MISSED 抓到了这一点）。
+        """
+        # 新记忆：importance=0 但 relevance 高 → 先天价值 0.9×0.3=0.27 ≥ 0.2 → 放
+        fresh = {"code": "F", "score": 0.9,
+                 "factors": {"importance": 0.0, "relevance": 0.9}}
+        self.assertTrue(
+            fish_push._value_ok(fresh, 0.2),
+            "新内容不能被判成零价值（旧公式 imp×rel=0 会把整条推送通道清空）")
+        # 真的低价值（rel 也低）→ 0.1×0.3=0.03 < 0.2 → 挡
+        low = {"code": "L", "score": 0.1,
+               "factors": {"importance": 0.0, "relevance": 0.1}}
+        self.assertFalse(fish_push._value_ok(low, 0.2))
+        # 高价值 → 放
+        high = {"code": "H", "score": 0.9,
                 "factors": {"importance": 1.0, "relevance": 0.9}}
-        self.assertFalse(fish_push._value_ok(low, 0.5))
         self.assertTrue(fish_push._value_ok(high, 0.5))
 
     # V-2
