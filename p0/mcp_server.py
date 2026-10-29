@@ -1410,8 +1410,8 @@ class FishServer:
                 citizen_id=ident.citizen_id,
                 session_key=ident.session_key,
                 payload=payload)
-        except Exception:
-            pass
+        except Exception as exc:
+            fish.warn_ignored('mcp_server.py:1413 module', exc)
 
     # _touch 的 source → memory_access_log.via。push 与 inject 必须分开：
     #   inject = "这个 AI 主动调工具要注入包"
@@ -2279,8 +2279,8 @@ def main():
     try:
         sys.stdin.reconfigure(encoding="utf-8")
         sys.stdout.reconfigure(encoding="utf-8")
-    except AttributeError:
-        pass
+    except AttributeError as exc:
+        fish.warn_ignored('mcp_server.py:2282 main', exc)
     FishServer(Path(args.root)).run()
 
 

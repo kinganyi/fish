@@ -79,12 +79,15 @@ class SessionBindTest(unittest.TestCase):
         self.assertEqual(again["citizen_id"], first["citizen_id"])
         self.assertFalse(again["created"])
 
-    # S-4
-    def test_S4_citizen_bind_without_proof_rejected(self):
+    # S-4（2026-10-29 窄化后）：**签发过凭证**的公民允许无证明重连——hook 依赖这条
+    # （`fish_dsh_hook.py` 在会话开场显式传 `--citizen`，但它拿不出 token）。
+    # 真正的防线在 S-8：从未签发过 token 的公民一律拒绝。
+    def test_S4_issued_citizen_allows_proofless_rebind(self):
         first = fish.start_session(self.conn, alias="probe-ai", kind="visitor")
-        with self.assertRaises(ValueError):
-            fish.start_session(self.conn, citizen=first["citizen_id"],
-                               alias="other-ai", kind="visitor")
+        again = fish.start_session(self.conn, citizen=first["citizen_id"],
+                                   alias="other-ai", kind="visitor")
+        self.assertEqual(again["citizen_id"], first["citizen_id"],
+                         "签发过 token 的公民允许无证明重连（hook 的幂等路径）")
 
     # S-5
     def test_S5_wrong_proof_rejected(self):

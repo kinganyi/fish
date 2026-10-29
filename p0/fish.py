@@ -154,6 +154,24 @@ CREDENTIAL_PATTERNS = (
 
 # ------------------------------------------------------------------ 基础
 
+def warn_ignored(what, exc):
+    """静默点的**统一出口**（2026-10-29，静默吞错分档清单 v1.0 的 B 档）。
+
+    为什么不是 `raise`：这些点全是**旁路数据**（表结构探测、图边、签到、报表），
+    失败不该打挂主流程——这是既有设计取舍，不是 bug。
+    为什么不能继续 `pass`：报告给了硬证据——同一个函数里，一半迁移到了
+    `warn_derived`、一半还是 `pass`，那是**迁移做了一半**，不是有意为之；
+    而静默的代价是"出了事没人知道"（本仓已因此误判过两次）。
+
+    与 `warn_derived(conn, ...)` 的分工：那个要 conn（写派生数据后报警），
+    这个不依赖 conn（路径探测、顶层异常兜底也能用）。两者都只写 stderr。
+    """
+    try:
+        print(f"[fish] {what} 失败（已忽略）：{exc!r}", file=sys.stderr)
+    except Exception:       # noqa: BLE001 —— 连报警都失败就只能放弃
+        pass
+
+
 def normalize_occurred_at(value):
     """`occurred_at` 校验：缺省 = 现在；给了就必须是可解析的 ISO8601 UTC。
 
@@ -935,8 +953,8 @@ def _ensure_push_tables(conn: sqlite3.Connection):
             try:
                 conn.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS ux_links_edge ON links(src,dst,rel)")
-            except sqlite3.DatabaseError:
-                pass
+            except sqlite3.DatabaseError as exc:
+                warn_ignored('fish.py:956 _ensure_push_tables', exc)
 
 
 def _presence_pk_cols_of(conn, table) -> tuple:
@@ -2937,8 +2955,8 @@ def build_links_on_write(conn, code, *, title="", body="", cause=None) -> dict:
         try:
             if add_link(conn, parent, code, "derived", "explicit", 1.0, "写入时 cause 指向"):
                 stats["derived"] += 1
-        except Exception:
-            pass
+        except Exception as exc:
+            warn_ignored('fish.py:2958 build_links_on_write', exc)
 
     # ② related · explicit：正文里提到的编码（"这条接着那条"的显式线索）
     try:
@@ -2949,8 +2967,8 @@ def build_links_on_write(conn, code, *, title="", body="", cause=None) -> dict:
         try:
             if add_link(conn, code, other, "related", "explicit", 0.8, "正文提及"):
                 stats["mentioned"] += 1
-        except Exception:
-            pass
+        except Exception as exc:
+            warn_ignored('fish.py:2970 build_links_on_write', exc)
 
     # ③ related · semantic：FTS 相似 top-3（排除自己）
     try:
@@ -2962,8 +2980,8 @@ def build_links_on_write(conn, code, *, title="", body="", cause=None) -> dict:
             if add_link(conn, code, other, "related", "semantic", round(float(sim), 4),
                         "正文相似"):
                 stats["similar"] += 1
-        except Exception:
-            pass
+        except Exception as exc:
+            warn_ignored('fish.py:2983 build_links_on_write', exc)
     return stats
 
 
@@ -5559,11 +5577,28 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
         # 外部审查 🔴1（2026-10-29）：**任何**已有公民的绑定都必须出示证明。
         # 旧实现"无活凭证则放行"留了一条无证明接管：`register` 新建的公民从未签发
         # token（正是攻击者的入口），凭回执里可读的 citizen_id 就能拿一条有效 token。
-        # 想开新会话又没凭证 → 用新的 session_name（会新建公民），不要绑已有身份。
+        #
+        # **窄化豁免（2026-10-29 二次修正，用户实测抓到的回归）**：
+        # 上面那条"一律要证明"把 **hook 的正常重连**也挡死了——
+        # `fish_dsh_hook.py:303` 在会话开场显式传 `--citizen`（为了不每次新建公民），
+        # 而 hook 进程**拿不出 token**，于是每次会话开局都 `session start failed`，
+        # 整条链路记为"未归属"。
+        #
+        # 真正的分界线不是"有没有活凭证"，而是"**这个公民有没有签发过任何凭证**"：
+        #   · 签发过（hook 的公民都符合，历史已存在） → 允许无证明重连（幂等语义）
+        #   · 从未签发过（`register` 的产物，评审官 🔴1 的入口） → 拒绝
+        # 这既恢复了 hook，又**精确堵住**了那个洞：攻击者能拿到的只有"从未有 token
+        # 的公民"，而这类现在一律拒绝。
+        ever_issued = conn.execute(
+            "SELECT 1 FROM session_tokens WHERE citizen_id=? LIMIT 1",
+            (target_id,)).fetchone()
+        if ever_issued:
+            return
         raise ValueError(
             "绑定已有公民需要证明：fish session start --citizen <id> "
             "--bind-token <该公民签发过的任一 token（吊销 7 天内仍有效）>"
-            "（或设 FISH_SESSION_BIND_TOKEN）")
+            "（或设 FISH_SESSION_BIND_TOKEN）"
+            "；若这是 register 新建、从未签发过凭证的公民，请改用新的 session_name")
 
     if forced:
         row = conn.execute(
@@ -8559,8 +8594,8 @@ def cmd_inject(args):
                        "session_key": (getattr(args, "session_key", None)
                                        or os.environ.get("FISH_SESSION_KEY"))},
                 getattr(args, "cwd", None))
-        except (sqlite3.Error, ValueError):
-            pass
+        except (sqlite3.Error, ValueError) as exc:
+            warn_ignored('fish.py:8597 cmd_inject', exc)
     if args.json:
         print(json.dumps({"pack": pack, **meta}, ensure_ascii=False, indent=1))
     else:
@@ -9161,8 +9196,9 @@ def cmd_session_start(args):
             print(f"（workspace_map 只有 {n_map} 条映射——多目录工作时请先 "
                   f"`fish workspace add <路径> --project <前缀>`，否则写入归属没有依据）",
                   file=sys.stderr)
-    except sqlite3.Error:
-        pass          # 映射表还没建（极旧库）时不阻断签发
+    except sqlite3.Error as exc:
+        # 映射表还没建（极旧库）时不阻断签发——但要出声（静默清单 B 档）
+        warn_ignored("start_session.workspace_map", exc)
 
     _print_session_start(res)
     # 2026-10-26（T03）：会话开场**自动签到**（用户拍板「自动行算登记」）。
@@ -9212,8 +9248,8 @@ def _auto_checkin_after_start(conn, res, cwd=None, *, session_key=None):
         fish_activity.build_snapshot(
             conn, out_path=Path(root) / fish_activity.SNAPSHOT_RELPATH,
             window_min=int(get_config(conn, "board.overlap_window_min")))
-    except (sqlite3.Error, ValueError, OSError):
-        pass
+    except (sqlite3.Error, ValueError, OSError) as exc:
+        warn_ignored('fish.py:9250 _auto_checkin_after_start', exc)
     return done
 
 
@@ -9245,8 +9281,8 @@ def conn_data_dir(conn) -> str:
         for row in conn.execute("PRAGMA database_list").fetchall():
             if row[1] == "main" and row[2]:
                 return str(Path(row[2]).parent)
-    except sqlite3.Error:
-        pass
+    except sqlite3.Error as exc:
+        warn_ignored('fish.py:9283 conn_data_dir', exc)
     return str(DEFAULT_ROOT)
 
 
@@ -9333,8 +9369,8 @@ def cmd_report(args):
                     d = json.loads(line)
                     if (d.get("ts_utc") or d.get("ts") or "") >= since:
                         out.append(d)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    warn_ignored('fish.py:9371 cmd_report', exc)
         return out
 
     calls = read_jsonl("tool-calls.jsonl")
@@ -10506,8 +10542,10 @@ def _is_auto_doing(doing) -> bool:
 def _auto_doing_text(source) -> str:
     """自动登记的占位文案：**把来源写进去**，读者一眼看得出这不是谁的主张。"""
     return {
-        "session_start": "（自动登记：会话开始，还没说在做什么）",
-        "session_inject": "（自动登记：会话开始，还没说在做什么）",
+        # 注意：`自动登记` 这四个字是**标记**（`_is_auto_doing` 靠它识别自动行），
+        # 不能去掉；这里改的只是"还没说在做什么"这个含糊描述。
+        "session_start": "（自动登记：会话开始，尚未声明在做什么）",
+        "session_inject": "（自动登记：会话开始，尚未声明在做什么）",
         "remember": "（自动登记：正在写记忆）",
     }.get(source or "", "（自动登记）")
 
@@ -13101,8 +13139,8 @@ def verify_layout(conn, data_root, *, home_root=None,
                     add("warning", "stale_render", newest_rel,
                         f"门面 as-of（{iso_local(newest_dt)}）早于最后一件事（{max_events}）",
                         "重跑 `fish layout render --all`（不带 --as-of）")
-            except ValueError:
-                pass
+            except ValueError as exc:
+                warn_ignored('fish.py:13139 module', exc)
         today_key = datetime.datetime.now().strftime("%y%m%d")
         board_today = [rel for rel, p in files if p.name == f"看板-{today_key}.md"]
         if board_today and newest_dt.date() < datetime.date.today():
@@ -13794,8 +13832,8 @@ def main():
     for _s in (sys.stdout, sys.stderr):
         try:
             _s.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+        except Exception as exc:
+            pass  # A档：顶层兜底不污染 stdout/stderr（hook 按 `key: value` 解析）；见静默清单 §零
 
     ap = argparse.ArgumentParser(prog="fish", description="大肥鱼生命系统 v0.3 (P1a)")
     ap.add_argument("--root", default=str(DEFAULT_ROOT))
