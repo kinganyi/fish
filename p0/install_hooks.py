@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# 发布占位（2026-10-29）：路径里的 `<用户名>` 是占位符，跑之前改成你自己的。
 """fish · hooks 配置安装器（**两个宿主一次装好**：DSH + WorkBuddy）。
 
 ## 为什么要有安装器（而不是手改 JSON）
@@ -87,8 +88,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 # 宿主配置位置（可用环境变量覆盖，测试/演练必用 `--file`）。
-DSH_HOME = Path(os.environ.get("DSH_HOME") or r"C:\Users\15596\.dsh")
-WORKBUDDY_HOME = Path(os.environ.get("WORKBUDDY_HOME") or r"C:\Users\15596\.workbuddy")
+DSH_HOME = Path(os.environ.get("DSH_HOME") or r"C:\Users\<用户名>\.dsh")
+WORKBUDDY_HOME = Path(os.environ.get("WORKBUDDY_HOME") or r"C:\Users\<用户名>\.workbuddy")
 TARGETS = {
     "dsh": lambda: DSH_HOME / "hooks.json",
     "workbuddy": lambda: WORKBUDDY_HOME / "settings.json",

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# 发布占位（2026-10-29）：路径里的 `<用户名>` 是占位符，跑之前改成你自己的。
 """
 端到端验证：完全按 WorkBuddy 的方式启动 fish —— 从 mcp.json 读 command/args/env，
 不硬编码任何路径。这样验的是「配置本身可用」，而不是「我知道路径」。
@@ -10,7 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-CFG = Path(r"C:\Users\15596\.workbuddy\mcp.json")
+CFG = Path(r"C:\Users\<用户名>\.workbuddy\mcp.json")
 
 
 def main():

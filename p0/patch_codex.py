@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# 发布占位（2026-10-29）：路径里的 `<用户名>` 是占位符，跑之前改成你自己的。
 """把 fish 写进 Codex 的 config.toml。先备份，再追加，再用 tomllib 校验。
 
 Codex 配置格式依据（2026-10-22 核对）：
@@ -16,7 +17,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 CFG = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
-PY = r"C:\Users\15596\AppData\Local\Programs\Python\Python311\python.exe"
+PY = r"C:\Users\<用户名>\AppData\Local\Programs\Python\Python311\python.exe"
 SERVER = str(HERE / "mcp_server.py")
 DATA = str(HERE / "data")
 PY = os.environ.get("FISH_PYTHON", sys.executable)

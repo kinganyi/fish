@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# 发布占位（2026-10-29）：路径里的 `<用户名>` 是占位符，跑之前改成你自己的。
 """给 fish 的 MCP 配置补 FISH_ACTOR，让身份在进程重启后自动恢复。先备份再写。"""
 import datetime
 import json
 import shutil
 from pathlib import Path
 
-CFG = Path(r"C:\Users\15596\.workbuddy\mcp.json")
+CFG = Path(r"C:\Users\<用户名>\.workbuddy\mcp.json")
 ACTOR = "workbuddy-main"
 
 
