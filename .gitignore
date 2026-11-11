@@ -47,3 +47,6 @@ p0/_audit/
 # ——git 的忽略规则对已跟踪文件无效（这是刻意的：老文件不动）。
 p0/_probe_*
 p0/_run_*
+
+# 2026-11-11：隔离 UI 测试 profile（162 MB，含 .credentials.yaml），禁止入库
+.dsh-test-ui/

@@ -1,0 +1,213 @@
+{
+  "specVersion": "v0",
+  "source": {
+    "files": [
+      "p0/fish.py"
+    ],
+    "function": "build_injection_pack",
+    "declaredSections": [
+      "status",
+      "board",
+      "rules",
+      "attention",
+      "lessons",
+      "push",
+      "index",
+      "recent"
+    ],
+    "declaredSectionNote": "可取值：status/board/rules/attention/lessons/push/index/recent；L0 身份段永远保留（不可关闭）",
+    "sectionAliases": {
+      "attentions": "attention",
+      "indexes": "index",
+      "l2": "index",
+      "lesson": "lessons",
+      "rule": "rules"
+    },
+    "python": "3.11.9"
+  },
+  "budget": {
+    "inject.board_max_ratio": {
+      "default": 0.25,
+      "type": "float",
+      "key": "inject.board_max_ratio"
+    },
+    "inject.budget_tokens": {
+      "default": 1600,
+      "type": "int",
+      "key": "inject.budget_tokens"
+    },
+    "inject.rules_per_source": {
+      "default": 3,
+      "type": "int",
+      "key": "inject.rules_per_source"
+    },
+    "push.open_budget_tokens": {
+      "default": 450,
+      "type": "int",
+      "key": "push.open_budget_tokens"
+    }
+  },
+  "budgetRule": {
+    "rule": "fallback",
+    "formula": "int(len(text) * 1.2)",
+    "countUnit": "unicode-code-point",
+    "tokenizer": "none",
+    "rationale": "影子期 TS 侧没有 cl100k_base，无法与生产 tiktoken 精确计数对等；所以两侧统一走 Python count_tokens 的 fallback 分支，让\"预算裁剪在哪儿触发\"也变成可对拍的事实",
+    "contractBreach": "换心期若引入真实 tokenizer，**必须同时改 spec 的 budgetRule 与两侧实现**（Python 的 count_tokens 与 TS 的 countTokens）；只改一侧或只改 spec 都视为契约破坏，`scripts/check-spec.mjs` 会红",
+    "knownCost": "与生产 tiktoken 精确计数在边界上可能差 1 条候选——只影响裁剪触发点，不影响未触发裁剪时的包正文"
+  },
+  "tail": {
+    "lines": 2,
+    "truncationKeys": [
+      "rules",
+      "push",
+      "board",
+      "l2",
+      "attention",
+      "lessons"
+    ],
+    "labels": {
+      "attention": "该注意什么",
+      "board": "看板",
+      "index": "L2 索引",
+      "lessons": "错题本",
+      "push": "候选",
+      "recent": "最近三件事",
+      "rules": "规矩",
+      "status": "L1 状态坐标"
+    },
+    "fullContainsPhrase": "本包含 L0–L2 与候选",
+    "worstAsOf": "2026-10-26T00:00:00Z",
+    "note": "包尾两行 = 截断声明 + as-of；两者都必须算进预算（`injection_tail_worst()` 现算，不写常量）"
+  },
+  "trimOrder": [
+    "push",
+    "index",
+    "attention",
+    "lessons",
+    "rules",
+    "board",
+    "recent",
+    "l0-iron-rules",
+    "status"
+  ],
+  "sections": [
+    {
+      "name": "l0",
+      "kind": "l0",
+      "order": 0,
+      "source": "citizens + resolve_owner + 记忆根目录 + 三条铁律（永不裁剪到消失，只降级为 l0_min）",
+      "budgetKeys": [],
+      "trimRank": 2,
+      "declared": false
+    },
+    {
+      "name": "status",
+      "kind": "section",
+      "order": 1,
+      "source": "code_index(active) + project_stints/_resolve_injection_project + citizens_archive（休眠计数）",
+      "budgetKeys": [],
+      "trimRank": 1,
+      "declared": true
+    },
+    {
+      "name": "recent",
+      "kind": "section",
+      "order": 2,
+      "source": "code_index WHERE project=? AND dormant=0 AND status='active' ORDER BY code DESC LIMIT 3",
+      "budgetKeys": [],
+      "trimRank": 3,
+      "declared": true
+    },
+    {
+      "name": "board",
+      "kind": "section",
+      "order": 3,
+      "source": "board_block(boards/board_posts/presence/tool_activity)",
+      "budgetKeys": [
+        "inject.board_max_ratio"
+      ],
+      "trimRank": 4,
+      "declared": true
+    },
+    {
+      "name": "rules",
+      "kind": "section",
+      "order": 4,
+      "source": "build_short_rules_block(code_index mem_type=rule)",
+      "budgetKeys": [
+        "inject.rules_per_source"
+      ],
+      "trimRank": 5,
+      "declared": true
+    },
+    {
+      "name": "attention",
+      "kind": "section",
+      "order": 5,
+      "source": "build_attention_block(code_index + memory_access_log)",
+      "budgetKeys": [],
+      "trimRank": 7,
+      "declared": true
+    },
+    {
+      "name": "lessons",
+      "kind": "section",
+      "order": 6,
+      "source": "build_lesson_block(code_index mem_type=lesson)",
+      "budgetKeys": [],
+      "trimRank": 6,
+      "declared": true
+    },
+    {
+      "name": "push",
+      "kind": "section",
+      "order": 7,
+      "source": "build_push_block(push_log/links/memory_access_log)",
+      "budgetKeys": [],
+      "trimRank": 9,
+      "declared": true
+    },
+    {
+      "name": "index",
+      "kind": "section",
+      "order": 8,
+      "source": "code_registry JOIN code_index + decay.*(config) + 操作指引常量",
+      "budgetKeys": [],
+      "trimRank": 8,
+      "declared": true
+    }
+  ],
+  "pushClasses": [
+    {
+      "kind": "rule",
+      "source": "code_index(未闭合) + _open_loop_rows",
+      "impl": "ts"
+    },
+    {
+      "kind": "association",
+      "source": "links + code_index(同项目)",
+      "impl": "ts"
+    },
+    {
+      "kind": "serendipity",
+      "source": "links + code_index(跨项目)",
+      "impl": "ts"
+    },
+    {
+      "kind": "situational",
+      "source": "memory_access_log(10 分钟) + board_seen",
+      "impl": "ts"
+    },
+    {
+      "kind": "activity",
+      "source": "tool_activity + presence(声明面)",
+      "impl": "ts"
+    },
+    {
+      "kind": "kb",
+      "source": "kb_vault + 文件系统检索（fish_kb._kb_search_multi）",
+      "impl": "python"
+    }
+  ]
+}

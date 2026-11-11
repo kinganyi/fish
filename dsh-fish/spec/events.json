@@ -1,0 +1,518 @@
+{
+  "specVersion": "v0",
+  "source": {
+    "files": [
+      "p0/fish.py",
+      "p0/mcp_server.py"
+    ],
+    "method": "静态解析 append_event(...) 调用点（含 _EVENT_BY_PROJECT_STATUS 展开）+ 库内 SELECT DISTINCT type 交叉核对",
+    "observedTypeCount": 22,
+    "observedTypes": [
+      "citizen.registered",
+      "citizen.renamed",
+      "citizen.retired",
+      "code.renamed.batch",
+      "config.changed",
+      "maintenance.pruned",
+      "memory.accessed",
+      "memory.archived",
+      "memory.recorded",
+      "memory.retired",
+      "memory.superseded",
+      "name.alias_linked",
+      "project.added",
+      "project.closed",
+      "project.opened",
+      "project.renamed",
+      "project.reopened",
+      "project.retired",
+      "session.closed",
+      "session.opened",
+      "workspace.mapped",
+      "workspace.unmapped"
+    ],
+    "python": "3.11.9"
+  },
+  "declaredTypeCount": 29,
+  "types": [
+    {
+      "type": "citizen.archived",
+      "requiredPayload": [
+        "reason",
+        "evidence",
+        "display_name",
+        "kind",
+        "archived_at"
+      ],
+      "payloadKeys": [
+        "reason",
+        "evidence",
+        "display_name",
+        "kind",
+        "archived_at"
+      ],
+      "sourceLines": [
+        "fish.py:5916"
+      ],
+      "observedInDb": false
+    },
+    {
+      "type": "citizen.merged",
+      "requiredPayload": [
+        "src",
+        "dst",
+        "moved"
+      ],
+      "payloadKeys": [
+        "src",
+        "dst",
+        "moved"
+      ],
+      "sourceLines": [
+        "fish.py:8805"
+      ],
+      "observedInDb": false
+    },
+    {
+      "type": "citizen.registered",
+      "requiredPayload": [
+        "display_name",
+        "kind",
+        "role",
+        "host",
+        "host_session_key",
+        "account_id",
+        "via"
+      ],
+      "payloadKeys": [
+        "display_name",
+        "kind",
+        "role",
+        "host",
+        "host_session_key",
+        "account_id",
+        "via"
+      ],
+      "sourceLines": [
+        "fish.py:5030",
+        "fish.py:6742",
+        "mcp_server.py:1245"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "citizen.renamed",
+      "requiredPayload": [
+        "from",
+        "to",
+        "actor",
+        "reason"
+      ],
+      "payloadKeys": [
+        "from",
+        "to",
+        "actor",
+        "reason"
+      ],
+      "sourceLines": [
+        "fish.py:4416"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "citizen.retired",
+      "requiredPayload": [
+        "display_name",
+        "kind",
+        "reason",
+        "migrated_to",
+        "memories"
+      ],
+      "payloadKeys": [
+        "display_name",
+        "kind",
+        "reason",
+        "migrated_to",
+        "memories"
+      ],
+      "sourceLines": [
+        "fish.py:8884"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "code.renamed.batch",
+      "requiredPayload": [],
+      "payloadKeys": [],
+      "sourceLines": [
+        "p0/_audit（由 gov_*/merge_cdql.py 以裸 INSERT 写入，无 append_event 调用点）:0"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "config.changed",
+      "requiredPayload": [
+        "key",
+        "old_value",
+        "new_value"
+      ],
+      "payloadKeys": [
+        "key",
+        "old_value",
+        "new_value"
+      ],
+      "sourceLines": [
+        "fish.py:1736",
+        "fish.py:4150",
+        "fish.py:6059"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "maintenance.pruned",
+      "requiredPayload": [],
+      "payloadKeys": [],
+      "sourceLines": [
+        "p0/_audit（由 gov_*/merge_cdql.py 以裸 INSERT 写入，无 append_event 调用点）:0"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "memory.accessed",
+      "requiredPayload": [
+        "codes",
+        "source",
+        "counted"
+      ],
+      "payloadKeys": [
+        "codes",
+        "source",
+        "counted"
+      ],
+      "sourceLines": [
+        "fish.py:2310"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "memory.archived",
+      "requiredPayload": [
+        "code",
+        "from",
+        "to",
+        "reason",
+        "status"
+      ],
+      "payloadKeys": [
+        "code",
+        "from",
+        "to",
+        "reason",
+        "status"
+      ],
+      "sourceLines": [
+        "fish.py:1877"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "memory.dormant",
+      "requiredPayload": [
+        "code",
+        "reason"
+      ],
+      "payloadKeys": [
+        "code",
+        "reason"
+      ],
+      "sourceLines": [
+        "fish.py:6673"
+      ],
+      "observedInDb": false
+    },
+    {
+      "type": "memory.owner_fixed",
+      "requiredPayload": [
+        "code",
+        "old_owner",
+        "new_owner",
+        "reason"
+      ],
+      "payloadKeys": [
+        "code",
+        "old_owner",
+        "new_owner",
+        "reason"
+      ],
+      "sourceLines": [
+        "fish.py:8643"
+      ],
+      "observedInDb": false
+    },
+    {
+      "type": "memory.recorded",
+      "requiredPayload": [
+        "code",
+        "title",
+        "body_ref",
+        "mem_type",
+        "tags",
+        "visibility",
+        "occurred_at",
+        "session_actor",
+        "attachments"
+      ],
+      "payloadKeys": [
+        "code",
+        "title",
+        "body_ref",
+        "mem_type",
+        "tags",
+        "visibility",
+        "occurred_at",
+        "session_actor",
+        "attachments"
+      ],
+      "sourceLines": [
+        "fish.py:2187"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "memory.relocated",
+      "requiredPayload": [
+        "code",
+        "from",
+        "to"
+      ],
+      "payloadKeys": [
+        "code",
+        "from",
+        "to"
+      ],
+      "sourceLines": [
+        "fish.py:2024"
+      ],
+      "observedInDb": false
+    },
+    {
+      "type": "memory.retired",
+      "requiredPayload": [
+        "code",
+        "status",
+        "reason"
+      ],
+      "payloadKeys": [
+        "code",
+        "status",
+        "reason"
+      ],
+      "sourceLines": [
+        "fish.py:4083"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "memory.superseded",
+      "requiredPayload": [
+        "old",
+        "new",
+        "reason"
+      ],
+      "payloadKeys": [
+        "old",
+        "new",
+        "reason"
+      ],
+      "sourceLines": [
+        "fish.py:2270"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "name.alias_linked",
+      "requiredPayload": [
+        "from",
+        "to",
+        "reason"
+      ],
+      "payloadKeys": [
+        "from",
+        "to",
+        "reason"
+      ],
+      "sourceLines": [
+        "fish.py:2908"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "name.alias_unlinked",
+      "requiredPayload": [
+        "from",
+        "reason"
+      ],
+      "payloadKeys": [
+        "from",
+        "reason"
+      ],
+      "sourceLines": [
+        "fish.py:2931"
+      ],
+      "observedInDb": false
+    },
+    {
+      "type": "project.added",
+      "requiredPayload": [
+        "prefix",
+        "namespace"
+      ],
+      "payloadKeys": [
+        "prefix",
+        "namespace"
+      ],
+      "sourceLines": [
+        "mcp_server.py:986"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "project.closed",
+      "requiredPayload": [],
+      "payloadKeys": [],
+      "sourceLines": [
+        "p0/_audit（由 gov_*/merge_cdql.py 以裸 INSERT 写入，无 append_event 调用点）:0"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "project.opened",
+      "requiredPayload": [
+        "prefix",
+        "name"
+      ],
+      "payloadKeys": [
+        "prefix",
+        "name"
+      ],
+      "sourceLines": [
+        "fish.py:6106"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "project.renamed",
+      "requiredPayload": [],
+      "payloadKeys": [],
+      "sourceLines": [
+        "p0/_audit（由 gov_*/merge_cdql.py 以裸 INSERT 写入，无 append_event 调用点）:0"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "project.reopened",
+      "requiredPayload": [],
+      "payloadKeys": [],
+      "sourceLines": [
+        "p0/_audit（由 gov_*/merge_cdql.py 以裸 INSERT 写入，无 append_event 调用点）:0"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "project.retired",
+      "requiredPayload": [],
+      "payloadKeys": [],
+      "sourceLines": [
+        "p0/_audit（由 gov_*/merge_cdql.py 以裸 INSERT 写入，无 append_event 调用点）:0"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "session.agent_issued",
+      "requiredPayload": [
+        "parent_token_hash",
+        "session_key",
+        "role",
+        "evidence",
+        "channel",
+        "token_hash",
+        "expires_at"
+      ],
+      "payloadKeys": [
+        "parent_token_hash",
+        "session_key",
+        "role",
+        "evidence",
+        "channel",
+        "token_hash",
+        "expires_at"
+      ],
+      "sourceLines": [
+        "fish.py:5729"
+      ],
+      "observedInDb": false
+    },
+    {
+      "type": "session.closed",
+      "requiredPayload": [
+        "session_key",
+        "revoked",
+        "children_revoked",
+        "stints_closed",
+        "reason",
+        "already_revoked"
+      ],
+      "payloadKeys": [
+        "session_key",
+        "revoked",
+        "children_revoked",
+        "stints_closed",
+        "reason",
+        "already_revoked"
+      ],
+      "sourceLines": [
+        "fish.py:5777"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "session.opened",
+      "requiredPayload": [],
+      "payloadKeys": [],
+      "sourceLines": [
+        "fish.py:5645"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "workspace.mapped",
+      "requiredPayload": [
+        "project",
+        "note",
+        "created"
+      ],
+      "payloadKeys": [
+        "project",
+        "note",
+        "created"
+      ],
+      "sourceLines": [
+        "fish.py:5243"
+      ],
+      "observedInDb": true
+    },
+    {
+      "type": "workspace.unmapped",
+      "requiredPayload": [
+        "removed"
+      ],
+      "payloadKeys": [
+        "removed"
+      ],
+      "sourceLines": [
+        "fish.py:5267"
+      ],
+      "observedInDb": true
+    }
+  ]
+}

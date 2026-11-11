@@ -1,0 +1,125 @@
+%% dsh-fish 面板架构 · 类图（与 docs\面板架构设计.md §8 同源）
+%% 说明：实线 = 编译期依赖；虚线 = 运行期调用；*-- = 组合。
+classDiagram
+  class PanelRoute {
+    <<const module>> src/shared/panel-route.ts
+    +PANEL_ID = 'fish-scene'
+    +API_PREFIX = '/fish/api'
+    +STATIC_PREFIX = '/fish/panel'
+    +ROUTE_SCENE = '/fish/api/scene'
+    +ROUTE_ACTIVITY = '/fish/api/activity'
+    +ROUTE_HEALTH = '/fish/api/health'
+    +ROUTE_UPSTREAM = '/fish/api/upstream'
+    +PANEL_HTML = '/fish/panel/fish-ui.html'
+    +panelSrc(seed: number) string
+  }
+
+  class UpstreamClient {
+    +constructor(opt: UpstreamOptions)
+    +scene(minutes: number) Promise~UpstreamOk~
+    +activity(since: number) Promise~UpstreamOk~
+    +health() Promise~UpstreamOk~
+    +probe() Promise~UpstreamProbe~
+    -fetchJson(path: string, timeoutMs: number)
+    -assertSchema(body: unknown)
+  }
+
+  class UpstreamOptions {
+    +baseUrl: string
+    +timeoutMs: number
+    +expectSchema: 'fish-ui/1'
+    +logger: FishLogger
+  }
+
+  class UpstreamOk {
+    +status: 200
+    +body: string
+    +bytes: number
+    +tookMs: number
+    +cached: boolean
+  }
+
+  class PanelError {
+    +ok: false
+    +code: PanelErrorCode
+    +hint: string
+  }
+
+  class PanelRoutes {
+    +install(ctx: Context, deps: PanelDeps) () => void
+    -gate(req, res) boolean
+    -sendJson(res, status, payload)
+    -sendMethodNotAllowed(res)
+  }
+
+  class PanelStatic {
+    +install(ctx: Context, root: string) () => void
+    -resolveInsideRoot(pathname: string) string
+    -mimeOf(ext: string) string
+  }
+
+  class FishConfig {
+    +mode: string
+    +fishHome: string
+    +dbPath: string
+    +commandEnabled: boolean
+    +logLevel: string
+    +panelEnabled: boolean
+    +readPortUrl: string
+    +panelSceneCacheMs: number
+  }
+
+  class PanelFrame {
+    <<client>> src/client/panel-frame.ts
+    +buildPanelSrc(opt) string
+    +PanelFrame(props) ReactElement
+  }
+
+  class SlotRegistrar {
+    <<client>> src/client/slots.ts
+    +registerAll(ctx, Panel) void
+    +PANEL_ORDER = 96
+    +RAIL_ORDER = 100
+  }
+
+  class ScenePayload {
+    <<fish-ui/1>>
+    +schema: string
+    +asOf: string
+    +db: string
+    +health: HealthReadings
+    +sessions: SessionRow[]
+    +boards: BoardRow[]
+    +collisions: CollisionRow[]
+    +events: EventRow[]
+    +pushes: PushRow[]
+    +activityCursor: number
+    +missing: Record~string,string~
+  }
+
+  class SessionRow {
+    +id: string
+    +citizenId: string
+    +agentId: string
+    +name: string
+    +tag: string
+    +status: 'active'|'dormant'
+    +doing: string
+    +surface: string
+    +boardId: string
+    +lastSeenAt: string
+    +active: boolean
+    +dialogue: unknown[]
+  }
+
+  PanelRoutes ..> PanelRoute : 用常量
+  PanelRoutes ..> UpstreamClient : 调用
+  PanelRoutes ..> PanelError : 失败时返回
+  UpstreamClient ..> UpstreamOptions : 构造
+  UpstreamClient ..> UpstreamOk : 成功时返回
+  UpstreamClient ..> ScenePayload : 校验 schema
+  ScenePayload *-- SessionRow
+  PanelFrame ..> PanelRoute : panelSrc()
+  SlotRegistrar ..> PanelFrame : 注册组件
+  FishConfig ..> PanelRoutes : panelEnabled/readPortUrl/缓存
+  PanelStatic ..> PanelRoute : STATIC_PREFIX

@@ -1,0 +1,285 @@
+{
+  "specVersion": "v0",
+  "rules": {
+    "latin": "[A-Za-z0-9][A-Za-z0-9\\-_.]*",
+    "cjk": "[\\u4e00-\\u9fff]+",
+    "lowercase": true,
+    "tokenOrder": "latin-then-cjk",
+    "cjkRun": {
+      "mode": "overlapping-bigram",
+      "window": 2,
+      "step": 1,
+      "singleCharRun": "as-is"
+    }
+  },
+  "match": {
+    "quoteEveryToken": true,
+    "joiner": " AND ",
+    "emptyResult": null
+  },
+  "vectors": [
+    {
+      "id": "v01",
+      "input": "中文重叠 bigram 切分",
+      "tokens": [
+        "bigram",
+        "中文",
+        "文重",
+        "重叠",
+        "切分"
+      ]
+    },
+    {
+      "id": "v02",
+      "input": "协作约定",
+      "tokens": [
+        "协作",
+        "作约",
+        "约定"
+      ]
+    },
+    {
+      "id": "v03",
+      "input": "记",
+      "tokens": [
+        "记"
+      ]
+    },
+    {
+      "id": "v04",
+      "input": "CR-12",
+      "tokens": [
+        "cr-12"
+      ]
+    },
+    {
+      "id": "v05",
+      "input": "v1.0.0",
+      "tokens": [
+        "v1.0.0"
+      ]
+    },
+    {
+      "id": "v06",
+      "input": "name_alias 表",
+      "tokens": [
+        "name_alias",
+        "表"
+      ]
+    },
+    {
+      "id": "v07",
+      "input": "ANYI-261025-01",
+      "tokens": [
+        "anyi-261025-01"
+      ]
+    },
+    {
+      "id": "v08",
+      "input": "「生活」是默认项目：用户没指定具体项目时的个人生活类对话落这里",
+      "tokens": [
+        "生活",
+        "是默",
+        "默认",
+        "认项",
+        "项目",
+        "用户",
+        "户没",
+        "没指",
+        "指定",
+        "定具",
+        "具体",
+        "体项",
+        "项目",
+        "目时",
+        "时的",
+        "的个",
+        "个人",
+        "人生",
+        "生活",
+        "活类",
+        "类对",
+        "对话",
+        "话落",
+        "落这",
+        "这里"
+      ]
+    },
+    {
+      "id": "v09",
+      "input": "中文 English 混合 2026-10-27T13:37:00Z",
+      "tokens": [
+        "english",
+        "2026-10-27t13",
+        "37",
+        "00z",
+        "中文",
+        "混合"
+      ]
+    },
+    {
+      "id": "v10",
+      "input": "半角，标点。分组！问号？",
+      "tokens": [
+        "半角",
+        "标点",
+        "分组",
+        "问号"
+      ]
+    },
+    {
+      "id": "v11",
+      "input": "ｆｕｌｌｗｉｄｔｈ 全角拉丁不做切分",
+      "tokens": [
+        "全角",
+        "角拉",
+        "拉丁",
+        "丁不",
+        "不做",
+        "做切",
+        "切分"
+      ]
+    },
+    {
+      "id": "v12",
+      "input": "emoji 🐟 与文本",
+      "tokens": [
+        "emoji",
+        "与文",
+        "文本"
+      ]
+    },
+    {
+      "id": "v13",
+      "input": "",
+      "tokens": []
+    },
+    {
+      "id": "v14",
+      "input": "   ",
+      "tokens": []
+    },
+    {
+      "id": "v15",
+      "input": "pure-latin-tokens-here",
+      "tokens": [
+        "pure-latin-tokens-here"
+      ]
+    },
+    {
+      "id": "v16",
+      "input": "abc123def",
+      "tokens": [
+        "abc123def"
+      ]
+    },
+    {
+      "id": "v17",
+      "input": "一件事",
+      "tokens": [
+        "一件",
+        "件事"
+      ]
+    },
+    {
+      "id": "v18",
+      "input": "两件事",
+      "tokens": [
+        "两件",
+        "件事"
+      ]
+    },
+    {
+      "id": "v19",
+      "input": "三件事呢",
+      "tokens": [
+        "三件",
+        "件事",
+        "事呢"
+      ]
+    },
+    {
+      "id": "v20",
+      "input": "重叠滑窗必须逐位对齐",
+      "tokens": [
+        "重叠",
+        "叠滑",
+        "滑窗",
+        "窗必",
+        "必须",
+        "须逐",
+        "逐位",
+        "位对",
+        "对齐"
+      ]
+    },
+    {
+      "id": "v21",
+      "input": "记忆编码由系统分配",
+      "tokens": [
+        "记忆",
+        "忆编",
+        "编码",
+        "码由",
+        "由系",
+        "系统",
+        "统分",
+        "分配"
+      ]
+    },
+    {
+      "id": "v22",
+      "input": "kb:安逸知识库:10-漫剧/方法论/即梦图片4.5模型 提示词手册.md",
+      "tokens": [
+        "kb",
+        "10-",
+        "4.5",
+        "md",
+        "安逸",
+        "逸知",
+        "知识",
+        "识库",
+        "漫剧",
+        "方法",
+        "法论",
+        "即梦",
+        "梦图",
+        "图片",
+        "模型",
+        "提示",
+        "示词",
+        "词手",
+        "手册"
+      ]
+    },
+    {
+      "id": "v23",
+      "input": "EVAL-261025-04 与 EVAL-261026-06",
+      "tokens": [
+        "eval-261025-04",
+        "eval-261026-06",
+        "与"
+      ]
+    },
+    {
+      "id": "v24",
+      "input": "tiktoken cl100k_base 中文≈1.2 token/字",
+      "tokens": [
+        "tiktoken",
+        "cl100k_base",
+        "1.2",
+        "token",
+        "中文",
+        "字"
+      ]
+    }
+  ],
+  "source": {
+    "files": [
+      "p0/fish.py"
+    ],
+    "function": "index_tokens / fts_text / fts_match_expr（ADR-005）",
+    "oracle": "python 3.11.9 现场计算（I:\\app\\DSH-Home\\workspace\\learn\\大肥鱼生命系统\\p0\\fish.py）",
+    "note": "向量期望值由 Python 冻结；TS 侧只许被验证，不许自证"
+  }
+}

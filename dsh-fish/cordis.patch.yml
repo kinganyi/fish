@@ -1,0 +1,44 @@
+# dsh-fish · bundle patch
+#
+# ── 2026-10-28 状态变更：disabled 由 true 改为 false ──────────────────
+#
+# **为什么现在可以启用**（这是本次改动唯一需要的论证）：
+# 影子期那三条前置条件，防的是"**接管模型可见能力**"造成的双份注入 / 双写同库：
+#   ① 不注册模型可见工具  —— 仍然成立（MODEL_SURFACE.toolRegistrations === 0，check-spec 把这条钉死）
+#   ② 不向模型上下文注入  —— 仍然成立（promptInjections === 0）
+#   ③ 不写 fish 库        —— 仍然成立（只 openReadOnly，且 startup 时真试一次写来证明拒绝生效）
+#
+# 本期唯一新增的能力是**一个人类可见的 UI 面板**（`conversation.view` 槽位里的 canvas）。
+# 它不进模型上下文、不碰数据库、不注册工具，因此**不触发**下面那三条前置条件。
+# 换句话说：启用后 fish 的 MCP + hooks 与本插件并存是安全的——
+# 因为它们服务的对象不同（前者给模型，后者给人）。
+#
+# **什么时候必须回来重新评估**：一旦本插件开始注册模型工具或向上下文注入内容
+# （即换心期真正开始接管），就必须先满足下面三条，否则会出现双份语义与双写。
+#
+# ── 下面三条是"接管模型面"时的前置条件（本期不需要）──────────────
+#   1. `fish` 的 MCP server 已从 profile 摘除（否则模型会看到两套同名工具语义）；
+#   2. `hooks.json` 的 4 条 fish hook 已清空（否则注入两份）；
+#   3. `spec/contract.json` 的 contractVersion 与插件常量同代（否则启动即抛错）。
+#
+# ⚠️ **注意：改这个文件本身不会让面板出现。**
+# ── 装进 DSH 的三个动作（2026-10-28 已完成）──────────────────────
+#   1. `profiles/node_modules/dsh-fish` → junction 指向 `I:\app\fish-public\dsh-fish`
+#      （手工 mklink /J，**没有**跑 pnpm install —— 那会要求删除整个 modules 目录，
+#      而里面是 326 个宿主包锚点，删了等于重演 2026-09-30 那次事故）
+#   2. `profiles/desktop/package.json` 的 `dsh.profile.bundles` 末尾加 `dsh-fish`
+#      （备份在 `package.json.bak-dshfish-20261028`）
+#   3. 本文件 `disabled: false` + 显式 `fishHome`
+#
+# 回滚 = 删 junction + 从 bundles 里去掉一行 + 本文件改回 `disabled: true`。
+- insert:
+    - id: dsh-fish
+      name: dsh-fish
+      disabled: false
+      config:
+        mode: shadow
+        # ⚠️ 必须显式给 fishHome：默认值是 `<包目录>/../p0`，也就是
+        # `I:\app\fish-public\p0`——那是 GitHub 导出副本，**没有 data/ 目录**，
+        # 启动门禁会因为找不到主库而 fail closed（拒绝启用，宿主侧看得到报错）。
+        # 这里指向真正有库的生产工作区。换机器 / 换库时改这一行即可。
+        fishHome: 'I:\app\DSH-Home\workspace\learn\大肥鱼生命系统\p0'

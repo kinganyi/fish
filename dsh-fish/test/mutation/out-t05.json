@@ -1,0 +1,54 @@
+{
+  "results": [
+    {
+      "id": "M01",
+      "title": "知识库强制忽略规则去掉 `90-模板/**`（kb 对拍必红）",
+      "ok": true,
+      "redDiff": [
+        "kb-tree-root",
+        "kb-tree-depth1",
+        "kb-tree-subdir",
+        "kb-search-hit",
+        "kb-search-limit",
+        "kb-search-none",
+        "kb-search-sensitive-skip",
+        "kb-stats",
+        "kb-tree-ignored"
+      ],
+      "redSummary": "# summary: MATCH=108 DIFF=9",
+      "hit": true,
+      "greenDiff": [],
+      "greenSummary": "# summary: MATCH=117",
+      "restored": true
+    },
+    {
+      "id": "M02",
+      "title": "别名展开最多 1 跳（ALIAS_MAX_HOPS 8 → 1；项目/别名对拍必红）",
+      "ok": true,
+      "redDiff": [
+        "alias-list"
+      ],
+      "redSummary": "# summary: MATCH=116 DIFF=1",
+      "hit": true,
+      "greenDiff": [],
+      "greenSummary": "# summary: MATCH=117",
+      "restored": true
+    },
+    {
+      "id": "M03",
+      "title": "语料读回时丢掉正文的一截（\"段拼接丢一段\"；语料对拍必红）",
+      "ok": true,
+      "redDiff": [
+        "corpus-read-seq",
+        "corpus-read-conv-redacted",
+        "corpus-read-missing-source"
+      ],
+      "redSummary": "# summary: MATCH=114 DIFF=3",
+      "hit": true,
+      "greenDiff": [],
+      "greenSummary": "# summary: MATCH=117",
+      "restored": true
+    }
+  ],
+  "finalGreen": true
+}

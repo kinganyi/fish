@@ -1,0 +1,12 @@
+# pnpm 11 的构建脚本白名单（`allowBuilds`）。
+# 为什么需要它：pnpm 默认**不跑**依赖的 install 脚本（供应链安全），而 tsdown 依赖
+# esbuild 的平台二进制——不放行它会得到"找不到 esbuild binary"。
+# 其余五个是 @deepseek-ai/dsh 的可选原生依赖（pty / koffi / protobuf / subprocess），
+# 本插件一条都用不到，显式 false 表示"知道它们存在，且决定不跑"。
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': false
+  '@google/genai': false
+  esbuild: true
+  koffi: false
+  node-pty: false
+  protobufjs: false

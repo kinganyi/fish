@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "I:\\app\\fish-public\\.archify\\architecture-fish-20261026-1908\\candidate.json",
+    "sha256": "ae39190c6726c1aaaaeec6e10dd7a4a1ea98bda9d701506d7922ee3bc2881a63",
+    "bytes": 3549
+  },
+  "artifact": {
+    "path": "I:\\app\\fish-public\\docs\\diagrams\\fish-architecture.html",
+    "sha256": "05488063a04e92b203afc73856884c7170fd1d450264d33e15eb8e00748bf85c",
+    "bytes": 845520
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "I:\\app\\fish-public\\docs\\diagrams\\fish-architecture.finalize.json",
+    "summaryReceipt": "I:\\app\\fish-public\\docs\\diagrams\\fish-architecture.finalize-summary.json",
+    "browserCheckReceipt": "I:\\app\\fish-public\\docs\\diagrams\\fish-architecture.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-26T04:08:38.924Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 11782,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  }
+}

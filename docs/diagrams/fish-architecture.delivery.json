@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "30e3e72d-f495-4280-9696-41666a920284",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "I:\\app\\fish-public\\.archify\\architecture-fish-20261026-1908\\candidate.json",
+  "output": "I:\\app\\fish-public\\docs\\diagrams\\fish-architecture.html",
+  "specification": {
+    "sha256": "ae39190c6726c1aaaaeec6e10dd7a4a1ea98bda9d701506d7922ee3bc2881a63",
+    "bytes": 3549
+  },
+  "artifact": {
+    "sha256": "05488063a04e92b203afc73856884c7170fd1d450264d33e15eb8e00748bf85c",
+    "bytes": 845520
+  }
+}

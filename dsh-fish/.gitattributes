@@ -1,0 +1,6 @@
+# dsh-fish 换行纪律：所有文本文件入库为 LF。
+# 原因：spec 指纹、切词向量对拍、契约摘要都基于字节；CRLF 会让同一份内容在
+# 不同机器上产生不同指纹，导致「看起来一样的 spec，校验却红」。
+* text=auto eol=lf
+*.sqlite binary
+*.png binary

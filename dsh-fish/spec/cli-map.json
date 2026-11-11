@@ -1,0 +1,1263 @@
+{
+  "specVersion": "v0",
+  "source": {
+    "files": [
+      "p0/fish.py"
+    ],
+    "method": "反射 argparse 对象树（捕获根 parser 后递归 _SubParsersAction.choices），不解析 --help 文本",
+    "fishPy": "I:\\app\\DSH-Home\\workspace\\learn\\大肥鱼生命系统\\p0\\fish.py",
+    "fishPySha256_12": "135791ce6f9d",
+    "python": "3.11.9",
+    "rootCommands": [
+      "activity",
+      "alias",
+      "archive",
+      "board",
+      "citizen-add",
+      "citizen-list",
+      "citizen-merge",
+      "citizen-retire",
+      "config",
+      "corpus",
+      "distill",
+      "events",
+      "forgetting",
+      "healthcheck",
+      "init",
+      "inject",
+      "kb",
+      "layout",
+      "list",
+      "neighbors",
+      "owner",
+      "owner-fix",
+      "project",
+      "project-add",
+      "prompt-push",
+      "push",
+      "rebuild",
+      "recall",
+      "reindex",
+      "remember",
+      "report",
+      "session",
+      "supersede",
+      "ui",
+      "whoami",
+      "withdraw",
+      "workspace"
+    ]
+  },
+  "counts": {
+    "level1": 37,
+    "leaves": 80,
+    "groups": 13,
+    "maxDepth": 3,
+    "level1AsCommands": 37
+  },
+  "implCounts": {
+    "ts": 15,
+    "proxy-readonly": 8,
+    "unsupported-shadow": 38,
+    "python-only": 19
+  },
+  "kindCounts": {
+    "read": 27,
+    "write": 41,
+    "ops": 12
+  },
+  "entries": [
+    {
+      "path": "activity prune",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "删除超过保留期的 tool_activity 行（DELETE，不可逆）",
+      "evidence": null,
+      "replacement": {
+        "cli": "activity prune"
+      },
+      "help": "按保留期清理（缺省取 activity.retention_days）",
+      "applyFlag": false
+    },
+    {
+      "path": "activity stats",
+      "level": 2,
+      "kind": "read",
+      "impl": "python-only",
+      "reason": "读数依赖 `data/_audit/hooks/pretool-asks.jsonl`（快照副本里没有）→ 转发会漏报撞车询问条数",
+      "evidence": null,
+      "replacement": {
+        "cli": "activity stats",
+        "note": "终端里跑（读的是本机审计文件）"
+      },
+      "help": "写动作统计（行数/会话/高频目录/按小时）",
+      "applyFlag": false
+    },
+    {
+      "path": "alias link",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "建立名字别名（改检索语义；MCP 面刻意不给这条权限）",
+      "evidence": null,
+      "replacement": {
+        "cli": "alias link"
+      },
+      "help": "建立别名：from 就是 to（要求 to 真实存在且不成环）",
+      "applyFlag": false
+    },
+    {
+      "path": "alias list",
+      "level": 2,
+      "kind": "read",
+      "impl": "ts",
+      "reason": "T05 已复刻 `cmd_alias` 的 list 分支：原始别名行 + 按 canonical 折叠的分组（单向展开，最多 8 跳）",
+      "evidence": "p0/fish.py:6722-6738（cmd_alias 的 else 分支：SELECT + resolve_name）",
+      "replacement": null,
+      "help": "列出全部别名",
+      "applyFlag": false
+    },
+    {
+      "path": "alias unlink",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "撤销别名（幂等写）",
+      "evidence": null,
+      "replacement": {
+        "cli": "alias unlink"
+      },
+      "help": "撤销别名（幂等：不存在也算成功）",
+      "applyFlag": false
+    },
+    {
+      "path": "archive",
+      "level": 1,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "归档 = 搬行（INSERT 冷表 + DELETE 热表 + 写文件），默认 dry-run、`--apply` 才落库",
+      "evidence": null,
+      "replacement": {
+        "cli": "archive",
+        "note": "终端里先看计划，确认后再 --apply"
+      },
+      "help": "归档：把 superseded/withdrawn 的正文移进 archive/<年>/（不动 active）",
+      "applyFlag": true
+    },
+    {
+      "path": "board checkin",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "签到（upsert 自己的 presence 行 + events），影子期不写库",
+      "evidence": null,
+      "replacement": {
+        "cli": "board checkin",
+        "mcpTool": "board"
+      },
+      "help": "签到：登记你在做什么",
+      "applyFlag": false
+    },
+    {
+      "path": "board close",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "关闭一块板（改 boards.status + events）",
+      "evidence": null,
+      "replacement": {
+        "cli": "board close"
+      },
+      "help": "归档看板（closed 后不再收签到，但不删）",
+      "applyFlag": false
+    },
+    {
+      "path": "board post",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "往看板写一条动态（board_posts + events）",
+      "evidence": null,
+      "replacement": {
+        "cli": "board post",
+        "mcpTool": "board"
+      },
+      "help": "往今日动态加一条（≤200 字）",
+      "applyFlag": false
+    },
+    {
+      "path": "board render",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "把看板渲染成 fish-home 里的 Markdown（写文件 + 可能归一 boards.path）",
+      "evidence": null,
+      "replacement": {
+        "cli": "board render"
+      },
+      "help": "重新渲染看板文件（可自愈）",
+      "applyFlag": false
+    },
+    {
+      "path": "board show",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "读板前会 `board_ensure`（取或**建**一块板，会 INSERT boards 行），所以不是纯读",
+      "evidence": null,
+      "replacement": {
+        "cli": "board show",
+        "mcpTool": "board",
+        "note": "要只读看板内容请用 `/fish shadow inject` 的看板段"
+      },
+      "help": "读看板（不渲染）",
+      "applyFlag": false
+    },
+    {
+      "path": "board sweep",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "清理过期看板（DELETE + events）",
+      "evidence": null,
+      "replacement": {
+        "cli": "board sweep"
+      },
+      "help": "把 N 天前的 open 看板自动归档（只改状态，不删）",
+      "applyFlag": false
+    },
+    {
+      "path": "citizen-add",
+      "level": 1,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "登记一个公民（citizens + events）",
+      "evidence": null,
+      "replacement": {
+        "cli": "citizen-add"
+      },
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "citizen-list",
+      "level": 1,
+      "kind": "read",
+      "impl": "proxy-readonly",
+      "reason": "只列公民（无写语句），TS 未做这段渲染",
+      "evidence": "p0/fish.py:9992-10016（cmd_citizen_list：SELECT + 打印）",
+      "replacement": {
+        "cli": "citizen-list",
+        "note": "Python 侧纯读，可在快照副本上转发"
+      },
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "citizen-merge",
+      "level": 1,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "合并两个公民（默认 dry-run 打印计划；`--apply` 会把 owner/session 归属迁到 dst 并写 events）——影子期不写，也不替用户决定\"哪两个身份其实是同一个\"",
+      "evidence": "p0/fish.py:8501-8540（citizen_merge：apply=False 只统计）+ 8543-8550（cmd_citizen_merge）",
+      "replacement": {
+        "cli": "citizen-merge",
+        "note": "终端里先跑 dry-run 看计划，确认后再 --apply"
+      },
+      "help": "把 src 的归属合并到 dst（默认 dry-run，加 --apply 才写）",
+      "applyFlag": true
+    },
+    {
+      "path": "citizen-retire",
+      "level": 1,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "退役公民（要求显式 --migrate-to/--force，避免静默丢归属）",
+      "evidence": null,
+      "replacement": {
+        "cli": "citizen-retire"
+      },
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "config",
+      "level": 1,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "同一路径两种形态：无参列出（读）/ 带参 `set_config` 写库（p0/fish.py:10589）",
+      "evidence": null,
+      "replacement": {
+        "cli": "config",
+        "note": "终端里跑 `fish config`（只读列表）或 `fish config <key> <value>`（写）"
+      },
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "corpus doctor",
+      "level": 2,
+      "kind": "ops",
+      "impl": "python-only",
+      "reason": "语料库体检（可能修索引），运维动作只在终端跑",
+      "evidence": null,
+      "replacement": {
+        "cli": "corpus doctor"
+      },
+      "help": "语料体检：全库凭证形态必须 0",
+      "applyFlag": false
+    },
+    {
+      "path": "corpus forget",
+      "level": 2,
+      "kind": "write",
+      "impl": "python-only",
+      "reason": "按来源遗忘语料（DELETE，不可逆），必须在终端人工确认后跑",
+      "evidence": null,
+      "replacement": {
+        "cli": "corpus forget"
+      },
+      "help": "删除：session:<sid> / host:<h> / log:…",
+      "applyFlag": false
+    },
+    {
+      "path": "corpus ingest",
+      "level": 2,
+      "kind": "ops",
+      "impl": "python-only",
+      "reason": "入库是秒级以上长任务（独占 + 游标 + 脱敏），进程内跑会卡住宿主事件循环",
+      "evidence": null,
+      "replacement": {
+        "cli": "corpus ingest",
+        "note": "终端里跑（T03.5 已定档 audit/幂等，但执行面仍在 Python）"
+      },
+      "help": "增量采集两个宿主到独立库 corpus.sqlite",
+      "applyFlag": false
+    },
+    {
+      "path": "corpus read",
+      "level": 2,
+      "kind": "read",
+      "impl": "ts",
+      "reason": "T05 已复刻 `fish_corpus.read`（门牌三档 + 段级脱敏 + 源文件缺失声明）。影子期不写访问审计、**也不回填** `push_log.reaction`（那是主库写）",
+      "evidence": "p0/fish_corpus.py:990-1043（read：投影正文 + source 状态；MCP 的采纳回填在 mcp_server.py:2056-2062）",
+      "replacement": null,
+      "help": "按门牌读回原话（conv:/log: 皆可）",
+      "applyFlag": false
+    },
+    {
+      "path": "corpus rebuild",
+      "level": 2,
+      "kind": "ops",
+      "impl": "python-only",
+      "reason": "重建语料库（`--apply` 才落库，秒级长任务 + 独占）",
+      "evidence": null,
+      "replacement": {
+        "cli": "corpus rebuild"
+      },
+      "help": "全量重放（跳过 tombstone）；默认只报计划",
+      "applyFlag": true
+    },
+    {
+      "path": "corpus retag",
+      "level": 2,
+      "kind": "write",
+      "impl": "python-only",
+      "reason": "改语料标签（写 corpus.sqlite），长事务只能在终端跑",
+      "evidence": null,
+      "replacement": {
+        "cli": "corpus retag"
+      },
+      "help": "按库里已有 cwd 重算项目归属（补映射后用）",
+      "applyFlag": false
+    },
+    {
+      "path": "corpus search",
+      "level": 2,
+      "kind": "read",
+      "impl": "ts",
+      "reason": "T05 已复刻 `fish_corpus.search`（MATCH + 过滤下推、0.6/0.2/0.2 排序、出口二次脱敏）。影子期不写 `corpus_access_log`（生产每次检索都追一条）",
+      "evidence": "p0/fish_corpus.py:892-967（search：只读连接；`_log_access` 是唯一写点，影子期不写）",
+      "replacement": null,
+      "help": "检索原话（门牌/摘录/分数/为什么）",
+      "applyFlag": false
+    },
+    {
+      "path": "corpus stats",
+      "level": 2,
+      "kind": "read",
+      "impl": "ts",
+      "reason": "T05 已复刻 `fish_corpus.stats`（段/会话/by_host/by_project/degraded/orphan/台账四档/滞后/体积）。读的是独立库 `corpus.sqlite`（只读打开），不是主库快照",
+      "evidence": "p0/fish_corpus.py:575-703（stats：库不存在返回 db_missing 不建库；readonly=True 打开）",
+      "replacement": null,
+      "help": "采集读数：段/会话/degraded/孤儿/滞后",
+      "applyFlag": false
+    },
+    {
+      "path": "distill",
+      "level": 1,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "`--write` 会落文件（同 tag 的 episode 聚成建议），影子期不产出文件",
+      "evidence": null,
+      "replacement": {
+        "cli": "distill",
+        "note": "终端里跑演练形态（不加 --write 就不写文件）"
+      },
+      "help": "提炼建议：同 tag 的 episode 聚成建议（默认演练；--write 落文件，不入库）",
+      "applyFlag": false
+    },
+    {
+      "path": "events",
+      "level": 1,
+      "kind": "read",
+      "impl": "proxy-readonly",
+      "reason": "只读 events 表最近 N 行；TS 未做这段渲染（事件只增不改，转发不改变语义）",
+      "evidence": "p0/fish.py:11418-11425（cmd_events：一条 SELECT … ORDER BY seq DESC LIMIT ?）",
+      "replacement": {
+        "cli": "events",
+        "note": "Python 侧纯读，可在快照副本上转发"
+      },
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "forgetting",
+      "level": 1,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "`--apply` 会把 dormant 落库并写事件（默认只打印计划）",
+      "evidence": null,
+      "replacement": {
+        "cli": "forgetting",
+        "note": "终端里先看计划，确认后再 --apply"
+      },
+      "help": "",
+      "applyFlag": true
+    },
+    {
+      "path": "healthcheck",
+      "level": 1,
+      "kind": "read",
+      "impl": "ts",
+      "reason": "T02 已复刻 `healthcheckReadings` / `renderHealthcheck`（七项读数）",
+      "evidence": null,
+      "replacement": null,
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "init",
+      "level": 1,
+      "kind": "ops",
+      "impl": "python-only",
+      "reason": "首次建库/建 home（SCHEMA + 目录），进程外一次性动作；插件内跑它等于\"插件替你建库\"",
+      "evidence": null,
+      "replacement": {
+        "cli": "init",
+        "note": "终端里跑（影子期插件不建库）"
+      },
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "inject",
+      "level": 1,
+      "kind": "read",
+      "impl": "ts",
+      "reason": "T03 已复刻 `buildInjectionPack` / `renderInject`（L0 + 8 段 + 预算裁剪）",
+      "evidence": null,
+      "replacement": null,
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "kb backup prune",
+      "level": 3,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "按保留策略删知识库备份（删除不可逆）",
+      "evidence": null,
+      "replacement": {
+        "cli": "kb backup prune"
+      },
+      "help": "删掉 meta.ts 早于 N 天的备份目录（显式命令）",
+      "applyFlag": false
+    },
+    {
+      "path": "kb doctor",
+      "level": 2,
+      "kind": "ops",
+      "impl": "python-only",
+      "reason": "知识库体检（可能修索引/登记），运维动作只能在终端人工跑",
+      "evidence": null,
+      "replacement": {
+        "cli": "kb doctor"
+      },
+      "help": "逐 vault 体检 + obsidian_cli 探测 + 备份体积读数",
+      "applyFlag": false
+    },
+    {
+      "path": "kb open",
+      "level": 2,
+      "kind": "read",
+      "impl": "ts",
+      "reason": "T05 已复刻 `kb_open`（8 类路径拒绝 + 敏感名单二次授权 + 编码/媒体双判 + 截断声明）。影子期不写 kb_access",
+      "evidence": "p0/fish_kb.py:1731-1834（kb_open；正文读取一律 read_bytes，审计写点不实现）",
+      "replacement": null,
+      "help": "读单文件（必须给显式相对路径）",
+      "applyFlag": false
+    },
+    {
+      "path": "kb rollback",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "按备份回滚一次写入（改文件 + kb_access）",
+      "evidence": null,
+      "replacement": {
+        "cli": "kb rollback",
+        "mcpTool": "kb_write"
+      },
+      "help": "按 write_id 撤回一次写",
+      "applyFlag": false
+    },
+    {
+      "path": "kb search",
+      "level": 2,
+      "kind": "read",
+      "impl": "ts",
+      "reason": "T05 已复刻 `kb_search`（按需扫描、不建索引、敏感文件不进片段、片段 240 字、排序 -occurrences/-mtime/rel）",
+      "evidence": "p0/fish_kb.py:1966-2108（kb_search：只扫 .md，query 只以 hash 进审计；影子期不写审计）",
+      "replacement": null,
+      "help": "在 vault 范围内确定性检索（不建索引）",
+      "applyFlag": false
+    },
+    {
+      "path": "kb stats",
+      "level": 2,
+      "kind": "read",
+      "impl": "ts",
+      "reason": "T05 已复刻 `kb_stats`（规模/未读/最近变更/每库读写计数）；镜像/离线两档来源如实标注",
+      "evidence": "p0/fish_kb.py:2673-2729（kb_stats：_kb_scan_counts + 四条 kb_access 聚合，纯 SELECT）",
+      "replacement": null,
+      "help": "未读清单 / 最近变更 / 每 vault 读写计数",
+      "applyFlag": false
+    },
+    {
+      "path": "kb toc",
+      "level": 2,
+      "kind": "read",
+      "impl": "proxy-readonly",
+      "reason": "目录快照（分类概览 + 前 3 标题 + 分页，2026-10-28 新增；纯读、不写 kb_access）——TS 侧尚未复刻，影子期在快照副本上只读转发",
+      "evidence": "p0/fish.py:13765（add_parser \"toc\"）+ 13411-13412（act==\"toc\" → _kb_cmd_toc）",
+      "replacement": {
+        "cli": "kb toc",
+        "note": "Python 侧纯读，可在快照副本上转发"
+      },
+      "help": "目录快照（分类概览 + 前 3 标题 + 分页；海量库省 token）",
+      "applyFlag": false
+    },
+    {
+      "path": "kb tree",
+      "level": 2,
+      "kind": "read",
+      "impl": "ts",
+      "reason": "T05 已复刻 `kb_tree`（统计层 + 显示层分开、双预算截断、深度口径）。影子期**不写 kb_access 审计**（生产每次读都追一条），所以\"未读/读次数\"里不会出现 DSH 的读取",
+      "evidence": "p0/fish_kb.py:1541-1665（kb_tree：只统计不读正文；`_kb_log_quiet(action=\"tree\")` 是唯一写点，影子期不写）",
+      "replacement": null,
+      "help": "看目录（只统计不读正文；预算受限）",
+      "applyFlag": false
+    },
+    {
+      "path": "kb vault add",
+      "level": 3,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "登记一个 vault（写 kb_vault + events）",
+      "evidence": null,
+      "replacement": {
+        "cli": "kb vault add"
+      },
+      "help": "登记一个 vault（不搬运任何文件）",
+      "applyFlag": false
+    },
+    {
+      "path": "kb vault list",
+      "level": 3,
+      "kind": "read",
+      "impl": "ts",
+      "reason": "T05 已复刻 `_kb_cmd_vault` 的 list 分支（`kb_vault_list`：默认库在前，其次按名字；一行 `_kb_vault_line`）",
+      "evidence": "p0/fish_kb.py:567-571 + 2984-2993（kb_vault_list 纯 SELECT + list 渲染）",
+      "replacement": null,
+      "help": "列出全部 vault",
+      "applyFlag": false
+    },
+    {
+      "path": "kb vault remove",
+      "level": 3,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "注销 vault（改 kb_vault 状态）",
+      "evidence": null,
+      "replacement": {
+        "cli": "kb vault remove"
+      },
+      "help": "只删注册行，**不动磁盘**",
+      "applyFlag": false
+    },
+    {
+      "path": "kb vault scan",
+      "level": 3,
+      "kind": "ops",
+      "impl": "python-only",
+      "reason": "扫描 vault 目录（遍历文件系统 + 可能写登记），运维动作只在终端跑",
+      "evidence": null,
+      "replacement": {
+        "cli": "kb vault scan"
+      },
+      "help": "walk+stat 汇总并写 last_scan_*（不读正文）",
+      "applyFlag": false
+    },
+    {
+      "path": "kb vault set-default",
+      "level": 3,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "改默认 vault（写 config/kb_vault）",
+      "evidence": null,
+      "replacement": {
+        "cli": "kb vault set-default"
+      },
+      "help": "指定默认 vault",
+      "applyFlag": false
+    },
+    {
+      "path": "kb vault set-mode",
+      "level": 3,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "改 vault 读写模式（ro/rw）——这直接决定别人能不能写你的知识库",
+      "evidence": null,
+      "replacement": {
+        "cli": "kb vault set-mode"
+      },
+      "help": "改读写模式（ro/rw）",
+      "applyFlag": false
+    },
+    {
+      "path": "kb write",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "写知识库 Markdown（追加/更新 + kb_access），影子期不写用户知识库",
+      "evidence": null,
+      "replacement": {
+        "cli": "kb write",
+        "mcpTool": "kb_write"
+      },
+      "help": "写三档：create / append / update（update 必带 --base-sha256）",
+      "applyFlag": false
+    },
+    {
+      "path": "layout render",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "渲染门面文件树（写 fish-home/00-首页、10-项目库…），影子期不改 fish-home",
+      "evidence": null,
+      "replacement": {
+        "cli": "layout render",
+        "note": "终端里必须带 `--all`（本批只支持全量渲染）"
+      },
+      "help": "渲染门面全部产物（生成物，可删可重建）",
+      "applyFlag": false
+    },
+    {
+      "path": "layout verify",
+      "level": 2,
+      "kind": "read",
+      "impl": "python-only",
+      "reason": "体检逻辑在 `verify_layout()` 辅助函数里（`p0/fish.py` 只做分发），未逐行核过写路径，不赌",
+      "evidence": null,
+      "replacement": {
+        "cli": "layout verify",
+        "note": "终端里跑，读数与文件树一致"
+      },
+      "help": "体检门面：缺失/多余/超深/越界/README/链接/正文副本/凭证",
+      "applyFlag": false
+    },
+    {
+      "path": "list",
+      "level": 1,
+      "kind": "read",
+      "impl": "proxy-readonly",
+      "reason": "只列 code_index（不含检索、不写审计），Python 侧是纯 SELECT；TS 未做同形渲染",
+      "evidence": "p0/fish.py:6919-6928（cmd_list：一条 SELECT code_index + 打印）",
+      "replacement": {
+        "cli": "list",
+        "note": "Python 侧纯读，可在快照副本上转发"
+      },
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "neighbors",
+      "level": 1,
+      "kind": "read",
+      "impl": "proxy-readonly",
+      "reason": "邻域五策略仍在 Python（TS 只有 linksFor 原语），命令本身只读",
+      "evidence": "p0/fish.py:6885-6916（cmd_neighbors）+ 6350-6407（neighbors()：无 INSERT/UPDATE/DELETE）",
+      "replacement": {
+        "cli": "neighbors",
+        "note": "Python 侧纯读，可在快照副本上转发"
+      },
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "owner",
+      "level": 1,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "`owner set` 会写 config/citizens（`show` 只读，但同一路径两种形态）",
+      "evidence": null,
+      "replacement": {
+        "cli": "owner",
+        "note": "终端里跑 `fish owner show` 只读；set 形态是写"
+      },
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "owner-fix",
+      "level": 1,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "修正记忆归属（追加 events + 更新投影），MCP 面刻意不提供这条权限",
+      "evidence": null,
+      "replacement": {
+        "cli": "owner-fix"
+      },
+      "help": "修正一条记忆的归属（追加事件 + 更新投影）",
+      "applyFlag": false
+    },
+    {
+      "path": "project close",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "项目闭合（改状态 + events；`--apply` 才落库）",
+      "evidence": null,
+      "replacement": {
+        "cli": "project close",
+        "mcpTool": "close_project"
+      },
+      "help": "闭合一个项目：这件事做完了（可 reopen，不删任何东西）",
+      "applyFlag": true
+    },
+    {
+      "path": "project reopen",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "把 closed 改回 active（`--apply` 才落库）",
+      "evidence": null,
+      "replacement": {
+        "cli": "project reopen",
+        "mcpTool": "reopen_project"
+      },
+      "help": "把 closed 改回 active（闭合的撤销，之后可继续写）",
+      "applyFlag": true
+    },
+    {
+      "path": "project restore",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "把 retired 改回 active（`--apply` 才落库）",
+      "evidence": null,
+      "replacement": {
+        "cli": "project restore"
+      },
+      "help": "把 retired 改回 active（retire 的撤销）",
+      "applyFlag": true
+    },
+    {
+      "path": "project retire",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "退役前缀 = 停止分配新编码（`--apply` 才落库，默认只打印计划）",
+      "evidence": null,
+      "replacement": {
+        "cli": "project retire"
+      },
+      "help": "退役一个前缀：停止分配新编码（不删行、不回收前缀）",
+      "applyFlag": true
+    },
+    {
+      "path": "project status",
+      "level": 2,
+      "kind": "read",
+      "impl": "ts",
+      "reason": "T05 已复刻 `project_status_rows`（六列 + 每列来源 + 降级清单）。⚠ 生产**默认形态**会把渲染结果写进 `<home>/10-项目库/项目状态表.md`，`--json` 形态才纯读；影子期只实现纯读的那一半：同一份表格照常渲染，但**不落盘**，回执末尾明写\"没有写文件\"",
+      "evidence": "p0/fish.py:14517（project_status_rows 的 docstring 明写\"只读：不改任何表、不写盘\"）；写盘在 render_project_status:14645",
+      "replacement": null,
+      "help": "渲染/查看「项目状态表」（B2；只读投影，不改任何表）",
+      "applyFlag": false
+    },
+    {
+      "path": "project-add",
+      "level": 1,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "登记一个新前缀（code_registry + events）",
+      "evidence": null,
+      "replacement": {
+        "cli": "project-add",
+        "mcpTool": "add_project"
+      },
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "prompt-push",
+      "level": 1,
+      "kind": "ops",
+      "impl": "python-only",
+      "reason": "UserPromptSubmit hook 的子进程入口（读 stdin 的 hook payload），不是人手动跑的命令",
+      "evidence": null,
+      "replacement": {
+        "cli": "prompt-push"
+      },
+      "help": "提示词时机递记忆：读 stdin 的 hook payload，输出纯文本",
+      "applyFlag": false
+    },
+    {
+      "path": "push stats",
+      "level": 2,
+      "kind": "read",
+      "impl": "proxy-readonly",
+      "reason": "只读推送效果度量（push_stats 无写语句）",
+      "evidence": "p0/fish.py:10753-10754 + 10612-10715（push_stats：全 SELECT/聚合）",
+      "replacement": {
+        "cli": "push stats",
+        "note": "Python 侧纯读，可在快照副本上转发"
+      },
+      "help": "四个指标分开报（采纳/盲区/违规/方差）",
+      "applyFlag": false
+    },
+    {
+      "path": "push status",
+      "level": 2,
+      "kind": "read",
+      "impl": "proxy-readonly",
+      "reason": "只读推送配置（get_config 七次）",
+      "evidence": "p0/fish.py:10759-10764（cmd_push 的 else 分支：get_config 打印）",
+      "replacement": {
+        "cli": "push status",
+        "note": "Python 侧纯读，可在快照副本上转发"
+      },
+      "help": "看 push.* 配置现值",
+      "applyFlag": false
+    },
+    {
+      "path": "push sweep",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "把超窗推送收口成 ignored（写 push_log.reaction）",
+      "evidence": null,
+      "replacement": {
+        "cli": "push sweep"
+      },
+      "help": "把超窗仍无反应的推送判为 ignored（幂等；日报也跑它）",
+      "applyFlag": false
+    },
+    {
+      "path": "rebuild",
+      "level": 1,
+      "kind": "ops",
+      "impl": "python-only",
+      "reason": "重建 FTS/投影（长事务 + 独占），进程内跑会阻塞宿主事件循环",
+      "evidence": null,
+      "replacement": {
+        "cli": "rebuild"
+      },
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "recall",
+      "level": 1,
+      "kind": "read",
+      "impl": "ts",
+      "reason": "T02 已复刻 `searchMemories` / `renderRecall`，只读（不写 memory_access_log）",
+      "evidence": null,
+      "replacement": null,
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "reindex",
+      "level": 1,
+      "kind": "ops",
+      "impl": "python-only",
+      "reason": "重建索引（长事务 + 独占）",
+      "evidence": null,
+      "replacement": {
+        "cli": "reindex"
+      },
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "remember",
+      "level": 1,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "写 memory（append 事件 + 投影 + FTS + links），影子期 TS 侧没有任何写路径",
+      "evidence": null,
+      "replacement": {
+        "cli": "remember",
+        "mcpTool": "remember",
+        "note": "终端里跑，或走仍在册的 MCP 工具"
+      },
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "report",
+      "level": 1,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "渲染日报到 fish-home（写文件 + 可能有隐藏写路径），影子期不改 fish-home",
+      "evidence": null,
+      "replacement": {
+        "cli": "report"
+      },
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "session agent",
+      "level": 2,
+      "kind": "ops",
+      "impl": "python-only",
+      "reason": "给会话绑 agent 标识（读宿主载荷 + 写 session_tokens）",
+      "evidence": null,
+      "replacement": {
+        "cli": "session agent"
+      },
+      "help": "为子 agent 签 inherited 凭证（只允许一跳）",
+      "applyFlag": false
+    },
+    {
+      "path": "session end",
+      "level": 2,
+      "kind": "write",
+      "impl": "python-only",
+      "reason": "关闭会话（回收 token + 写 events），只能在会话真身所在进程外做",
+      "evidence": null,
+      "replacement": {
+        "cli": "session end"
+      },
+      "help": "吊销凭证 + 关档期 + 刷新活跃时间（幂等）",
+      "applyFlag": false
+    },
+    {
+      "path": "session start",
+      "level": 2,
+      "kind": "ops",
+      "impl": "python-only",
+      "reason": "session 是 CLI 专属命令族（MCP 面不签发凭证），要读宿主 env/payload 才能算身份",
+      "evidence": null,
+      "replacement": {
+        "cli": "session start"
+      },
+      "help": "签发会话凭证（幂等：同会话重跑 → 同一个公民）",
+      "applyFlag": false
+    },
+    {
+      "path": "session status",
+      "level": 2,
+      "kind": "read",
+      "impl": "python-only",
+      "reason": "同上：会话状态要读宿主环境（DSH_SESSION_*），插件进程里读到的是**它自己的**进程环境",
+      "evidence": null,
+      "replacement": {
+        "cli": "session status"
+      },
+      "help": "当前会话的身份 / 档期 / 凭证状态",
+      "applyFlag": false
+    },
+    {
+      "path": "supersede",
+      "level": 1,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "把旧编码标记为被替代（事务写 + events），影子期只在 Python 侧做",
+      "evidence": null,
+      "replacement": {
+        "cli": "supersede",
+        "mcpTool": "supersede"
+      },
+      "help": "把旧编码标记为被新编码替代（回执与 MCP 的 supersede 工具一致）",
+      "applyFlag": false
+    },
+    {
+      "path": "ui dump",
+      "level": 2,
+      "kind": "read",
+      "impl": "python-only",
+      "reason": "打印一份只读快照 JSON（调试/对拍用）。虽然只读，但要读整个主库并做撞车聚合，TS 侧没有同形实现，故不标 proxy-readonly",
+      "evidence": null,
+      "replacement": {
+        "cli": "ui dump",
+        "note": "终端里跑 `python p0/fish.py ui dump`"
+      },
+      "help": "打印一份快照就退出（调试 / 对拍用）",
+      "applyFlag": false
+    },
+    {
+      "path": "ui serve",
+      "level": 2,
+      "kind": "ops",
+      "impl": "python-only",
+      "reason": "起一个只读 HTTP 读口（绑回环、mode=ro + query_only）。属运维动作，影子期 TS 侧不提供",
+      "evidence": null,
+      "replacement": {
+        "cli": "ui serve",
+        "note": "终端里跑 `python p0/fish.py ui serve --port 8787`"
+      },
+      "help": "起只读 HTTP 读口（默认只绑 127.0.0.1）",
+      "applyFlag": false
+    },
+    {
+      "path": "whoami",
+      "level": 1,
+      "kind": "read",
+      "impl": "ts",
+      "reason": "T02 已复刻 `resolveIdentity` / `renderWhoami`（证据级别只降不升）",
+      "evidence": null,
+      "replacement": null,
+      "help": "我是谁：身份段 + 凭证状态 + 身份来源",
+      "applyFlag": false
+    },
+    {
+      "path": "withdraw",
+      "level": 1,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "撤回一条记忆（改 status + 追加 events），是写操作",
+      "evidence": null,
+      "replacement": {
+        "cli": "withdraw"
+      },
+      "help": "",
+      "applyFlag": false
+    },
+    {
+      "path": "workspace list",
+      "level": 2,
+      "kind": "read",
+      "impl": "ts",
+      "reason": "T05 已复刻 `_workspace_cmd_list`（`list_workspace_mappings` + 一行一条渲染）",
+      "evidence": "p0/fish.py:10036-10037 → 10065-10075（_workspace_cmd_list：list_workspace_mappings + 打印）",
+      "replacement": null,
+      "help": "列出全部映射",
+      "applyFlag": false
+    },
+    {
+      "path": "workspace remove",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "删除映射（写 events 留痕）",
+      "evidence": null,
+      "replacement": {
+        "cli": "workspace remove"
+      },
+      "help": "删除一条映射（幂等）",
+      "applyFlag": false
+    },
+    {
+      "path": "workspace seed",
+      "level": 2,
+      "kind": "read",
+      "impl": "proxy-readonly",
+      "reason": "打印建议**绝不自动写入**（源码 docstring 明写）",
+      "evidence": "p0/fish.py:10025-10028（\"list / seed 只读：seed 打印建议但绝不自动写入\"）",
+      "replacement": {
+        "cli": "workspace seed",
+        "note": "Python 侧纯读，可在快照副本上转发"
+      },
+      "help": "从现有记忆反推候选（只打印，不写入）",
+      "applyFlag": false
+    },
+    {
+      "path": "workspace set",
+      "level": 2,
+      "kind": "write",
+      "impl": "unsupported-shadow",
+      "reason": "workspace_map 是项目归属的唯一权威来源，set 是显式数据变更（写 events）",
+      "evidence": null,
+      "replacement": {
+        "cli": "workspace set"
+      },
+      "help": "新增/更新一条映射",
+      "applyFlag": false
+    }
+  ],
+  "groups": [
+    {
+      "path": "activity",
+      "level": 1,
+      "children": [
+        "prune",
+        "stats"
+      ],
+      "help": "动作流：stats 读数 / prune 清理（CLI 专属）"
+    },
+    {
+      "path": "alias",
+      "level": 1,
+      "children": [
+        "link",
+        "list",
+        "unlink"
+      ],
+      "help": "名字别名（单向 from→to；只影响检索，不改写入归属）"
+    },
+    {
+      "path": "board",
+      "level": 1,
+      "children": [
+        "checkin",
+        "close",
+        "post",
+        "render",
+        "show",
+        "sweep"
+      ],
+      "help": "看板（show / checkin / post / render / close）"
+    },
+    {
+      "path": "corpus",
+      "level": 1,
+      "children": [
+        "doctor",
+        "forget",
+        "ingest",
+        "read",
+        "rebuild",
+        "retag",
+        "search",
+        "stats"
+      ],
+      "help": "语料：ingest/stats/retag/search/read/forget/rebuild/doctor"
+    },
+    {
+      "path": "kb",
+      "level": 1,
+      "children": [
+        "backup",
+        "doctor",
+        "open",
+        "rollback",
+        "search",
+        "stats",
+        "toc",
+        "tree",
+        "vault",
+        "write"
+      ],
+      "help": "知识库（vault / tree / open / search / write / rollback / stats / doctor）"
+    },
+    {
+      "path": "kb backup",
+      "level": 2,
+      "children": [
+        "prune"
+      ],
+      "help": "备份维护（prune：按天清理旧回滚点；默认不动手）"
+    },
+    {
+      "path": "kb vault",
+      "level": 2,
+      "children": [
+        "add",
+        "list",
+        "remove",
+        "scan",
+        "set-default",
+        "set-mode"
+      ],
+      "help": "登记 / 列出 / 设默认 / 改模式 / 扫描 / 移除"
+    },
+    {
+      "path": "layout",
+      "level": 1,
+      "children": [
+        "render",
+        "verify"
+      ],
+      "help": "fish-home 门面：render（渲染）/ verify（体检）"
+    },
+    {
+      "path": "project",
+      "level": 1,
+      "children": [
+        "close",
+        "reopen",
+        "restore",
+        "retire",
+        "status"
+      ],
+      "help": "项目前缀生命周期（retire / restore；默认只打印计划）"
+    },
+    {
+      "path": "push",
+      "level": 1,
+      "children": [
+        "stats",
+        "status",
+        "sweep"
+      ],
+      "help": "推送：stats 效果度量 / status 当前配置"
+    },
+    {
+      "path": "session",
+      "level": 1,
+      "children": [
+        "agent",
+        "end",
+        "start",
+        "status"
+      ],
+      "help": "会话身份（CLI 专属命令族；MCP 面不签发凭证）"
+    },
+    {
+      "path": "ui",
+      "level": 1,
+      "children": [
+        "dump",
+        "serve"
+      ],
+      "help": "只读读口：把库投影成界面要的 JSON（serve / dump）"
+    },
+    {
+      "path": "workspace",
+      "level": 1,
+      "children": [
+        "list",
+        "remove",
+        "seed",
+        "set"
+      ],
+      "help": "工作区 → 项目映射（项目归属的权威来源）"
+    }
+  ]
+}

@@ -1,0 +1,73 @@
+%% dsh-fish 面板架构 · 调用时序（与 docs\面板架构设计.md §9 同源）
+%% 三条流程：① 正常出第一帧并进入轮询 ② 读口没起（默认会走的路径） ③ 卸载
+
+sequenceDiagram
+  autonumber
+  actor U as 用户
+  participant Shell as DSH 壳（ui-layout）
+  participant Slots as ui-renderer slots
+  participant Frame as PanelFrame（dsh-fish client）
+  participant WS as webServer（Host）
+  participant Trust as connection.requestRejection
+  participant Static as PanelStatic
+  participant Proxy as PanelRoutes
+  participant Up as UpstreamClient
+  participant Py as fish_ui（127.0.0.1:8787）
+  participant App as iframe 里的第一期
+
+  rect rgb(11,26,41)
+  Note over U,App: ① 正常路径
+  U->>Shell: 点侧栏 fish 图标
+  Shell->>Slots: renderSlot('main', entryKey='fish-scene')
+  Slots->>Frame: 挂载（React 组件）
+  Frame->>WS: GET /fish/panel/fish-ui.html?source=live&api=/fish&seed=…
+  WS->>Trust: 闸（Host 回环 / 无 cross-site / Origin 同源）
+  Trust-->>WS: 通过
+  WS->>Static: resolveInsideRoot + readFile
+  Static-->>Frame: 200 text/html（含 14 个 script 标签）
+  Note over Frame,App: 浏览器另起 15 个同源子请求（1 css + 14 js），同样过 Static
+  App->>App: 14 个 classic script 依次执行 → window.FISH
+  App->>Proxy: GET /fish/api/scene?minutes=30（bootLive 首帧）
+  Proxy->>Trust: 闸
+  Proxy->>Up: scene(30)
+  Up->>Py: GET /api/scene?minutes=30
+  Py-->>Up: {schema:"fish-ui/1", sessions:[…], health:{…}, …}
+  Up->>Up: assertSchema('fish-ui/1')
+  Up-->>Proxy: 200 逐字节 body
+  Proxy-->>App: 200（no-store）
+  App->>App: applyLiveScene → 布局 → thread.rebuild → renderFixedBoot
+  loop 每 5s
+    App->>Proxy: GET /fish/api/scene?minutes=30
+    Proxy->>Up: 命中 2s 缓存则直接返回
+  end
+  loop 每 1s
+    App->>Proxy: GET /fish/api/activity?since=<cursor>
+    Proxy->>Up: activity(since)（不缓存）
+    Up->>Py: GET /api/activity?since=<cursor>
+    App->>App: consumeActivity → beam.spawn（一次最多 4 道）
+  end
+  end
+
+  rect rgb(41,20,20)
+  Note over App,Py: ② 读口没起（默认状态，必须是一等公民）
+  App->>Proxy: GET /fish/api/scene?minutes=30
+  Proxy->>Up: scene(30)
+  Up->>Py: GET /api/scene（ECONNREFUSED）
+  Py--xUp: 连接被拒
+  Up-->>Proxy: {code:'upstream-down'}
+  Proxy-->>App: 503 {ok:false,code:'upstream-down',hint:"python fish.py --root <data> ui serve --port 8787"}
+  App->>App: bootLive 的 catch 累加 live.err，画面停在"海还在"的空状态
+  Frame->>Proxy: 每 5s GET /fish/api/upstream（诊断面，永远 200）
+  Proxy-->>Frame: {ok:true,reachable:false,reason:"ECONNREFUSED"}
+  Frame->>Frame: 在 iframe 上方压一条 28px 提示条：读口未起 + 一键复制命令
+  end
+
+  rect rgb(20,41,26)
+  Note over U,Frame: ③ 卸载
+  U->>Shell: 切到别的面板 / 关闭 fish
+  Shell->>Slots: 不再渲染 'main' 条目
+  Slots->>Frame: 卸载（React 移除 div/iframe）
+  Frame->>App: 元素移除 ⇒ iframe Document 销毁
+  App->>App: rAF 循环、ResizeObserver、两个 setInterval 一起消失（无需插件清理）
+  Note over Frame: 插件禁用时：cordis fiber dispose ⇒ 路由 disposer 归位 ⇒ /fish/api/* 变 404
+  end

@@ -1,0 +1,520 @@
+{
+  "algorithm": "sha256",
+  "normalization": [
+    "select sqlite_master rows where sql is not null",
+    "sql: strip trailing semicolons",
+    "sql: collapse whitespace runs to single space",
+    "sql: trim",
+    "sort objects by (type, name) asc",
+    "sha256 over compact json of [{type,name,table,sql}]",
+    "businessFingerprint: same, excluding memory_fts_* and sqlite_sequence"
+  ],
+  "source": "sqlite_master",
+  "counts": {
+    "index": 31,
+    "table": 36,
+    "trigger": 2,
+    "view": 2
+  },
+  "fingerprint": "2ba9df3052c437896eec61b1a597fc5429318fa48723c698c80441c52cf01ba8",
+  "businessFingerprint": "7ccfde1a3748c906cbd64645c0f15760aa0d05bc7d89b3420a6dcf2cd473f927",
+  "objects": [
+    {
+      "type": "index",
+      "name": "ix_activity_citizen",
+      "table": "tool_activity",
+      "sql": "CREATE INDEX ix_activity_citizen ON tool_activity(citizen_id, seen_at DESC)",
+      "hash": "d96c089faa1bccb0"
+    },
+    {
+      "type": "index",
+      "name": "ix_activity_dir",
+      "table": "tool_activity",
+      "sql": "CREATE INDEX ix_activity_dir ON tool_activity(project, path_dir, seen_at DESC)",
+      "hash": "f0d86f7aaaf47de8"
+    },
+    {
+      "type": "index",
+      "name": "ix_activity_seen",
+      "table": "tool_activity",
+      "sql": "CREATE INDEX ix_activity_seen ON tool_activity(seen_at)",
+      "hash": "c47861198632f69f"
+    },
+    {
+      "type": "index",
+      "name": "ix_activity_session",
+      "table": "tool_activity",
+      "sql": "CREATE INDEX ix_activity_session ON tool_activity(session_key, seen_at DESC)",
+      "hash": "2d869c0b489db830"
+    },
+    {
+      "type": "index",
+      "name": "ix_boards_scope",
+      "table": "boards",
+      "sql": "CREATE INDEX ix_boards_scope ON boards(scope, scope_key, period_key)",
+      "hash": "16b38c483652f528"
+    },
+    {
+      "type": "index",
+      "name": "ix_boards_status",
+      "table": "boards",
+      "sql": "CREATE INDEX ix_boards_status ON boards(status, period_key)",
+      "hash": "1dd7a830a318b875"
+    },
+    {
+      "type": "index",
+      "name": "ix_citizens_account",
+      "table": "citizens",
+      "sql": "CREATE INDEX ix_citizens_account ON citizens(account_id)",
+      "hash": "99867c98dc342d50"
+    },
+    {
+      "type": "index",
+      "name": "ix_kb_access_action",
+      "table": "kb_access",
+      "sql": "CREATE INDEX ix_kb_access_action ON kb_access(action, ts DESC)",
+      "hash": "ddbd5abbca66b1f7"
+    },
+    {
+      "type": "index",
+      "name": "ix_kb_access_citizen",
+      "table": "kb_access",
+      "sql": "CREATE INDEX ix_kb_access_citizen ON kb_access(citizen_id, ts DESC)",
+      "hash": "fc46efdc2de984f0"
+    },
+    {
+      "type": "index",
+      "name": "ix_kb_access_path",
+      "table": "kb_access",
+      "sql": "CREATE INDEX ix_kb_access_path ON kb_access(vault_id, path, ts DESC)",
+      "hash": "6d515fe8a7bb5a16"
+    },
+    {
+      "type": "index",
+      "name": "ix_kb_index_mtime",
+      "table": "kb_index",
+      "sql": "CREATE INDEX ix_kb_index_mtime ON kb_index(mtime)",
+      "hash": "ee9603bfb67d978a"
+    },
+    {
+      "type": "index",
+      "name": "ix_kb_index_status",
+      "table": "kb_index",
+      "sql": "CREATE INDEX ix_kb_index_status ON kb_index(status)",
+      "hash": "e6e5273d00c9c95a"
+    },
+    {
+      "type": "index",
+      "name": "ix_links_dst",
+      "table": "links",
+      "sql": "CREATE INDEX ix_links_dst ON links(dst) WHERE removed_at IS NULL",
+      "hash": "f8929c9e55d082ba"
+    },
+    {
+      "type": "index",
+      "name": "ix_links_rel",
+      "table": "links",
+      "sql": "CREATE INDEX ix_links_rel ON links(rel) WHERE removed_at IS NULL",
+      "hash": "9bfce7ac2c68186d"
+    },
+    {
+      "type": "index",
+      "name": "ix_links_src",
+      "table": "links",
+      "sql": "CREATE INDEX ix_links_src ON links(src) WHERE removed_at IS NULL",
+      "hash": "43f20e0b6612a6e4"
+    },
+    {
+      "type": "index",
+      "name": "ix_links_suppressed",
+      "table": "links",
+      "sql": "CREATE INDEX ix_links_suppressed ON links(suppressed) WHERE removed_at IS NULL",
+      "hash": "bc330ee77f36eab1"
+    },
+    {
+      "type": "index",
+      "name": "ix_mal_citizen",
+      "table": "memory_access_log",
+      "sql": "CREATE INDEX ix_mal_citizen ON memory_access_log(citizen_id, accessed_at)",
+      "hash": "565e92f93e3b39ef"
+    },
+    {
+      "type": "index",
+      "name": "ix_mal_code",
+      "table": "memory_access_log",
+      "sql": "CREATE INDEX ix_mal_code ON memory_access_log(code, accessed_at)",
+      "hash": "23d266011fa59b8e"
+    },
+    {
+      "type": "index",
+      "name": "ix_mal_session",
+      "table": "memory_access_log",
+      "sql": "CREATE INDEX ix_mal_session ON memory_access_log(session_key, accessed_at)",
+      "hash": "1c237c8932797d35"
+    },
+    {
+      "type": "index",
+      "name": "ix_posts_board",
+      "table": "board_posts",
+      "sql": "CREATE INDEX ix_posts_board ON board_posts(board_id, id DESC)",
+      "hash": "2fef70e500a630b5"
+    },
+    {
+      "type": "index",
+      "name": "ix_presence_last",
+      "table": "presence",
+      "sql": "CREATE INDEX ix_presence_last ON presence(board_id, last_seen_at)",
+      "hash": "94f00f24788e8988"
+    },
+    {
+      "type": "index",
+      "name": "ix_push_code",
+      "table": "push_log",
+      "sql": "CREATE INDEX ix_push_code ON push_log(code, pushed_at)",
+      "hash": "4c1264ff67f104a4"
+    },
+    {
+      "type": "index",
+      "name": "ix_push_reaction",
+      "table": "push_log",
+      "sql": "CREATE INDEX ix_push_reaction ON push_log(reaction) WHERE reaction IS NULL",
+      "hash": "75c2252f7d61448c"
+    },
+    {
+      "type": "index",
+      "name": "ix_push_session",
+      "table": "push_log",
+      "sql": "CREATE INDEX ix_push_session ON push_log(session_key, pushed_at)",
+      "hash": "1a854dd129fa0bc9"
+    },
+    {
+      "type": "index",
+      "name": "ix_session_tokens_citizen",
+      "table": "session_tokens",
+      "sql": "CREATE INDEX ix_session_tokens_citizen ON session_tokens(citizen_id)",
+      "hash": "2d2d279f1beeaede"
+    },
+    {
+      "type": "index",
+      "name": "ix_session_tokens_session",
+      "table": "session_tokens",
+      "sql": "CREATE INDEX ix_session_tokens_session ON session_tokens(session_key)",
+      "hash": "67f9cedf3cd54e7a"
+    },
+    {
+      "type": "index",
+      "name": "ux_citizens_owner",
+      "table": "citizens",
+      "sql": "CREATE UNIQUE INDEX ux_citizens_owner ON citizens(is_owner) WHERE is_owner = 1",
+      "hash": "0de78d0c96912016"
+    },
+    {
+      "type": "index",
+      "name": "ux_kb_vault_default",
+      "table": "kb_vault",
+      "sql": "CREATE UNIQUE INDEX ux_kb_vault_default ON kb_vault(is_default) WHERE is_default = 1",
+      "hash": "8c9b500606801a3b"
+    },
+    {
+      "type": "index",
+      "name": "ux_kb_vault_path",
+      "table": "kb_vault",
+      "sql": "CREATE UNIQUE INDEX ux_kb_vault_path ON kb_vault(path_key)",
+      "hash": "d1fc1d9ab249902a"
+    },
+    {
+      "type": "index",
+      "name": "ux_links_edge",
+      "table": "links",
+      "sql": "CREATE UNIQUE INDEX ux_links_edge ON links(src,dst,rel)",
+      "hash": "ddc5ed94d91d62c7"
+    },
+    {
+      "type": "index",
+      "name": "ux_stint_open",
+      "table": "project_stints",
+      "sql": "CREATE UNIQUE INDEX ux_stint_open ON project_stints(citizen_id, project) WHERE to_ts IS NULL",
+      "hash": "7a2c2e6191f40ce8"
+    },
+    {
+      "type": "table",
+      "name": "agent_accounts",
+      "table": "agent_accounts",
+      "sql": "CREATE TABLE agent_accounts ( account_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, host TEXT, kind TEXT, created_at TEXT NOT NULL, closed_at TEXT, note TEXT )",
+      "hash": "7c1b008f8a9f52e0"
+    },
+    {
+      "type": "table",
+      "name": "board_posts",
+      "table": "board_posts",
+      "sql": "CREATE TABLE board_posts ( id INTEGER PRIMARY KEY AUTOINCREMENT, board_id INTEGER NOT NULL REFERENCES boards(id), citizen_id TEXT NOT NULL, kind TEXT NOT NULL, -- checkin | progress | done | note text TEXT NOT NULL, -- ≤200 字（渲染时硬截断） created_at TEXT NOT NULL )",
+      "hash": "f8bf4824c24fc207"
+    },
+    {
+      "type": "table",
+      "name": "board_seen",
+      "table": "board_seen",
+      "sql": "CREATE TABLE \"board_seen\" ( board_id INTEGER NOT NULL, citizen_id TEXT NOT NULL, session_key TEXT NOT NULL DEFAULT '', last_post_id INTEGER NOT NULL DEFAULT 0, last_presence_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL, PRIMARY KEY (board_id, citizen_id, session_key) )",
+      "hash": "cad8006eb4c814df"
+    },
+    {
+      "type": "table",
+      "name": "boards",
+      "table": "boards",
+      "sql": "CREATE TABLE boards ( id INTEGER PRIMARY KEY AUTOINCREMENT, scope TEXT NOT NULL, -- root | project | branch scope_key TEXT NOT NULL, -- root='' / project='anyi-studio' / branch='<名字>' period_key TEXT NOT NULL, -- YYYYMMDD（按日一块板） path TEXT NOT NULL, -- 渲染文件相对路径（派生，可重建） status TEXT NOT NULL DEFAULT 'open',-- open | closed created_at TEXT NOT NULL, closed_at TEXT, UNIQUE(scope, scope_key, period_key) )",
+      "hash": "7d35f537f6c252b9"
+    },
+    {
+      "type": "table",
+      "name": "citizens",
+      "table": "citizens",
+      "sql": "CREATE TABLE citizens ( citizen_id TEXT PRIMARY KEY, display_name TEXT, kind TEXT, role TEXT, host TEXT, status TEXT DEFAULT 'active', created_at TEXT , is_owner INTEGER DEFAULT 0, account_id TEXT, device_id TEXT, host_session_key TEXT, last_seen_at TEXT, archived_at TEXT)",
+      "hash": "4ea8a9895dfaeaa3"
+    },
+    {
+      "type": "table",
+      "name": "citizens_archive",
+      "table": "citizens_archive",
+      "sql": "CREATE TABLE citizens_archive ( citizen_id TEXT PRIMARY KEY, display_name TEXT, kind TEXT, role TEXT, host TEXT, status TEXT DEFAULT 'active', created_at TEXT, is_owner INTEGER DEFAULT 0, account_id TEXT, device_id TEXT, host_session_key TEXT, last_seen_at TEXT, archived_at TEXT )",
+      "hash": "3568907f8b9435d8"
+    },
+    {
+      "type": "table",
+      "name": "code_index",
+      "table": "code_index",
+      "sql": "CREATE TABLE code_index ( code TEXT PRIMARY KEY, title TEXT, project TEXT, owner TEXT, mem_type TEXT, visibility TEXT, status TEXT DEFAULT 'active', tags TEXT, file_path TEXT, occurred_at TEXT, recorded_at TEXT , last_accessed_at TEXT, access_count INTEGER DEFAULT 0, dormant INTEGER DEFAULT 0, session_actor TEXT, attachments TEXT, superseded_by TEXT)",
+      "hash": "9cb61066299a9a3e"
+    },
+    {
+      "type": "table",
+      "name": "code_registry",
+      "table": "code_registry",
+      "sql": "CREATE TABLE code_registry ( prefix TEXT PRIMARY KEY, namespace TEXT, last_date TEXT, last_seq INTEGER DEFAULT 0, status TEXT DEFAULT 'active' )",
+      "hash": "670a54222ec9cc36"
+    },
+    {
+      "type": "table",
+      "name": "config",
+      "table": "config",
+      "sql": "CREATE TABLE config ( key TEXT PRIMARY KEY, value TEXT NOT NULL, type TEXT NOT NULL DEFAULT 'string', updated_at TEXT )",
+      "hash": "a20db8c1e892ef4a"
+    },
+    {
+      "type": "table",
+      "name": "events",
+      "table": "events",
+      "sql": "CREATE TABLE events ( seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, ts TEXT NOT NULL, type TEXT NOT NULL, actor TEXT NOT NULL, subject TEXT NOT NULL, payload TEXT NOT NULL, cause TEXT, refs TEXT, schema TEXT NOT NULL DEFAULT 'evt@1' )",
+      "hash": "e2bb3dbc5a2ab734"
+    },
+    {
+      "type": "table",
+      "name": "kb_access",
+      "table": "kb_access",
+      "sql": "CREATE TABLE kb_access ( id INTEGER PRIMARY KEY AUTOINCREMENT, vault_id TEXT NOT NULL, path TEXT NOT NULL, citizen_id TEXT NOT NULL DEFAULT 'unattributed', account_id TEXT, action TEXT NOT NULL, result TEXT NOT NULL DEFAULT 'ok', via TEXT NOT NULL, ts TEXT NOT NULL, bytes INTEGER, sha256 TEXT, backup_path TEXT, meta TEXT )",
+      "hash": "7a462c8c9b51f0b0"
+    },
+    {
+      "type": "table",
+      "name": "kb_fts",
+      "table": "kb_fts",
+      "sql": "CREATE VIRTUAL TABLE kb_fts USING fts5( rel_path UNINDEXED, vault_id UNINDEXED, title, headings, summary, body_excerpt, tokenize='unicode61' )",
+      "hash": "ff3d460ee4d266d9"
+    },
+    {
+      "type": "table",
+      "name": "kb_fts_config",
+      "table": "kb_fts_config",
+      "sql": "CREATE TABLE 'kb_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID",
+      "hash": "f1a5b4189d0cb17b"
+    },
+    {
+      "type": "table",
+      "name": "kb_fts_content",
+      "table": "kb_fts_content",
+      "sql": "CREATE TABLE 'kb_fts_content'(id INTEGER PRIMARY KEY, c0, c1, c2, c3, c4, c5)",
+      "hash": "19101ab163ed812a"
+    },
+    {
+      "type": "table",
+      "name": "kb_fts_data",
+      "table": "kb_fts_data",
+      "sql": "CREATE TABLE 'kb_fts_data'(id INTEGER PRIMARY KEY, block BLOB)",
+      "hash": "481bc9ed3072943f"
+    },
+    {
+      "type": "table",
+      "name": "kb_fts_docsize",
+      "table": "kb_fts_docsize",
+      "sql": "CREATE TABLE 'kb_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)",
+      "hash": "4fb7677c4251258d"
+    },
+    {
+      "type": "table",
+      "name": "kb_fts_idx",
+      "table": "kb_fts_idx",
+      "sql": "CREATE TABLE 'kb_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID",
+      "hash": "b6198d6ca2c9ef81"
+    },
+    {
+      "type": "table",
+      "name": "kb_index",
+      "table": "kb_index",
+      "sql": "CREATE TABLE kb_index ( vault_id TEXT NOT NULL, rel_path TEXT NOT NULL, mtime REAL NOT NULL, size INTEGER NOT NULL, content_hash TEXT, title TEXT, headings TEXT, summary TEXT, excerpt TEXT, word_count INTEGER, indexed_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', error TEXT, PRIMARY KEY (vault_id, rel_path) )",
+      "hash": "f6fd751bb3a45332"
+    },
+    {
+      "type": "table",
+      "name": "kb_vault",
+      "table": "kb_vault",
+      "sql": "CREATE TABLE kb_vault ( vault_id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, path TEXT NOT NULL, path_key TEXT NOT NULL, mode TEXT NOT NULL DEFAULT 'ro' CHECK (mode IN ('ro','rw')), ignore_globs TEXT NOT NULL DEFAULT '[\".obsidian/**\",\".trash/**\",\"90-模板/**\"]', max_open_bytes INTEGER NOT NULL DEFAULT 2097152, is_default INTEGER NOT NULL DEFAULT 0, last_scan_at TEXT, last_scan_files INTEGER, last_scan_notes INTEGER, last_scan_bytes INTEGER, note TEXT, status TEXT NOT NULL DEFAULT 'active', created_at TEXT NOT NULL, updated_at TEXT NOT NULL )",
+      "hash": "6a946f304291b81b"
+    },
+    {
+      "type": "table",
+      "name": "links",
+      "table": "links",
+      "sql": "CREATE TABLE links ( id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL, dst TEXT NOT NULL, rel TEXT NOT NULL, source TEXT NOT NULL, weight REAL DEFAULT 1.0, evidence TEXT, created_at TEXT NOT NULL, removed_at TEXT, last_reinforced_at TEXT, reinforce_count INTEGER DEFAULT 0, suppressed INTEGER DEFAULT 0, UNIQUE(src, dst, rel) )",
+      "hash": "0fa35a04bb65d10a"
+    },
+    {
+      "type": "table",
+      "name": "maintenance_task",
+      "table": "maintenance_task",
+      "sql": "CREATE TABLE maintenance_task ( task_name TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 1, interval_hours INTEGER NOT NULL, last_run_at TEXT, last_status TEXT, last_error TEXT, last_affected INTEGER, last_seconds REAL )",
+      "hash": "5697ae1a364aee17"
+    },
+    {
+      "type": "table",
+      "name": "memory_access_log",
+      "table": "memory_access_log",
+      "sql": "CREATE TABLE memory_access_log ( id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT NOT NULL, citizen_id TEXT, session_key TEXT, project TEXT, via TEXT NOT NULL, payload TEXT, accessed_at TEXT NOT NULL )",
+      "hash": "64435213e251542d"
+    },
+    {
+      "type": "table",
+      "name": "memory_fts",
+      "table": "memory_fts",
+      "sql": "CREATE VIRTUAL TABLE memory_fts USING fts5( code UNINDEXED, title_idx, body_idx, tokenize='unicode61' )",
+      "hash": "bc049bd383767a9a"
+    },
+    {
+      "type": "table",
+      "name": "memory_fts_config",
+      "table": "memory_fts_config",
+      "sql": "CREATE TABLE 'memory_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID",
+      "hash": "1cc4118fd0e2ea68"
+    },
+    {
+      "type": "table",
+      "name": "memory_fts_content",
+      "table": "memory_fts_content",
+      "sql": "CREATE TABLE 'memory_fts_content'(id INTEGER PRIMARY KEY, c0, c1, c2)",
+      "hash": "14798d5146824f3f"
+    },
+    {
+      "type": "table",
+      "name": "memory_fts_data",
+      "table": "memory_fts_data",
+      "sql": "CREATE TABLE 'memory_fts_data'(id INTEGER PRIMARY KEY, block BLOB)",
+      "hash": "5140afb62c71913f"
+    },
+    {
+      "type": "table",
+      "name": "memory_fts_docsize",
+      "table": "memory_fts_docsize",
+      "sql": "CREATE TABLE 'memory_fts_docsize'(id INTEGER PRIMARY KEY, sz BLOB)",
+      "hash": "44fd69541eb5633a"
+    },
+    {
+      "type": "table",
+      "name": "memory_fts_idx",
+      "table": "memory_fts_idx",
+      "sql": "CREATE TABLE 'memory_fts_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID",
+      "hash": "b88073b64a7d10ce"
+    },
+    {
+      "type": "table",
+      "name": "name_aliases",
+      "table": "name_aliases",
+      "sql": "CREATE TABLE name_aliases ( kind TEXT NOT NULL, -- 'project' | 'citizen' from_name TEXT NOT NULL, -- 别名（非规范名） to_name TEXT NOT NULL, -- 规范名 created_at TEXT NOT NULL, created_by TEXT, reason TEXT, PRIMARY KEY (kind, from_name) )",
+      "hash": "78fafbce2a6aca84"
+    },
+    {
+      "type": "table",
+      "name": "presence",
+      "table": "presence",
+      "sql": "CREATE TABLE \"presence\" ( board_id INTEGER NOT NULL REFERENCES boards(id), citizen_id TEXT NOT NULL, -- ↓ 2026-10-26（撞车自撞修复 T01 · 设计 45 §2.1）：会话维度**进主键**。 -- 为什么另加一列而不是复用 agent_id：agent_id 是\"外部可读的宿主侧标识\"， -- 它的历史值里有非会话形态（`codebuddy-主AI/ffd54d84`），拿它当权限级主键 -- 等于把\"猜出来的身份\"焊进唯一约束。 -- 为什么是空串而不是 NULL：NULL 在唯一约束里互不相等（NULL != NULL）， -- \"同一公民的无会话行\"每次插入都会变成新行——那比\"合并成一行\"更坏。 -- '' = 无会话归属（旧行 / 无凭证路径 / 未知来源），**不是**\"某个会话\"。 session_key TEXT NOT NULL DEFAULT '', agent_id TEXT, -- 会话/宿主侧标识（自动行会存 session_key） status TEXT NOT NULL DEFAULT 'active', -- active | idle | left doing TEXT, -- 一句话：在做什么（≤80 字，撞车判断靠它） surface TEXT, -- 占用面（文件/目录前缀，逗号分隔） first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, -- ↓ 2026-10-26（hooks 深度利用 T02）：自动占用的**缓存**三列（真相在 tool_activity）。 -- auto_surface 只是\"最近一次聚合的快照\"，供外部读者/快照快速取用； -- 看板渲染、推送、撞车判定都以 tool_activity 的读时聚合为准。 -- 否则「声明 vs 实际」又变成两份会漂的真相。 auto_surface TEXT, -- 最近一次聚合的目录（逗号分隔，≤3） auto_seen_at TEXT, -- 最后一次写动作时间（UTC） auto_source TEXT -- session_start | session_inject | remember | activity ,PRIMARY KEY (board_id, citizen_id, session_key) )",
+      "hash": "780794782967bae4"
+    },
+    {
+      "type": "table",
+      "name": "project_stints",
+      "table": "project_stints",
+      "sql": "CREATE TABLE project_stints ( id INTEGER PRIMARY KEY AUTOINCREMENT, citizen_id TEXT NOT NULL, account_id TEXT, project TEXT NOT NULL, from_ts TEXT NOT NULL, to_ts TEXT, -- NULL = 当前开档期 set_by TEXT, closed_reason TEXT )",
+      "hash": "af0e524ddb059f57"
+    },
+    {
+      "type": "table",
+      "name": "push_log",
+      "table": "push_log",
+      "sql": "CREATE TABLE push_log ( id INTEGER PRIMARY KEY AUTOINCREMENT, session_key TEXT, citizen_id TEXT, project TEXT, code TEXT, candidate_id TEXT, channel TEXT NOT NULL, budget_tokens INTEGER, pushed_at TEXT NOT NULL, reaction TEXT, reacted_at TEXT, latency_sec INTEGER , content_hash TEXT)",
+      "hash": "d899c87fa8def5f4"
+    },
+    {
+      "type": "table",
+      "name": "session_tokens",
+      "table": "session_tokens",
+      "sql": "CREATE TABLE session_tokens ( token_hash TEXT PRIMARY KEY, -- sha256(token)，明文只在签发时回一次 citizen_id TEXT NOT NULL, session_key TEXT NOT NULL, evidence TEXT NOT NULL, -- machine | inherited | self-reported channel TEXT NOT NULL, -- cli | hook | parent parent_token TEXT, -- inherited 时指向父 issued_at TEXT NOT NULL, expires_at TEXT, revoked_at TEXT, CHECK (channel IN ('cli','hook','parent')), CHECK (evidence IN ('machine','inherited','self-reported')), CHECK (channel != 'parent' OR parent_token IS NOT NULL), CHECK (channel != 'parent' OR evidence = 'inherited') )",
+      "hash": "f259e3ad28ae12df"
+    },
+    {
+      "type": "table",
+      "name": "sqlite_sequence",
+      "table": "sqlite_sequence",
+      "sql": "CREATE TABLE sqlite_sequence(name,seq)",
+      "hash": "57436cbebaf4879d"
+    },
+    {
+      "type": "table",
+      "name": "tool_activity",
+      "table": "tool_activity",
+      "sql": "CREATE TABLE tool_activity ( id INTEGER PRIMARY KEY AUTOINCREMENT, host TEXT NOT NULL, -- dsh | workbuddy（方言来源，便于分宿主统计） session_key TEXT NOT NULL, -- dsh:<session_id> / codebuddy:<session_id> citizen_id TEXT, -- 由 session_key 反查；查不到 NULL，不猜 project TEXT, -- workspace_map 最长前缀；可空（不猜） tool_name TEXT NOT NULL, -- 小写归一：write/edit/bash/... action TEXT NOT NULL, -- write | exec（本批只落这两种） path TEXT, -- 相对项目根（无则相对 cwd），展示/聚合 path_dir TEXT, -- 相对目录，聚合键 path_abs TEXT, -- 归一化绝对路径，撞车判定（跨 cwd 可比） args_digest TEXT, -- sha256(参数摘要)[:16]，**不含内容** ok INTEGER, -- 1/0/NULL（NULL=未知，不假装成功） seen_at TEXT NOT NULL -- UTC ISO（%Y-%m-%dT%H:%M:%SZ） )",
+      "hash": "55685d8433a8a87c"
+    },
+    {
+      "type": "table",
+      "name": "workspace_map",
+      "table": "workspace_map",
+      "sql": "CREATE TABLE workspace_map ( path_prefix TEXT PRIMARY KEY, -- 归一化后的路径前缀（正斜杠、无尾斜杠、全小写） project TEXT NOT NULL, -- 项目前缀（如 ANYI） note TEXT, created_at TEXT NOT NULL )",
+      "hash": "c56575de0ea06a4b"
+    },
+    {
+      "type": "trigger",
+      "name": "ev_no_delete",
+      "table": "events",
+      "sql": "CREATE TRIGGER ev_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'events are immutable'); END",
+      "hash": "002a59bce9735d55"
+    },
+    {
+      "type": "trigger",
+      "name": "ev_no_update",
+      "table": "events",
+      "sql": "CREATE TRIGGER ev_no_update BEFORE UPDATE ON events BEGIN SELECT RAISE(ABORT, 'events are immutable'); END",
+      "hash": "08155edce59b1cbf"
+    },
+    {
+      "type": "view",
+      "name": "citizens_all",
+      "table": "citizens_all",
+      "sql": "CREATE VIEW citizens_all AS SELECT citizen_id, display_name, kind, role, host, status, created_at, is_owner, account_id, device_id, host_session_key, last_seen_at, archived_at FROM citizens UNION ALL SELECT citizen_id, display_name, kind, role, host, status, created_at, is_owner, account_id, device_id, host_session_key, last_seen_at, archived_at FROM citizens_archive",
+      "hash": "ffaf8757efde9325"
+    },
+    {
+      "type": "view",
+      "name": "kb_path_stats",
+      "table": "kb_path_stats",
+      "sql": "CREATE VIEW kb_path_stats AS SELECT vault_id, path, COUNT(*) AS hits, MAX(ts) AS last_at, SUM(CASE WHEN action='open' THEN 1 ELSE 0 END) AS open_count, SUM(CASE WHEN action IN ('create','append','update') THEN 1 ELSE 0 END) AS write_count, SUM(CASE WHEN action='rollback' THEN 1 ELSE 0 END) AS rollback_count, COUNT(DISTINCT citizen_id) AS readers FROM kb_access GROUP BY vault_id, path",
+      "hash": "37c09aece3675e55"
+    }
+  ]
+}

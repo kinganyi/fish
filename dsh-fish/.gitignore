@@ -1,0 +1,26 @@
+node_modules/
+.tmp/
+*.log
+.pnpm-store/
+.probe-tmp/
+# 双跑器产物：每次运行都重写，属于证据而非源码（判据读数记在 NOTES 里）
+test/conformance/out/
+
+# 冻结快照的 SQLite 协调文件：**只读**打开 WAL 库时由 SQLite 自己建（不是我们写的），
+# 每次跑对拍都会重新出现，不该进仓库。
+test/conformance/snapshot/index.sqlite-shm
+test/conformance/snapshot/index.sqlite-wal
+
+# 冻结快照本体：**不入库**。两个理由，都不是"图省事"：
+#   ① 它是**生产数据**（真实记忆标题 / 147 个公民 / 会话键）——本仓是公共仓，导出一份
+#      生产库等于把用户数据发布出去；
+#   ② 仓根 `.gitignore` 本来就有一条 `*.sqlite` 的护栏，加例外等于自己拆护栏。
+# 复现方式写在 `test/conformance/snapshot/README.md`；判据锚点是同目录 `manifest.json`
+# 里的 sha256（"我这次跑的是哪一份数据"可核）。
+test/conformance/snapshot/index.sqlite
+
+# 2026-11-09：sourcemap 是构建产物（618 KB），生产不需要（package.json 的 files 也没收）
+lib/*.map
+
+# 2026-11-09：pnpm pack 的产物（197 KB/次），不入库
+*.tgz

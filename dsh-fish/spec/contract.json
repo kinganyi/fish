@@ -1,0 +1,173 @@
+{
+  "contractVersion": "v0",
+  "minHostVersion": "0.2.0-rc.2",
+  "generatedBy": "scripts/gen-spec.mjs",
+  "source": {
+    "fishPy": "p0/fish.py",
+    "schemaDb": "p0/data/index.sqlite",
+    "fishPySha256_12": "135791ce6f9d",
+    "mcpServerInfo": {
+      "name": "fish",
+      "version": "0.3.0"
+    },
+    "python": "3.11.9"
+  },
+  "implMatrix": [
+    {
+      "id": "memory-write",
+      "name": "记忆写（remember/withdraw/supersede/owner-fix）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "memory-read",
+      "name": "记忆读（recall/read_body/resolve_code/list）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "links",
+      "name": "关联（写时建边 + neighbors 五策略）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "decay",
+      "name": "衰减与归档（forgetting/archive）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "search",
+      "name": "检索（FTS5 中文 bigram + 过滤下推）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "injection",
+      "name": "注入包（L0 + 8 段 + 预算裁剪 + 包尾两行）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "identity",
+      "name": "身份与凭证（register/whoami/session_start）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "board",
+      "name": "看板与撞车（board/presence/collision）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "push",
+      "name": "推送（候选 + 四时机 + 节流）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "kb",
+      "name": "知识库（kb/kb_write）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "corpus",
+      "name": "语料层（corpus 只读面 + fish_corpus 独立库 corpus.sqlite）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "layout",
+      "name": "布局渲染（layout render/verify）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "cli",
+      "name": "CLI 运维（fish.py 全部叶子 → /fish 命令面）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "hosts",
+      "name": "多宿主 hooks（probe/install/health）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "project-alias",
+      "name": "项目与别名（project/alias/workspace）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "config",
+      "name": "配置开关（config 表 + 56 键）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "backup",
+      "name": "备份恢复（backup/restore/snapshot）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    },
+    {
+      "id": "healthcheck",
+      "name": "健康检查（healthcheck/doctor/verify）",
+      "impl": "python",
+      "note": "影子期以 Python 为准；换心期逐块升 shadow → ts"
+    }
+  ],
+  "capabilities": [
+    "memory-write",
+    "memory-read",
+    "links",
+    "decay",
+    "search",
+    "injection",
+    "identity",
+    "board",
+    "push",
+    "kb",
+    "corpus",
+    "layout",
+    "cli",
+    "hosts",
+    "project-alias",
+    "config",
+    "backup",
+    "healthcheck"
+  ],
+  "concurrency": {
+    "journalMode": "wal",
+    "busyTimeoutMs": 5000,
+    "beginMode": "IMMEDIATE",
+    "longTransactionLimitMs": 50,
+    "retryBackoffMs": [
+      50,
+      150,
+      400
+    ]
+  },
+  "shadowPolicy": {
+    "toolRegistrations": 0,
+    "promptInjections": 0,
+    "dbOpenMode": "ro",
+    "writePaths": "全部禁用（生成命令 + 人工执行）",
+    "reason": "与 mcp__fish__* 和 hooks.json 4 条并存：同层同名工具会抛错、双份注入无法归因、双写者会互相覆盖"
+  },
+  "specFiles": {
+    "schema.sql": "face6aece3629134ffb87ee02b641ed36635fc122fbbbb23f2dc85786359c06d",
+    "schema.fingerprint.json": "c39b7cef819e7893edefa2d88dad7fb4dddd8f64f6088e702dc5555b449fc747",
+    "events.json": "ab30639feae64d852cff8a518a79f57c4716a491540e51ad894c9faa5550923d",
+    "tools.json": "b1c7e7c100b40f4d8cd8d042448d710b38afd4625f6cdbde58c91842f71e3f7b",
+    "injection.json": "9c21e7995059dd4ca70a4aaf9556550f16aa70a7de10d0a2e969ff51425a1892",
+    "layout/cut.json": "eb4833d68278436f068fde689d8e03ffc737d96a3266eccf7af574e45ca360e1",
+    "cli-map.json": "395050f0b5f37e1ecc8592fed75b88385bfd1d2c0338f11d290e95d5f885fc8b",
+    "corpus.schema.sql": "fb5a42c63a3c83e7b3dd0f1f1d53b121d4ad301ccd194e75df28949c18d90672"
+  }
+}
