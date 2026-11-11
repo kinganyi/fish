@@ -27,6 +27,7 @@
 
 纪律：本文件**不建库、不写文件**（连 tempfile 都不需要）；只读源码与模块对象。
 """
+import gzip
 import ast
 import builtins
 import importlib.util
@@ -529,12 +530,45 @@ class PushModuleContractTest(unittest.TestCase):
             old_src, origin = pre.read_text(encoding="utf-8", errors="replace"), "backup"
         else:
             old_src, origin = self._git_blob("da8d24f^", "p0/fish.py"), "git:da8d24f^"
-        if not old_src:
-            self.skipTest("T02 前版本不可达（备份与 git blob 都取不到）——判不到，不是通过")
         new_srcs = [self._git_blob("da8d24f", p)
                     for p in ("p0/fish.py", "p0/fish_push.py", "p0/fish_common.py")]
+
+        # 2026-11-11（外部审查 🔴12 的收口）：此前这条判据**永远 SKIP**——它要的
+        # `da8d24f`（T02 提交）已经不在了（仓库历史上被 force-push 过，那个对象
+        # 不在任何 ref 里），而发布树又没有 `历史版本/` 备份。
+        #
+        # T02 那一刀的**等价提交还在**：全分支 bundle 里的 `bc69ef7`，提交信息原文就是
+        # "fish.py 15,464->13,980"，与文档记载一致；其父 `bc69ef7^` 就是 T02 前版本。
+        # 已把**这一对**导出成随仓库分发的 fixture（`test-fixtures/t02/*.gz`，共 546 KB），
+        # 于是**任何 clone 都能真判**，不再依赖本机历史或网络。
+        #
+        # 优先级：fixture → 本地备份 → git blob → skip。用同一刀的 pre/post **配对**，
+        # 比"一个来自找不到的提交、一个来自别处"更可靠——判据证的是"这次搬运没改函数体"，
+        # 配对必须是同一次搬运。
+        fx = P0 / "test-fixtures" / "t02"
+        fx_names = ("t02-pre.fish.py.gz", "t02-post.fish.py.gz",
+                    "t02-post.fish_push.py.gz", "t02-post.fish_common.py.gz")
+        if all((fx / n).exists() for n in fx_names):
+            def _read_gz(name):
+                with gzip.open(fx / name, "rt", encoding="utf-8", errors="replace") as fh:
+                    return fh.read()
+            old_src = _read_gz(fx_names[0])
+            new_srcs = [_read_gz(n) for n in fx_names[1:]]
+            origin = "fixture:test-fixtures/t02（源自 bundle 的 bc69ef7 配对）"
+        elif not all(new_srcs):
+            post_dir = P0 / "历史版本" / "t02-post"
+            fallback = []
+            for f in ("fish.py", "fish_push.py", "fish_common.py"):
+                p = post_dir / (f + ".bak")
+                fallback.append(p.read_text(encoding="utf-8", errors="replace")
+                                if p.exists() else None)
+            if all(fallback):
+                new_srcs = fallback
+
+        if not old_src:
+            self.skipTest("T02 前版本不可达（fixture/备份/git 都没有）——判不到，不是通过")
         if not all(new_srcs):
-            self.skipTest("T02 提交快照取不到（git 不可用）——判不到，不是通过")
+            self.skipTest("T02 提交快照取不到（fixture/备份/git 都没有）——判不到，不是通过")
         old_defs = {}
         for node in ast.parse(old_src).body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
