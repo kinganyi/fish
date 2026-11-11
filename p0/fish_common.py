@@ -838,3 +838,16 @@ def board_relpath(scope, scope_key, period_key) -> str:
     if scope == "branch":
         return f"10-项目库/_分支-{scope_key}/{name}"
     raise ValueError(f"未知 scope：{scope!r}（可用：{', '.join(BOARD_SCOPES)}）")
+
+
+# ============================================================
+# 「未归属」哨兵（2026-11-11 从 fish.py 下沉，用户裁定「允许无主」）
+#
+# 为什么它必须在共享层：`fish_rebuild` 重建时要**豁免**这个值。否则重建的
+# "owner 必须是有效公民"归一逻辑会把 `unattributed` 当成无效值、改成系统主人——
+# 一次 rebuild 就把"当时没带凭证"抹成"主人写的"（假归属，实测可复现）。
+#
+# 语义：它**不是**错误值，也不是 `NULL`。它诚实地表示"写入那一刻没有凭证"，
+# 可筛选、可事后用 `fish owner-fix` 补，也**允许一直不补**。
+# ============================================================
+UNATTRIBUTED = "unattributed"

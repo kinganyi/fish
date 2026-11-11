@@ -64,7 +64,7 @@ from fish_schema import (AUDIT_DIR_NAME, FALLBACK_PROJECT_NAME, SCHEMA, _ACCESS_
                          _STINT_OPEN_INDEX_DDL, _STINT_OPEN_INDEX_NAME, _TOOL_ACTIVITY_COLS, _TOOL_ACTIVITY_DDL,
                          _WORKSPACE_MAP_DDL, _WORKSPACE_SCHEMA, connect)
 # 2026-11-11（E-11 拆包第四刀前置）：看板路径规则下沉共享层。
-from fish_common import BOARD_SCOPES, board_relpath  # noqa: F401
+from fish_common import BOARD_SCOPES, UNATTRIBUTED, board_relpath  # noqa: F401
 # 2026-11-11（E-11 拆包第四刀）：建表/补列/迁移辅助搬到 fish_db。
 # `migrate` 本身仍在本文件（它编制 KB 专属的 ensure，搬走会造成上行依赖）。
 from fish_db import (PresenceMigrationError, _CITIZENS_ALL_COLUMNS, _PRESENCE_SESSION_BACKFILL, _board_seen_backup,
@@ -3822,7 +3822,8 @@ IDENTITY_SOURCE_UNATTRIBUTED = "身份来源：未归属"
 # 能被筛选、能被 `owner-fix` 补归属。
 # 2026-11-11：原先 `mcp_server.py:55` 自己定义了一份同名常量，现统一到这里再被两边引用
 # ——两处各写一份哨兵值，正是本文件反复警告的"两份实现必然漂"。
-UNATTRIBUTED = "unattributed"
+# 2026-11-11：哨兵已下沉 `fish_common`（见该文件说明）；同名绑定由上面的
+# from-import 提供，既有引用不用改。删掉这里是为了**只有一处真相**。
 
 CREDENTIAL_NO_TOKEN = "凭证状态：未提供凭证（无凭证写入的归属会记成 unattributed）"
 CREDENTIAL_UNKNOWN = ("凭证状态：未知（这条 token 不在库中——明文只在签发时输出一次，"
@@ -5320,8 +5321,34 @@ def cmd_remember(args):
     try:
         # 2026-10-26（复审 ⚪N6）：没给 `--owner` 且手上有有效 env 凭证 → 记给凭证的
         # 公民（MCP 的 `_owner_value` 就是这一句）。给了 `--owner` 时一个字都不干预。
-        owner_arg = getattr(args, "owner", None) or token_actor_citizen_id(conn)
-        owner = resolve_owner_arg(conn, owner_arg)
+        #
+        # 2026-11-11（用户裁定「**允许无主**」）：把"没给 --owner"再拆成两种情形。
+        # 旧实现把两者都交给 `resolve_owner_arg(conn, None)`，而那个函数语义是
+        # 「未指定 → **系统主人**」——于是"命令行随手写一条、手上又没凭证"会被
+        # **静默记在主人头上**。那不是无主，是**假归属**：一条陌生人写的东西算在
+        # 主人名下，事后无法与"主人真写的"区分，比未归属更糟。
+        #
+        # 新口径（与 MCP 的 `_owner_value` 对齐）：
+        #   · 显式给了 `--owner`  → 照旧走严格校验（拼错就报错，不静默接受）
+        #   · 有 env 凭证        → 记给凭证的公民
+        #   · 两者都没有          → **`unattributed`**，并打印一句怎么补归属
+        #
+        # 注意 `resolve_owner_arg` 本身一个字没改：它"None→系统主人"的语义仍被
+        # `test_p1a` 钉着，别的调用方（以及 API 语义）都还依赖它。变的是**调用方式**。
+        _explicit_owner = getattr(args, "owner", None)
+        _token_cid = token_actor_citizen_id(conn)
+        if _explicit_owner:
+            owner = resolve_owner_arg(conn, _explicit_owner)
+        elif _token_cid:
+            owner = resolve_owner_arg(conn, _token_cid)
+        else:
+            owner = UNATTRIBUTED
+            # 「尽可能避免无主」的那一半：把**怎么补**直接写在输出里，而不是静静记下。
+            # 不阻断写入（记忆比归属重要），只是让"无主"这件事可见、可修。
+            print(f"⚠ 本次未带凭证，归属记为「未归属」（{UNATTRIBUTED}）。"
+                  f"要记给某个公民：设环境变量 FISH_SESSION_TOKEN，或显式给 --owner <citizen_id>；"
+                  f"事后补：fish owner-fix <编码> --owner <citizen_id>",
+                  file=sys.stderr)
         occurred_at = normalize_occurred_at(getattr(args, "occurred_at", None))
         # 外部审查 🔴6（分级写入鉴权）：`has_credential` **只看 env 凭证**，
         # 不看 `owner`——不带 `--owner` 时 `resolve_owner_arg` 会回落成系统主人
@@ -8820,12 +8847,27 @@ def cmd_healthcheck(args):
         print(f"  全文索引 {fts} 条" + (f"  ⚠ 落后 {gap} 条（跑 fish reindex 补齐）"
                                       if gap else "（与记忆同步）"))
     # owner 必须是有效公民（07 D-13）。库里有公民知识时才检查，空库不误报。
+    #
+    # 2026-11-11（用户裁定「**允许无主**」）：把两种"owner 不是公民"**分开报**——
+    #   · `unattributed` = 当时没带凭证写入。**这是允许的正常态，不是故障**：
+    #     它诚实（不冒充别人）、可筛选、可事后补。所以这里只告知，不催人归一。
+    #   · 幽灵归属 = owner 指向一个**不存在的公民**（或别的乱值）。这才是真问题：
+    #     归属指向了不存在的人，事后既查不到也补不回来。
+    # 旧实现把两者混成一条并建议"跑 rebuild 归一到系统主人"——那等于把无主
+    # **强行嫁祸给主人**，与"允许无主"正好相反。
     ids = {r[0] for r in conn.execute("SELECT citizen_id FROM citizens")}
-    bad_owner = [c for c, o in conn.execute("SELECT code,owner FROM code_index")
-                 if ids and o != "unknown" and o not in ids] if ids else []
-    if bad_owner:
-        print(f"  ⚠ owner 不是有效公民 {len(bad_owner)} 条：{', '.join(bad_owner[:5])}"
-              f"（跑 fish rebuild 可归一到系统主人）")
+    _rows_owner = list(conn.execute("SELECT code,owner FROM code_index")) if ids else []
+    _unattr = [c for c, o in _rows_owner if o == UNATTRIBUTED]
+    _ghost = [c for c, o in _rows_owner
+              if o != UNATTRIBUTED and o != "unknown" and o not in ids]
+    if _unattr:
+        print(f"  未归属 {len(_unattr)} 条（当时没带凭证写入；**允许无主**，可不处理）："
+              f"{', '.join(_unattr[:5])}")
+        print(f"        要补归属：fish owner-fix <编码> --owner <citizen_id>"
+              f"（不补也合规）")
+    if _ghost:
+        print(f"  ⚠ owner 指向不存在的公民 {len(_ghost)} 条（幽灵归属，需要处理）："
+              f"{', '.join(_ghost[:5])}")
     try:                            # 语料层（T03）：库不存在 → 空读数（"没采过"不是"坏了"）
         cst = fish_corpus.stats(root=root)
         print(f"  语料 {cst['segments']} 段 / 会话 {cst['sessions']} / 降级 {len(cst['degraded'])}"

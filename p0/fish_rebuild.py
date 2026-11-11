@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 
 from fish_common import (body_relpath, reindex_fts, resolve_owner,
-                         split_code_prefix)
+                         split_code_prefix, UNATTRIBUTED)
 from fish_trust import load_ownership_merge_map, resolve_merged
 
 
@@ -183,7 +183,8 @@ def rebuild_projection(conn, root: Path) -> dict:
                 owner = _resolved
         # owner 必须是有效公民（07 D-13）。有公民知识时把无效值归一到系统主人并逐条记录，
         # 而不是把它写回投影（否则会留下指向幽灵公民的归属）。
-        if valid_citizen_ids and owner not in valid_citizen_ids and owner != "unknown":
+        if (valid_citizen_ids and owner not in valid_citizen_ids
+            and owner not in ("unknown", UNATTRIBUTED)):   # 2026-11-11：豁免「未归属」
             rep["owner_normalized"] += 1
             rep["owner_normalized_list"].append(f"{code}: {owner!r} → {sys_owner!r}")
             rep["normalized_codes"].add(code)
@@ -339,7 +340,8 @@ def rebuild_projection(conn, root: Path) -> dict:
         # 变成 healthcheck 里永远消不掉的最后一条（2026-10-25 实测：归一 10→1，
         # 剩下的那一条正是从快照补回的）。
         r_owner = s["owner"]
-        if valid_citizen_ids and r_owner not in valid_citizen_ids and r_owner != "unknown":
+        if (valid_citizen_ids and r_owner not in valid_citizen_ids
+            and r_owner not in ("unknown", UNATTRIBUTED)):  # 同上
             rep["owner_normalized"] += 1
             rep["owner_normalized_list"].append(f"{code}: {r_owner!r} → {sys_owner!r}")
             rep["normalized_codes"].add(code)

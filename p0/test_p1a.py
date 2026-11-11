@@ -242,7 +242,30 @@ class FishP1aTest(unittest.TestCase):
         fish.cmd_remember(ns)
         conn = self._conn()
         row = conn.execute("SELECT owner FROM code_index WHERE title='无 owner'").fetchone()
-        self.assertEqual(row[0], "OWNER1", "CLI 缺省必须落到系统主人，而不是 human-anyi")
+        # 2026-11-11（用户裁定「**允许无主**」）：这里的期望值从 `OWNER1` 改成
+        # `unattributed`。原断言「CLI 缺省必须落到系统主人」编码的是**旧策略**，
+        # 而旧策略正是问题所在：命令行随手写一条、手上又没有凭证时，会被**静默记在
+        # 主人头上**——那是假归属，事后无法与"主人真写的"区分。
+        #
+        # 这条测试的**原意仍然成立且继续守着**：不许写 `human-anyi` 这种幽灵 ID。
+        # 现在它守得更严：既不是幽灵，也不是主人，而是一个诚实的「未归属」。
+        self.assertEqual(row[0], "unattributed",
+                         "CLI 无凭证时必须记未归属（允许无主），不得冒充幽灵 ID 或主人")
+        self.assertNotEqual(row[0], "human-anyi", "幽灵 ID 不许再出现")
+        self.assertNotEqual(row[0], "OWNER1",
+                            "**假归属**：无凭证的写入不许记到系统主人头上")
+        conn.close()
+
+        # 对照：显式给了 --owner 时**必须**记给那个公民——
+        # 否则"改成永不归属"也会被上面几条放过去（判据要能区分「允许无主」和「永不归属」）。
+        ns2 = type("A", (), {"root": self.root, "project": "TEST", "title": "显式 owner",
+                             "body": "", "type": "fact", "tags": [], "visibility": "shared",
+                             "owner": "DEV001", "session_actor": None, "attach": [],
+                             "cause": None})()
+        fish.cmd_remember(ns2)
+        conn = self._conn()
+        row = conn.execute("SELECT owner FROM code_index WHERE title='显式 owner'").fetchone()
+        self.assertEqual(row[0], "DEV001", "显式 --owner 必须被尊重")
         conn.close()
 
     def test_occurred_at_backdating(self):
