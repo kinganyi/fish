@@ -127,9 +127,10 @@ FISH_COMMON_LINES_MAX = 880
 # 函数，外部审查 🔴9 就出在它身上。给它自己的窗口，防它再长成第二个巨石。
 FISH_REBUILD_LINES_MIN = 380
 FISH_REBUILD_LINES_MAX = 520
-# 2026-11-11 新模块 · 数据库 DDL 常量（纯数据，只依赖 stdlib）。
-FISH_SCHEMA_LINES_MIN = 340
-FISH_SCHEMA_LINES_MAX = 460
+# 2026-11-11 新模块 · 数据库 DDL 常量 + `SCHEMA` 拼装 + `connect`（纯数据 + 8 行连接）。
+# 第三刀把知识库表结构与主库拼装也归到这里——所以窗口随之上抬到 700。
+FISH_SCHEMA_LINES_MIN = 480
+FISH_SCHEMA_LINES_MAX = 700
 # 2026-11-11 新模块：身份锚授权 + 归属合并链解析（外部审查 🔴5 / 🔴9 的修法）。
 # 按既有惯例给新模块各自留窗口，防止它长成第二个巨石。
 FISH_TRUST_LINES_MIN = 120

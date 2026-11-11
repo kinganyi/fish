@@ -47,20 +47,22 @@ from fish_trust import (AUTH_REQUIRED_MEM_TYPES, enforce_mem_type_auth,  # noqa:
 # 2026-11-11（E-11 拆包）：`rebuild_projection`（404 行，fish.py 里最长最危险的函数）
 # 搬到 `fish_rebuild`。它不 import fish，用的是下层 fish_common + fish_trust（J2）。
 from fish_rebuild import rebuild_projection  # noqa: F401
-# 2026-11-11（E-11 拆包第二刀）：DDL 常量搬到 fish_schema（纯数据，只依赖 stdlib）。
-# `SCHEMA` 仍留在本文件——它是组合者，要拼上 fish_kb._KB_SCHEMA。
-from fish_schema import (                         AUDIT_DIR_NAME, FALLBACK_PROJECT_NAME, _ACCESS_LOG_COLS, _ACCESS_LOG_DDL,
-                         _ACCESS_LOG_INDEXES, _ACTIVITY_INDEXES, _ACTIVITY_SCHEMA, _AGENT_ACCOUNTS_DDL,
-                         _BOARDS_DDL, _BOARDS_INDEXES, _BOARD_POSTS_DDL, _BOARD_POSTS_INDEXES,
-                         _BOARD_SCHEMA, _BOARD_SEEN_DDL, _BOARD_SEEN_PK_COLS, _BOARD_TABLE_DDLS,
-                         _CITIZENS_ARCHIVE_DDL, _CITIZENS_NEW_COLS, _IDENTITY_INDEXES, _IDENTITY_SCHEMA,
-                         _IDENTITY_TABLE_DDLS, _LINKS_COLS, _LINKS_DDL, _LINKS_INDEXES,
-                         _NAME_ALIASES_DDL, _NAME_SCHEMA, _PRESENCE_DDL, _PRESENCE_NEW_COLS,
-                         _PRESENCE_PK_COLS, _PRESENCE_V2_COLS, _PRESENCE_V2_DDL, _PRESENCE_V3_COLS,
-                         _PROJECT_STINTS_DDL, _PUSH_LOG_COLS, _PUSH_LOG_DDL, _PUSH_LOG_INDEXES,
-                         _PUSH_SCHEMA, _SESSION_TOKENS_DDL, _STINT_OPEN_INDEX_COLS, _STINT_OPEN_INDEX_DDL,
-                         _STINT_OPEN_INDEX_NAME, _TOOL_ACTIVITY_COLS, _TOOL_ACTIVITY_DDL, _WORKSPACE_MAP_DDL,
-                         _WORKSPACE_SCHEMA)
+# 2026-11-11（E-11 拆包第二/三刀）：DDL 常量 + `SCHEMA` 拼装 + `connect`
+# 全部归到 fish_schema（纯数据 + 8 行连接，只依赖 stdlib）。
+from fish_schema import (AUDIT_DIR_NAME, FALLBACK_PROJECT_NAME, SCHEMA, _ACCESS_LOG_COLS,
+                         _ACCESS_LOG_DDL, _ACCESS_LOG_INDEXES, _ACTIVITY_INDEXES, _ACTIVITY_SCHEMA,
+                         _AGENT_ACCOUNTS_DDL, _BOARDS_DDL, _BOARDS_INDEXES, _BOARD_POSTS_DDL,
+                         _BOARD_POSTS_INDEXES, _BOARD_SCHEMA, _BOARD_SEEN_DDL, _BOARD_SEEN_PK_COLS,
+                         _BOARD_TABLE_DDLS, _CITIZENS_ARCHIVE_DDL, _CITIZENS_NEW_COLS, _IDENTITY_INDEXES,
+                         _IDENTITY_SCHEMA, _IDENTITY_TABLE_DDLS, _KB_ACCESS_DDL, _KB_ACCESS_INDEXES,
+                         _KB_PATH_STATS_COLUMNS, _KB_PATH_STATS_VIEW, _KB_SCHEMA, _KB_VAULT_COLS,
+                         _KB_VAULT_DDL, _KB_VAULT_INDEXES, _LINKS_COLS, _LINKS_DDL,
+                         _LINKS_INDEXES, _NAME_ALIASES_DDL, _NAME_SCHEMA, _PRESENCE_DDL,
+                         _PRESENCE_NEW_COLS, _PRESENCE_PK_COLS, _PRESENCE_V2_COLS, _PRESENCE_V2_DDL,
+                         _PRESENCE_V3_COLS, _PROJECT_STINTS_DDL, _PUSH_LOG_COLS, _PUSH_LOG_DDL,
+                         _PUSH_LOG_INDEXES, _PUSH_SCHEMA, _SESSION_TOKENS_DDL, _STINT_OPEN_INDEX_COLS,
+                         _STINT_OPEN_INDEX_DDL, _STINT_OPEN_INDEX_NAME, _TOOL_ACTIVITY_COLS, _TOOL_ACTIVITY_DDL,
+                         _WORKSPACE_MAP_DDL, _WORKSPACE_SCHEMA, connect)
 
 # 共享原语（2026-10-27 · 拆包 T02）：时间 / 摘要 / 文本计数只有一份实现，
 # 家在 `fish_common`。`fish.now_utc` 等旧名字继续可用，且与 `fish_common.now_utc`
@@ -80,37 +82,36 @@ from fish_corpus import CorpusError, CorpusNotReady  # noqa: F401
 # 全部继续可用，且与 `fish_kb.<name>` 是**同一个对象**。
 # 为什么不用 `import *`：漏名是静默的，而这里每个名字都被判据 J1 逐个查对象同一性。
 # 生成/校验：`python tools/gen_reexport.py --check`
-from fish_kb import (  # noqa: F401
-    KBError, KB_ACTIONS, KB_DEFAULT_IGNORE_GLOBS, KB_DEFAULT_MAX_OPEN_BYTES,
-    KB_ERROR_CODES, KB_MAGIC_SIGNATURES, KB_MANDATORY_DENY, KB_MAX_CONTENT_BYTES,
-    KB_MAX_ITEMS_PER_DIR, KB_MAX_LIMIT, KB_MEDIA_EXTS, KB_META_KEYS, KB_RESULTS,
-    KB_SAME_NAME_LIMIT, KB_SEARCH_MAX_FILE_BYTES, KB_SENSITIVE_PATTERNS,
-    KB_TREE_MAX_DEPTH, KB_UNATTRIBUTED, KB_VIAS, _KB_ACCESS_DDL, _KB_ACCESS_INDEXES,
-    _KB_DEVICE_NAMES, _KB_FIT_MARKER_RE, _KB_FM_KEY_RE, _KB_PASSWORD_PATTERN,
-    _KB_PASSWORD_RE, _KB_PATH_STATS_COLUMNS, _KB_PATH_STATS_VIEW, _KB_SCHEMA,
-    _KB_TOC_TITLE_BYTES, _KB_TREE_DEPTH_RULE, _KB_VAULT_COLS, _KB_VAULT_DDL, _KB_VAULT_INDEXES,
-    _KB_VAULT_SELECT, _STRICT_FALSE, _STRICT_TRUE, _kb_app_running,
-    _kb_backfill_mandatory_globs, _kb_backup_finalize, _kb_backup_meta,
-    _kb_backup_slug, _kb_backup_stats, _kb_cmd_backup, _kb_cmd_doctor, _kb_cmd_open,
-    _kb_cmd_rollback, _kb_cmd_search, _kb_cmd_stats, _kb_cmd_toc, _kb_cmd_tree,
-    _kb_cmd_vault,
-    _kb_cmd_write, _kb_commands_ready, _kb_dir_bytes, _kb_effective_globs,
-    _kb_exit_code, _kb_first_reparse, _kb_fit_text, _kb_fit_text_with_tail,
-    _kb_fmt_mtime, _kb_guard, _kb_ignored, _kb_is_device_name, _kb_is_reparse_entry,
-    _kb_is_sensitive_name, _kb_json_globs, _kb_judge_component, _kb_log_quiet,
-    _kb_merge_frontmatter, _kb_meta_json, _kb_obsidian_cli, _kb_open_impl,
-    _kb_parse_budget, _kb_parse_frontmatter_args, _kb_quote, _kb_read_content_file,
-    _kb_reject, _kb_rel_posix, _kb_render_document, _kb_same_name, _kb_scalar,
-    _kb_scan_counts, _kb_search_impl, _kb_search_multi, _kb_sensitive_notice,
-    _kb_split_frontmatter, _kb_toc_title, _kb_tree_dir, _kb_tree_impl, _kb_tree_lines,
-    _kb_tree_tail_hint, _kb_validate_globs, _kb_vault_brief, _kb_vault_dict,
-    _kb_vault_line, _kb_vault_norm, _kb_walk, _kb_within_budget, _kb_write_impl,
-    _strict_bool, kb_atomic_write, kb_backup, kb_backup_prune, kb_detect_eol,
-    kb_detect_text, kb_doctor, kb_log_access, kb_open, kb_read_text, kb_resolve_target,
-    kb_rollback, kb_search, kb_sha256_bytes, kb_sha256_file, kb_stats, kb_toc, kb_tree,
-    kb_vault_add, kb_vault_get, kb_vault_list, kb_vault_remove, kb_vault_scan,
-    kb_vault_set_default, kb_vault_set_mode, kb_write,
-)
+from fish_kb import ( # noqa: F401
+ KBError, KB_ACTIONS, KB_DEFAULT_IGNORE_GLOBS, KB_DEFAULT_MAX_OPEN_BYTES,
+ KB_ERROR_CODES, KB_MAGIC_SIGNATURES, KB_MANDATORY_DENY, KB_MAX_CONTENT_BYTES,
+ KB_MAX_ITEMS_PER_DIR, KB_MAX_LIMIT, KB_MEDIA_EXTS, KB_META_KEYS, KB_RESULTS,
+ KB_SAME_NAME_LIMIT, KB_SEARCH_MAX_FILE_BYTES, KB_SENSITIVE_PATTERNS,
+ KB_TREE_MAX_DEPTH, KB_UNATTRIBUTED, KB_VIAS,
+ _KB_DEVICE_NAMES, _KB_FIT_MARKER_RE, _KB_FM_KEY_RE, _KB_PASSWORD_PATTERN,
+ _KB_PASSWORD_RE,
+ _KB_TOC_TITLE_BYTES, _KB_TREE_DEPTH_RULE,
+ _KB_VAULT_SELECT, _STRICT_FALSE, _STRICT_TRUE, _kb_app_running,
+ _kb_backfill_mandatory_globs, _kb_backup_finalize, _kb_backup_meta,
+ _kb_backup_slug, _kb_backup_stats, _kb_cmd_backup, _kb_cmd_doctor, _kb_cmd_open,
+ _kb_cmd_rollback, _kb_cmd_search, _kb_cmd_stats, _kb_cmd_toc, _kb_cmd_tree,
+ _kb_cmd_vault,
+ _kb_cmd_write, _kb_commands_ready, _kb_dir_bytes, _kb_effective_globs,
+ _kb_exit_code, _kb_first_reparse, _kb_fit_text, _kb_fit_text_with_tail,
+ _kb_fmt_mtime, _kb_guard, _kb_ignored, _kb_is_device_name, _kb_is_reparse_entry,
+ _kb_is_sensitive_name, _kb_json_globs, _kb_judge_component, _kb_log_quiet,
+ _kb_merge_frontmatter, _kb_meta_json, _kb_obsidian_cli, _kb_open_impl,
+ _kb_parse_budget, _kb_parse_frontmatter_args, _kb_quote, _kb_read_content_file,
+ _kb_reject, _kb_rel_posix, _kb_render_document, _kb_same_name, _kb_scalar,
+ _kb_scan_counts, _kb_search_impl, _kb_search_multi, _kb_sensitive_notice,
+ _kb_split_frontmatter, _kb_toc_title, _kb_tree_dir, _kb_tree_impl, _kb_tree_lines,
+ _kb_tree_tail_hint, _kb_validate_globs, _kb_vault_brief, _kb_vault_dict,
+ _kb_vault_line, _kb_vault_norm, _kb_walk, _kb_within_budget, _kb_write_impl,
+ _strict_bool, kb_atomic_write, kb_backup, kb_backup_prune, kb_detect_eol,
+ kb_detect_text, kb_doctor, kb_log_access, kb_open, kb_read_text, kb_resolve_target,
+ kb_rollback, kb_search, kb_sha256_bytes, kb_sha256_file, kb_stats, kb_toc, kb_tree,
+ kb_vault_add, kb_vault_get, kb_vault_list, kb_vault_remove, kb_vault_scan,
+ kb_vault_set_default, kb_vault_set_mode, kb_write)
 
 # T02：下沉到 fish_common 的基础层 + push 领域（re-export，判据 J1）
 from fish_common import (ATTENTION_OPEN_KEYWORDS, ATTENTION_OPEN_WINDOW_DAYS, ATTENTION_TITLE_MAX_CHARS, CONFIG_DEFAULTS, _ALIAS_KINDS, _ALIAS_MAX_HOPS, _DEFAULT_DECAY, _alias_map, _board_seen_columns, _clip_chars, _index_one_fts, _key_type, _open_loop_predicate, _open_loop_rows, _presence_columns, _presence_has_session, _utc_str, _walk_alias, board_period, clean_prompt, compute_decay, ensure_fts, get_config, load_decay_cfg, local_date, parse_utc, push_outcome_window_hours, reindex_fts, resolve_name, resolve_project_names, warn_derived)  # noqa: F401
@@ -461,105 +462,6 @@ class PresenceMigrationError(RuntimeError):
 # 两条都写成判据（见 test_activity）。
 # 旧库补列清单（与 `_PRESENCE_NEW_COLS` 同理；当前与 DDL 逐列一致，
 # 留这份清单是为了"下次加列"时不用再想顺序，也为了让补列路径有单一入口）。
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS events (
-  seq       INTEGER PRIMARY KEY AUTOINCREMENT,
-  event_id  TEXT NOT NULL UNIQUE,
-  ts        TEXT NOT NULL,
-  type      TEXT NOT NULL,
-  actor     TEXT NOT NULL,
-  subject   TEXT NOT NULL,
-  payload   TEXT NOT NULL,
-  cause     TEXT,
-  refs      TEXT,
-  schema    TEXT NOT NULL DEFAULT 'evt@1'
-);
-
-CREATE TRIGGER IF NOT EXISTS ev_no_update BEFORE UPDATE ON events
-BEGIN SELECT RAISE(ABORT, 'events are immutable'); END;
-
-CREATE TRIGGER IF NOT EXISTS ev_no_delete BEFORE DELETE ON events
-BEGIN SELECT RAISE(ABORT, 'events are immutable'); END;
-
-CREATE TABLE IF NOT EXISTS code_registry (
-  prefix    TEXT PRIMARY KEY,
-  namespace TEXT,
-  last_date TEXT,
-  last_seq  INTEGER DEFAULT 0,
-  status    TEXT DEFAULT 'active'
-);
-
-CREATE TABLE IF NOT EXISTS code_index (
-  code             TEXT PRIMARY KEY,
-  title            TEXT,
-  project          TEXT,
-  owner            TEXT,
-  mem_type         TEXT,
-  visibility       TEXT,
-  status           TEXT DEFAULT 'active',
-  tags             TEXT,
-  file_path        TEXT,
-  occurred_at      TEXT,
-  recorded_at      TEXT,
-  last_accessed_at TEXT,
-  access_count     INTEGER DEFAULT 0,
-  dormant          INTEGER DEFAULT 0,
-  session_actor    TEXT,
-  attachments      TEXT,
-  superseded_by    TEXT
-);
-
-CREATE TABLE IF NOT EXISTS citizens (
-  citizen_id       TEXT PRIMARY KEY,
-  display_name     TEXT,
-  kind             TEXT,
-  role             TEXT,
-  host             TEXT,
-  status           TEXT DEFAULT 'active',
-  created_at       TEXT,
-  is_owner         INTEGER DEFAULT 0,
-  -- ↓ P1-a 追加的 5 列（旧库靠 migrate 的 ALTER 补齐，见 _CITIZENS_NEW_COLS）。
-  --   这一段必须与 _CITIZENS_ARCHIVE_DDL 逐列一致：citizens_all 按**列位置**拼。
-  account_id       TEXT,
-  device_id        TEXT,
-  host_session_key TEXT,
-  last_seen_at     TEXT,
-  archived_at      TEXT
-);
--- 注意：owner 的唯一索引不在 SCHEMA 里创建。
--- 旧库的 citizens 表可能还没有 is_owner 列，此时建索引会报 no such column。
--- 索引统一在 migrate() 里「先 ALTER 加列、再建索引」，保证新旧库都能走通。
-
-CREATE TABLE IF NOT EXISTS config (
-  key        TEXT PRIMARY KEY,
-  value      TEXT NOT NULL,
-  type       TEXT NOT NULL DEFAULT 'string',
-  updated_at TEXT
-);
-
--- 全文检索索引（ADR-005）。**派生表，不是真相源**：可由 code_index + 正文文件重建。
--- 为什么自己切 token 而不让 FTS 分：内置 unicode61 不做中文分词，「协作约定」是整 token，
--- 查「协作」永远 0 条（2026-10-22 实测）。详见 ADR-005 背景表。
-CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
-  code UNINDEXED,
-  title_idx,
-  body_idx,
-  tokenize='unicode61'
-);
-""" + _PUSH_SCHEMA + _IDENTITY_SCHEMA + _WORKSPACE_SCHEMA + _NAME_SCHEMA + _BOARD_SCHEMA \
-    + _ACTIVITY_SCHEMA + _KB_SCHEMA
-
-
-def connect(root: Path) -> sqlite3.Connection:
-    root.mkdir(parents=True, exist_ok=True)
-    db = root / "index.sqlite"
-    conn = sqlite3.connect(str(db), timeout=10.0)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=10000")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
-
-
 # 两张推送地基表的「补列 / 建索引」清单。
 # 补列用的声明都必须是**可加到非空表上**的（SQLite 的 ALTER ADD COLUMN 不允许
 # 无默认值的 NOT NULL），所以这里刻意比 _*_DDL 里的声明宽松——新建表仍按严格版走。

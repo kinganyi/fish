@@ -390,3 +390,199 @@ _PUSH_LOG_INDEXES = (
 AUDIT_DIR_NAME = "_audit"
 
 FALLBACK_PROJECT_NAME = "未分类"
+
+
+# ============================================================
+# 知识库表结构（2026-11-11 从 `fish_kb.py` 上移，E-11 拆包第三刀）
+#
+# 为什么从 `fish_kb` 搬到最底层的 schema 模块：主库的 `SCHEMA` 要拼上 `_KB_SCHEMA`
+# （知识库表和记忆表在同一个 index.sqlite 里）。放在 fish_kb 里时，`SCHEMA` 的组合
+# 就必须依赖 domain 模块 `fish_kb` —— 分层倒置。移到本模块后：
+#
+#     fish_common  ←  fish_schema  ←  fish_kb  ←  fish
+#
+# `fish_schema` 依旧**只依赖 stdlib**（这些全是纯 DDL 字符串），
+# `fish_kb` 改为从这里 import，`fish.py` 的 `SCHEMA` 也终于能在本模块内拼装。
+# ============================================================
+
+_KB_VAULT_DDL = """CREATE TABLE IF NOT EXISTS kb_vault (
+  vault_id       TEXT PRIMARY KEY,
+  name           TEXT NOT NULL UNIQUE,
+  path           TEXT NOT NULL,
+  path_key       TEXT NOT NULL,
+  mode           TEXT NOT NULL DEFAULT 'ro' CHECK (mode IN ('ro','rw')),
+  ignore_globs   TEXT NOT NULL DEFAULT '[".obsidian/**",".trash/**","90-模板/**"]',
+  max_open_bytes INTEGER NOT NULL DEFAULT 2097152,
+  is_default     INTEGER NOT NULL DEFAULT 0,
+  last_scan_at   TEXT,
+  last_scan_files   INTEGER,
+  last_scan_notes   INTEGER,
+  last_scan_bytes   INTEGER,
+  note           TEXT,
+  status         TEXT NOT NULL DEFAULT 'active',
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL
+);"""
+
+_KB_ACCESS_DDL = """CREATE TABLE IF NOT EXISTS kb_access (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  vault_id    TEXT NOT NULL,
+  path        TEXT NOT NULL,
+  citizen_id  TEXT NOT NULL DEFAULT 'unattributed',
+  account_id  TEXT,
+  action      TEXT NOT NULL,
+  result      TEXT NOT NULL DEFAULT 'ok',
+  via         TEXT NOT NULL,
+  ts          TEXT NOT NULL,
+  bytes       INTEGER,
+  sha256      TEXT,
+  backup_path TEXT,
+  meta        TEXT
+);"""
+
+_KB_VAULT_INDEXES = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_kb_vault_path ON kb_vault(path_key)",
+    # 部分唯一索引：默认库最多一个（is_default=0 的行可以无限多）
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_kb_vault_default "
+    "ON kb_vault(is_default) WHERE is_default = 1",
+)
+
+_KB_ACCESS_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS ix_kb_access_path ON kb_access(vault_id, path, ts DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_kb_access_citizen ON kb_access(citizen_id, ts DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_kb_access_action ON kb_access(action, ts DESC)",
+)
+
+_KB_PATH_STATS_VIEW = """CREATE VIEW IF NOT EXISTS kb_path_stats AS
+SELECT vault_id,
+       path,
+       COUNT(*)                                                    AS hits,
+       MAX(ts)                                                     AS last_at,
+       SUM(CASE WHEN action='open' THEN 1 ELSE 0 END)               AS open_count,
+       SUM(CASE WHEN action IN ('create','append','update') THEN 1 ELSE 0 END) AS write_count,
+       SUM(CASE WHEN action='rollback' THEN 1 ELSE 0 END)           AS rollback_count,
+       COUNT(DISTINCT citizen_id)                                   AS readers
+FROM kb_access
+GROUP BY vault_id, path;"""
+
+_KB_PATH_STATS_COLUMNS = ("vault_id", "path", "hits", "last_at", "open_count",
+                          "write_count", "rollback_count", "readers")
+
+_KB_SCHEMA = "\n" + "\n\n".join((_KB_VAULT_DDL, _KB_ACCESS_DDL)) + "\n"
+
+_KB_VAULT_COLS = ("vault_id", "name", "path", "path_key", "mode", "ignore_globs",
+                  "max_open_bytes", "is_default", "last_scan_at", "last_scan_files",
+                  "last_scan_notes", "last_scan_bytes", "note", "status",
+                  "created_at", "updated_at")
+
+
+# ============================================================
+# 主库 DDL 的拼装 + 连接（2026-11-11 从 `fish.py` 搬入，E-11 拆包第三刀）
+#
+# `SCHEMA` 是**组合者**：把下面这些分片按固定顺序拼起来。上一刀把分片搬进来之后，
+# 它终于也能在这里拼了——而不再需要 `fish.py` 去 import `fish_kb`（那是分层倒置）。
+# 同批把 `connect` 也搬来：它只依赖 `sqlite3` 与 `Path`，跟建表是一件事。
+#
+# 分层现在是干净的：
+#     fish_common  ←  fish_schema  ←  fish_kb / fish_rebuild  ←  fish
+# 本模块除 stdlib 外不 import 任何东西，所以在 J2 的允许侧，谁都可以安全依赖它。
+# ============================================================
+import sqlite3
+from pathlib import Path
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS events (
+  seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id  TEXT NOT NULL UNIQUE,
+  ts        TEXT NOT NULL,
+  type      TEXT NOT NULL,
+  actor     TEXT NOT NULL,
+  subject   TEXT NOT NULL,
+  payload   TEXT NOT NULL,
+  cause     TEXT,
+  refs      TEXT,
+  schema    TEXT NOT NULL DEFAULT 'evt@1'
+);
+
+CREATE TRIGGER IF NOT EXISTS ev_no_update BEFORE UPDATE ON events
+BEGIN SELECT RAISE(ABORT, 'events are immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS ev_no_delete BEFORE DELETE ON events
+BEGIN SELECT RAISE(ABORT, 'events are immutable'); END;
+
+CREATE TABLE IF NOT EXISTS code_registry (
+  prefix    TEXT PRIMARY KEY,
+  namespace TEXT,
+  last_date TEXT,
+  last_seq  INTEGER DEFAULT 0,
+  status    TEXT DEFAULT 'active'
+);
+
+CREATE TABLE IF NOT EXISTS code_index (
+  code             TEXT PRIMARY KEY,
+  title            TEXT,
+  project          TEXT,
+  owner            TEXT,
+  mem_type         TEXT,
+  visibility       TEXT,
+  status           TEXT DEFAULT 'active',
+  tags             TEXT,
+  file_path        TEXT,
+  occurred_at      TEXT,
+  recorded_at      TEXT,
+  last_accessed_at TEXT,
+  access_count     INTEGER DEFAULT 0,
+  dormant          INTEGER DEFAULT 0,
+  session_actor    TEXT,
+  attachments      TEXT,
+  superseded_by    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS citizens (
+  citizen_id       TEXT PRIMARY KEY,
+  display_name     TEXT,
+  kind             TEXT,
+  role             TEXT,
+  host             TEXT,
+  status           TEXT DEFAULT 'active',
+  created_at       TEXT,
+  is_owner         INTEGER DEFAULT 0,
+  -- ↓ P1-a 追加的 5 列（旧库靠 migrate 的 ALTER 补齐，见 _CITIZENS_NEW_COLS）。
+  --   这一段必须与 _CITIZENS_ARCHIVE_DDL 逐列一致：citizens_all 按**列位置**拼。
+  account_id       TEXT,
+  device_id        TEXT,
+  host_session_key TEXT,
+  last_seen_at     TEXT,
+  archived_at      TEXT
+);
+-- 注意：owner 的唯一索引不在 SCHEMA 里创建。
+-- 旧库的 citizens 表可能还没有 is_owner 列，此时建索引会报 no such column。
+-- 索引统一在 migrate() 里「先 ALTER 加列、再建索引」，保证新旧库都能走通。
+
+CREATE TABLE IF NOT EXISTS config (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  type       TEXT NOT NULL DEFAULT 'string',
+  updated_at TEXT
+);
+
+-- 全文检索索引（ADR-005）。**派生表，不是真相源**：可由 code_index + 正文文件重建。
+-- 为什么自己切 token 而不让 FTS 分：内置 unicode61 不做中文分词，「协作约定」是整 token，
+-- 查「协作」永远 0 条（2026-10-22 实测）。详见 ADR-005 背景表。
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+  code UNINDEXED,
+  title_idx,
+  body_idx,
+  tokenize='unicode61'
+);
+""" + _PUSH_SCHEMA + _IDENTITY_SCHEMA + _WORKSPACE_SCHEMA + _NAME_SCHEMA + _BOARD_SCHEMA \
+    + _ACTIVITY_SCHEMA + _KB_SCHEMA
+
+def connect(root: Path) -> sqlite3.Connection:
+    root.mkdir(parents=True, exist_ok=True)
+    db = root / "index.sqlite"
+    conn = sqlite3.connect(str(db), timeout=10.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn

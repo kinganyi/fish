@@ -40,6 +40,9 @@ import sys
 import time
 from pathlib import Path
 
+# 2026-11-11（E-11 拆包第三刀）：知识库表结构上移到最底层 schema 模块
+# ——这样主库 `SCHEMA` 能拼它而不必依赖本 domain 模块（避免分层倒置）。
+from fish_schema import (_KB_ACCESS_DDL, _KB_ACCESS_INDEXES, _KB_PATH_STATS_COLUMNS, _KB_PATH_STATS_VIEW, _KB_SCHEMA, _KB_VAULT_COLS, _KB_VAULT_DDL, _KB_VAULT_INDEXES)
 from fish_common import _exc_text, count_tokens, iso_local, now_utc, ulid, warn_derived
 
 # K3：`None → 'unattributed'` 的映射只在写入审计时做一次；常量在这里定死，
@@ -83,78 +86,13 @@ KB_META_KEYS = (
 #   ② `mode` 保留 CHECK：这是**权限位**（rw = 允许 AI 写人的十年笔记），
 #      与 citizens.kind 那类"会长的词表"不同，权限位不该静默扩展。
 #   ③ `last_scan_*` 只由显式 `kb vault scan` 写：读路径不写库，否则 `kb tree` 会变成写操作。
-_KB_VAULT_DDL = """CREATE TABLE IF NOT EXISTS kb_vault (
-  vault_id       TEXT PRIMARY KEY,
-  name           TEXT NOT NULL UNIQUE,
-  path           TEXT NOT NULL,
-  path_key       TEXT NOT NULL,
-  mode           TEXT NOT NULL DEFAULT 'ro' CHECK (mode IN ('ro','rw')),
-  ignore_globs   TEXT NOT NULL DEFAULT '[".obsidian/**",".trash/**","90-模板/**"]',
-  max_open_bytes INTEGER NOT NULL DEFAULT 2097152,
-  is_default     INTEGER NOT NULL DEFAULT 0,
-  last_scan_at   TEXT,
-  last_scan_files   INTEGER,
-  last_scan_notes   INTEGER,
-  last_scan_bytes   INTEGER,
-  note           TEXT,
-  status         TEXT NOT NULL DEFAULT 'active',
-  created_at     TEXT NOT NULL,
-  updated_at     TEXT NOT NULL
-);"""
-
 # 审计流水：**只增不改**。刻意不设 FK——vault 被 remove 之后，审计仍要能读。
 # `path` 存 vault 内相对路径（分隔符统一 '/'），'' = 整个库级别的动作。
-_KB_ACCESS_DDL = """CREATE TABLE IF NOT EXISTS kb_access (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  vault_id    TEXT NOT NULL,
-  path        TEXT NOT NULL,
-  citizen_id  TEXT NOT NULL DEFAULT 'unattributed',
-  account_id  TEXT,
-  action      TEXT NOT NULL,
-  result      TEXT NOT NULL DEFAULT 'ok',
-  via         TEXT NOT NULL,
-  ts          TEXT NOT NULL,
-  bytes       INTEGER,
-  sha256      TEXT,
-  backup_path TEXT,
-  meta        TEXT
-);"""
-
-_KB_VAULT_INDEXES = (
-    "CREATE UNIQUE INDEX IF NOT EXISTS ux_kb_vault_path ON kb_vault(path_key)",
-    # 部分唯一索引：默认库最多一个（is_default=0 的行可以无限多）
-    "CREATE UNIQUE INDEX IF NOT EXISTS ux_kb_vault_default "
-    "ON kb_vault(is_default) WHERE is_default = 1",
-)
-
-_KB_ACCESS_INDEXES = (
-    "CREATE INDEX IF NOT EXISTS ix_kb_access_path ON kb_access(vault_id, path, ts DESC)",
-    "CREATE INDEX IF NOT EXISTS ix_kb_access_citizen ON kb_access(citizen_id, ts DESC)",
-    "CREATE INDEX IF NOT EXISTS ix_kb_access_action ON kb_access(action, ts DESC)",
-)
-
 # 聚合视图：回答"谁在何时看过/改过哪篇 + 备份在哪"。事件流水能回答，
 # 聚合表答不了（回滚是用户拍板的硬需求，只有流水能定位到具体那次写）。
-_KB_PATH_STATS_VIEW = """CREATE VIEW IF NOT EXISTS kb_path_stats AS
-SELECT vault_id,
-       path,
-       COUNT(*)                                                    AS hits,
-       MAX(ts)                                                     AS last_at,
-       SUM(CASE WHEN action='open' THEN 1 ELSE 0 END)               AS open_count,
-       SUM(CASE WHEN action IN ('create','append','update') THEN 1 ELSE 0 END) AS write_count,
-       SUM(CASE WHEN action='rollback' THEN 1 ELSE 0 END)           AS rollback_count,
-       COUNT(DISTINCT citizen_id)                                   AS readers
-FROM kb_access
-GROUP BY vault_id, path;"""
-
 # 视图"自愈"的契约列：`_ensure_kb_views` 拿 PRAGMA table_info 读真实列与它比对。
-_KB_PATH_STATS_COLUMNS = ("vault_id", "path", "hits", "last_at", "open_count",
-                          "write_count", "rollback_count", "readers")
-
 # 两份 DDL 共用同一份常量给两个消费者（SCHEMA 建新库 / _ensure_kb_tables 升旧库）。
 # 再复制一份到 migrate 里就是漂移的起点（_ACCESS_LOG_DDL 的注释写过同一条理由）。
-_KB_SCHEMA = "\n" + "\n\n".join((_KB_VAULT_DDL, _KB_ACCESS_DDL)) + "\n"
-
 def _kb_backfill_mandatory_globs(conn: sqlite3.Connection) -> list:
     """把 `KB_MANDATORY_DENY` 回填进**既有** `kb_vault` 行（S2 · 幂等）。
 
@@ -370,12 +308,6 @@ def _kb_json_globs(raw) -> list:
     if not isinstance(data, list):
         raise KBError("bad_usage", f"ignore_globs 必须是 JSON 数组，收到 {type(data).__name__}")
     return [str(x) for x in data]
-
-
-_KB_VAULT_COLS = ("vault_id", "name", "path", "path_key", "mode", "ignore_globs",
-                  "max_open_bytes", "is_default", "last_scan_at", "last_scan_files",
-                  "last_scan_notes", "last_scan_bytes", "note", "status",
-                  "created_at", "updated_at")
 
 
 def _kb_vault_dict(row) -> dict:
@@ -3310,6 +3242,9 @@ _IMPORTED = frozenset({
     "secrets", "shutil", "sqlite3", "stat", "subprocess", "sys", "time", "Path",
     "count_tokens", "iso_local", "now_utc", "ulid", "_exc_text", "warn_derived",
     # 自己也在 globals 里，必须显式排除，否则会被算进 __all__
+    # 2026-11-11（E-11 拆包第三刀）：知识库 DDL 常量上移到 `fish_schema`。
+    # 它们是**导入**来的，必须登记——否则会被 `__all__` 当成导出面（J1/J1b 会红）。
+    "_KB_ACCESS_DDL", "_KB_ACCESS_INDEXES", "_KB_PATH_STATS_COLUMNS", "_KB_PATH_STATS_VIEW", "_KB_SCHEMA", "_KB_VAULT_COLS", "_KB_VAULT_DDL", "_KB_VAULT_INDEXES",
     "_IMPORTED",
 })
 
