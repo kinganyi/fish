@@ -231,27 +231,33 @@ class MainSchemaUntouchedTest(unittest.TestCase):
         self.assertEqual(bad, [], "主库建出了语料对象：%s" % bad)
 
     def test_20b_schema_sources_are_plain_literals(self):
-        """静态侧：`fish.py` 里所有 `_*_SCHEMA` 字面量都不许提 corpus。
+        """静态侧：所有 `*_SCHEMA` 分片字面量都不许提 corpus。
 
         与上一条互补：上一条查"最终跑出来的 SQL"，这一条查"源码里有没有人偷偷把
         corpus 的 DDL 拼进某个分片常量"（那种改法在运行时才看得出来）。
+
+        2026-11-11（E-11 拆包第二刀）：分片常量已搬到 `fish_schema.py`，本判据的
+        扫描面**跟着扩大**到那个文件——只扫 fish.py 的话它只剩 1 个命中，
+        会自己喊"判据可能已失明"（那正是它该有的自检）。
         """
-        tree = ast.parse(_read(FISH))
+        paths = [FISH, FISH.parent / "fish_schema.py"]
         offenders = []
         scanned = 0
-        for node in tree.body:
-            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-                continue
-            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            names = [t.id for t in targets if isinstance(t, ast.Name)]
-            if not any("SCHEMA" in n.upper() for n in names):
-                continue
-            scanned += 1
-            for sub in ast.walk(node.value):
-                if isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
-                        and "corpus" in sub.value.lower():
-                    offenders.append(names[0])
-                    break
+        for path in paths:
+            tree = ast.parse(_read(path))
+            for node in tree.body:
+                if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    continue
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                names = [t.id for t in targets if isinstance(t, ast.Name)]
+                if not any("SCHEMA" in n.upper() for n in names):
+                    continue
+                scanned += 1
+                for sub in ast.walk(node.value):
+                    if isinstance(sub, ast.Constant) and isinstance(sub.value, str) \
+                            and "corpus" in sub.value.lower():
+                        offenders.append(f"{path.name}::{names[0]}")
+                        break
         self.assertEqual(offenders, [], "这些 SCHEMA 分片的字面量里有 corpus：%s" % offenders)
         self.assertGreater(scanned, 3, "扫到的 SCHEMA 分片太少，判据可能已失明")
 

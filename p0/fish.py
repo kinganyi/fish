@@ -47,6 +47,20 @@ from fish_trust import (AUTH_REQUIRED_MEM_TYPES, enforce_mem_type_auth,  # noqa:
 # 2026-11-11（E-11 拆包）：`rebuild_projection`（404 行，fish.py 里最长最危险的函数）
 # 搬到 `fish_rebuild`。它不 import fish，用的是下层 fish_common + fish_trust（J2）。
 from fish_rebuild import rebuild_projection  # noqa: F401
+# 2026-11-11（E-11 拆包第二刀）：DDL 常量搬到 fish_schema（纯数据，只依赖 stdlib）。
+# `SCHEMA` 仍留在本文件——它是组合者，要拼上 fish_kb._KB_SCHEMA。
+from fish_schema import (                         AUDIT_DIR_NAME, FALLBACK_PROJECT_NAME, _ACCESS_LOG_COLS, _ACCESS_LOG_DDL,
+                         _ACCESS_LOG_INDEXES, _ACTIVITY_INDEXES, _ACTIVITY_SCHEMA, _AGENT_ACCOUNTS_DDL,
+                         _BOARDS_DDL, _BOARDS_INDEXES, _BOARD_POSTS_DDL, _BOARD_POSTS_INDEXES,
+                         _BOARD_SCHEMA, _BOARD_SEEN_DDL, _BOARD_SEEN_PK_COLS, _BOARD_TABLE_DDLS,
+                         _CITIZENS_ARCHIVE_DDL, _CITIZENS_NEW_COLS, _IDENTITY_INDEXES, _IDENTITY_SCHEMA,
+                         _IDENTITY_TABLE_DDLS, _LINKS_COLS, _LINKS_DDL, _LINKS_INDEXES,
+                         _NAME_ALIASES_DDL, _NAME_SCHEMA, _PRESENCE_DDL, _PRESENCE_NEW_COLS,
+                         _PRESENCE_PK_COLS, _PRESENCE_V2_COLS, _PRESENCE_V2_DDL, _PRESENCE_V3_COLS,
+                         _PROJECT_STINTS_DDL, _PUSH_LOG_COLS, _PUSH_LOG_DDL, _PUSH_LOG_INDEXES,
+                         _PUSH_SCHEMA, _SESSION_TOKENS_DDL, _STINT_OPEN_INDEX_COLS, _STINT_OPEN_INDEX_DDL,
+                         _STINT_OPEN_INDEX_NAME, _TOOL_ACTIVITY_COLS, _TOOL_ACTIVITY_DDL, _WORKSPACE_MAP_DDL,
+                         _WORKSPACE_SCHEMA)
 
 # 共享原语（2026-10-27 · 拆包 T02）：时间 / 摘要 / 文本计数只有一份实现，
 # 家在 `fish_common`。`fish.now_utc` 等旧名字继续可用，且与 `fish_common.now_utc`
@@ -211,39 +225,12 @@ def normalize_occurred_at(value):
 #   旧库里若已存在同名表而列不齐，`CREATE INDEX` 会报 no such column，
 #   而 SCHEMA 是先于 migrate 执行的 → 整个升级路径直接崩。
 #   索引统一放在 migrate() 里「先建表 → 再补列 → 最后建索引」。
-_ACCESS_LOG_DDL = """CREATE TABLE IF NOT EXISTS memory_access_log (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  code        TEXT NOT NULL,
-  citizen_id  TEXT,
-  session_key TEXT,
-  project     TEXT,
-  via         TEXT NOT NULL,
-  payload     TEXT,
-  accessed_at TEXT NOT NULL
-);"""
-
 # 字段语义（与 §2.1 一一对应）：
 #   citizen_id  谁读的（会话公民；空 = 未登记/未归属）
 #   session_key 哪次会话（同一宿主下区分 anyi-dev / anyi-review 这一级）
 #   project     读的时候在哪个项目（档期机制未落地时 = 编码所属项目，见 append_access_log）
 #   via         recall | resolve | read_body | inject | push | manual（代码里校验）
 #   payload     可选 JSON：推送候选 id 等，用于度量采纳率（§8.2）
-
-_LINKS_DDL = """CREATE TABLE IF NOT EXISTS links (
-  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-  src                TEXT NOT NULL,
-  dst                TEXT NOT NULL,
-  rel                TEXT NOT NULL,
-  source             TEXT NOT NULL,
-  weight             REAL DEFAULT 1.0,
-  evidence           TEXT,
-  created_at         TEXT NOT NULL,
-  removed_at         TEXT,
-  last_reinforced_at TEXT,
-  reinforce_count    INTEGER DEFAULT 0,
-  suppressed         INTEGER DEFAULT 0,
-  UNIQUE(src, dst, rel)
-);"""
 
 # 存储约定（§2.2）：**边单向存、查询双向做**。
 #   rel    supersedes | related | derived | contradicts | precedes（见 LINK_RELS）
@@ -285,26 +272,6 @@ _LINKS_DDL = """CREATE TABLE IF NOT EXISTS links (
 # 与 16 §5.6 的两表方案（push_log + push_outcome）的差异：合并成一张。
 # 理由是两张表严格 1:1、都靠 push_id 连，拆开只多一次 join 与一次"两边写不齐"的
 # 机会；而 07 的教训是"同一件事不要存两处"。字段一个没少，语义不变。
-_PUSH_LOG_DDL = """CREATE TABLE IF NOT EXISTS push_log (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  session_key   TEXT,
-  citizen_id    TEXT,
-  project       TEXT,
-  code          TEXT,
-  candidate_id  TEXT,
-  channel       TEXT NOT NULL,
-  budget_tokens INTEGER,
-  pushed_at     TEXT NOT NULL,
-  reaction      TEXT,
-  reacted_at    TEXT,
-  latency_sec   INTEGER,
-  content_hash  TEXT
-);"""
-
-_PUSH_SCHEMA = ("\n" + _ACCESS_LOG_DDL + "\n\n" + _LINKS_DDL
-                + "\n\n" + _PUSH_LOG_DDL + "\n")
-
-
 # ------------------------------------------------------ 身份层 P1-a DDL（纯结构）
 # 依据：身份层设计（账号 → 会话 → 凭证 → 档期 → 归档 → 合并视图）。
 #
@@ -328,16 +295,6 @@ _PUSH_SCHEMA = ("\n" + _ACCESS_LOG_DDL + "\n\n" + _LINKS_DDL
 # kind 词表（visitor | role | resident）**刻意不设 CHECK**：它是词表，随规格会长；
 # links.rel 的既有决策就是"加点值是规格内动作，不该每次迁移表"。
 # 下面的 session_tokens 性质不同——它的 CHECK 锁的是**权限升级路径**，不是词表。
-_AGENT_ACCOUNTS_DDL = """CREATE TABLE IF NOT EXISTS agent_accounts (
-  account_id   TEXT PRIMARY KEY,
-  display_name TEXT NOT NULL,
-  host         TEXT,
-  kind         TEXT,
-  created_at   TEXT NOT NULL,
-  closed_at    TEXT,
-  note         TEXT
-);"""
-
 # 会话凭证：库里只存 sha256(token)，明文只在签发那一刻回一次（表里没有明文列可存）。
 #
 # 三条 CHECK 锁的是**权限升级路径**（评审 R-2 的教训：MCP 面不得签发 machine 级）：
@@ -357,22 +314,6 @@ _AGENT_ACCOUNTS_DDL = """CREATE TABLE IF NOT EXISTS agent_accounts (
 #   SQLite 的 CHECK 一旦建上，去掉要重建整张表；而"cli 渠道但证据是继承"是一种
 #   **低报**（少主张可信度），不构成越权；多锁一条却会给下一轮的真实签发路径留一个
 #   必须停机迁移的坑。宁可少锁一条，不锁错的。
-_SESSION_TOKENS_DDL = """CREATE TABLE IF NOT EXISTS session_tokens (
-  token_hash   TEXT PRIMARY KEY,   -- sha256(token)，明文只在签发时回一次
-  citizen_id   TEXT NOT NULL,
-  session_key  TEXT NOT NULL,
-  evidence     TEXT NOT NULL,      -- machine | inherited | self-reported
-  channel      TEXT NOT NULL,      -- cli | hook | parent
-  parent_token TEXT,               -- inherited 时指向父
-  issued_at    TEXT NOT NULL,
-  expires_at   TEXT,
-  revoked_at   TEXT,
-  CHECK (channel IN ('cli','hook','parent')),
-  CHECK (evidence IN ('machine','inherited','self-reported')),
-  CHECK (channel != 'parent' OR parent_token IS NOT NULL),
-  CHECK (channel != 'parent' OR evidence = 'inherited')
-);"""
-
 # 项目档期：某公民在某项目上的时间区间，to_ts IS NULL = 当前开档期。
 #
 # 2026-10-24 语义变更（用户裁定）：**一个会话可以同时服务多个项目**。
@@ -387,49 +328,14 @@ _SESSION_TOKENS_DDL = """CREATE TABLE IF NOT EXISTS session_tokens (
 # 用**部分**唯一索引而不是普通唯一索引：公民换过几个项目是正常事实，
 # 唯一性只约束"当前开着的这条"，不约束"一共开过几个"。
 # 入口语义见 open_project_stint（同项目复用、异项目新增、**不关旧档期**）。
-_PROJECT_STINTS_DDL = """CREATE TABLE IF NOT EXISTS project_stints (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  citizen_id    TEXT NOT NULL,
-  account_id    TEXT,
-  project       TEXT NOT NULL,
-  from_ts       TEXT NOT NULL,
-  to_ts         TEXT,               -- NULL = 当前开档期
-  set_by        TEXT,
-  closed_reason TEXT
-);"""
-
 # 归档表：**必须与 citizens 逐列一致**（名字、类型、顺序、默认值），否则 citizens_all
 # 视图对不上位——UNION ALL 只按**列位置**拼，不按列名认。
 # 两份 DDL 是手抄的，所以不靠注释提醒、靠判据：test_identity_p1a 的判据 A 拿
 # PRAGMA table_info 逐列比对两张表，改一处忘另一处当场红。
-_CITIZENS_ARCHIVE_DDL = """CREATE TABLE IF NOT EXISTS citizens_archive (
-  citizen_id       TEXT PRIMARY KEY,
-  display_name     TEXT,
-  kind             TEXT,
-  role             TEXT,
-  host             TEXT,
-  status           TEXT DEFAULT 'active',
-  created_at       TEXT,
-  is_owner         INTEGER DEFAULT 0,
-  account_id       TEXT,
-  device_id        TEXT,
-  host_session_key TEXT,
-  last_seen_at     TEXT,
-  archived_at      TEXT
-);"""
-
 # citizens 的 P1-a 补列清单（旧库升级路径）。声明必须是**能加到非空表上**的形态
 # （SQLite 的 ALTER ADD COLUMN 不允许无默认值的 NOT NULL）——这 5 列全是可空 TEXT，
 # 自然满足；将来若加 NOT NULL 列，必须带 DEFAULT。
 # 顺序即 citizens 的末尾列序，**必须与 _CITIZENS_ARCHIVE_DDL 的末尾 5 列同序**。
-_CITIZENS_NEW_COLS = (
-    ("account_id", "TEXT"),        # 属于哪个 AI 账号（跨会话聚合的血缘）
-    ("device_id", "TEXT"),         # 设备（本地阶段留空）
-    ("host_session_key", "TEXT"),  # 宿主给的会话标识（如 DSH_SESSION_ID）
-    ("last_seen_at", "TEXT"),      # 最后活跃
-    ("archived_at", "TEXT"),       # 归档时间（NULL = 未归档）
-)
-
 # 合并视图的列契约。**顺序就是拼接口**：两份 SELECT 共用这一份列名，写两遍就会漂，
 # 而这里漂了的后果是静默的（错列/少列都不报错，只是数据错位）。
 _CITIZENS_ALL_COLUMNS = (
@@ -462,33 +368,12 @@ def _citizens_all_view_ddl() -> str:
 # 旧语义原地活下来，多项目并行当场被它拦住（而且报错发生在插入时，离原因很远）。
 # 所以它的建法不能是"清单里一条幂等 CREATE"，必须走 _ensure_stint_open_index：
 # **先按 PRAGMA 判断现有定义 → 不对就 DROP → 再 CREATE**。
-_STINT_OPEN_INDEX_NAME = "ux_stint_open"
-_STINT_OPEN_INDEX_COLS = ("citizen_id", "project")
-_STINT_OPEN_INDEX_DDL = (
-    "CREATE UNIQUE INDEX IF NOT EXISTS ux_stint_open "
-    "ON project_stints(citizen_id, project) WHERE to_ts IS NULL")
-
-
 # 身份层的索引清单（只放 migrate，不放 SCHEMA：SCHEMA 先于 migrate 执行）。
 # 口径：这里只放**定义不会变**的索引。定义会变的那个（开档期唯一索引）由
 # _ensure_stint_open_index 单独负责——两种生命周期不该塞进同一个循环里。
-_IDENTITY_INDEXES = (
-    # 凭证撤销的两条主查询：按公民批量吊销 / 按会话查还有哪些活的
-    "CREATE INDEX IF NOT EXISTS ix_session_tokens_citizen ON session_tokens(citizen_id)",
-    "CREATE INDEX IF NOT EXISTS ix_session_tokens_session ON session_tokens(session_key)",
-    # account_id 存在的唯一理由就是"按账号聚合会话"，这条单列索引是它的取数口。
-    # 刻意不给 device_id / last_seen_at 建索引：还没有查询的东西不加索引。
-    "CREATE INDEX IF NOT EXISTS ix_citizens_account ON citizens(account_id)",
-)
-
 # 四张新表的 DDL，**按依赖顺序**（citizens_archive 必须早于 citizens_all 视图）。
 # 提成一份元组是为了让两个消费者共用同一份：SCHEMA 拼进去（新库）与
 # _ensure_identity_tables 循环建（旧库/幂等）。第三份拷贝就是漂移的起点。
-_IDENTITY_TABLE_DDLS = (_CITIZENS_ARCHIVE_DDL, _AGENT_ACCOUNTS_DDL,
-                        _SESSION_TOKENS_DDL, _PROJECT_STINTS_DDL)
-
-_IDENTITY_SCHEMA = "\n" + "\n\n".join(_IDENTITY_TABLE_DDLS) + "\n"
-
 # ------------------------------------------------------ 工作区 → 项目映射（R1 根治）
 # 为什么需要这张表：注入包里 L1「当前项目」原先靠 `GROUP BY project ORDER BY MAX(
 # recorded_at)` **猜**——谁最近更新过记忆，谁就是"当前项目"。外部评估 EVAL-261024-02
@@ -508,19 +393,9 @@ _IDENTITY_SCHEMA = "\n" + "\n\n".join(_IDENTITY_TABLE_DDLS) + "\n"
 # 与 project_stints 的分工（别混）：档期是"这个会话现在在哪些项目上干活"（会话事实，
 # 会随会话结束关闭）；workspace_map 是"这个目录属于哪个项目"（环境事实，长期有效）。
 # 两者都不等于"最近更新"，这正是 R1 的两条新证据链。
-_WORKSPACE_MAP_DDL = """CREATE TABLE IF NOT EXISTS workspace_map (
-  path_prefix TEXT PRIMARY KEY,   -- 归一化后的路径前缀（正斜杠、无尾斜杠、全小写）
-  project     TEXT NOT NULL,      -- 项目前缀（如 ANYI）
-  note        TEXT,
-  created_at  TEXT NOT NULL
-);"""
-
 # 表在**两个消费者**里各建一次：SCHEMA（新库）与 migrate（旧库升级），共用同一份 DDL。
 # 沿用身份层/push 层的纪律：表 DDL 提成常量，索引与视图只放 migrate（这张表目前
 # 不需要额外索引：行数是个位数，最长前缀匹配在 Python 里做，见 resolve_project_by_cwd）。
-_WORKSPACE_SCHEMA = "\n" + _WORKSPACE_MAP_DDL + "\n"
-
-
 # ------------------------------------------------------ 名字别名（阶段 D · 名字治理）
 #
 # 为什么单独一张表，而不是给 `code_registry` / `citizens` 各加一列：
@@ -533,18 +408,6 @@ _WORKSPACE_SCHEMA = "\n" + _WORKSPACE_MAP_DDL + "\n"
 #
 # `kind` 目前只允许 'project' / 'citizen'（`_ALIAS_KINDS`）：这不是封闭枚举，是**校验白名单**
 # ——加第三种名字类型时必须同时想清楚"它怎么解析"，而不是让任意字符串混进来。
-_NAME_ALIASES_DDL = """CREATE TABLE IF NOT EXISTS name_aliases (
-  kind       TEXT NOT NULL,       -- 'project' | 'citizen'
-  from_name  TEXT NOT NULL,       -- 别名（非规范名）
-  to_name    TEXT NOT NULL,       -- 规范名
-  created_at TEXT NOT NULL,
-  created_by TEXT,
-  reason     TEXT,
-  PRIMARY KEY (kind, from_name)
-);"""
-
-_NAME_SCHEMA = "\n" + _NAME_ALIASES_DDL + "\n"
-
 # ------------------------------------------------------ 看板（P1-b · 2026-10-25）
 # 裁决依据 `16` §4.1：**数据库做真相 + 文件做渲染**。
 # 为什么不用纯文件（`12` 最初的方案）：
@@ -554,63 +417,12 @@ _NAME_SCHEMA = "\n" + _NAME_ALIASES_DDL + "\n"
 #
 # 看板回答的是「**此刻谁在动哪块**」——不是"发生了什么"（那是 daily）。
 # 这条边界一旦破了，看板就会退化成第二份 daily（`09` §4.6 的第三个坑）。
-_BOARDS_DDL = """CREATE TABLE IF NOT EXISTS boards (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  scope      TEXT NOT NULL,               -- root | project | branch
-  scope_key  TEXT NOT NULL,               -- root='' / project='anyi-studio' / branch='<名字>'
-  period_key TEXT NOT NULL,               -- YYYYMMDD（按日一块板）
-  path       TEXT NOT NULL,               -- 渲染文件相对路径（派生，可重建）
-  status     TEXT NOT NULL DEFAULT 'open',-- open | closed
-  created_at TEXT NOT NULL,
-  closed_at  TEXT,
-  UNIQUE(scope, scope_key, period_key)
-);"""
-
-_PRESENCE_DDL = """CREATE TABLE IF NOT EXISTS presence (
-  board_id      INTEGER NOT NULL REFERENCES boards(id),
-  citizen_id    TEXT NOT NULL,
-  -- ↓ 2026-10-26（撞车自撞修复 T01 · 设计 45 §2.1）：会话维度**进主键**。
-  --   为什么另加一列而不是复用 agent_id：agent_id 是"外部可读的宿主侧标识"，
-  --   它的历史值里有非会话形态（`codebuddy-主AI/ffd54d84`），拿它当权限级主键
-  --   等于把"猜出来的身份"焊进唯一约束。
-  --   为什么是空串而不是 NULL：NULL 在唯一约束里互不相等（NULL != NULL），
-  --   "同一公民的无会话行"每次插入都会变成新行——那比"合并成一行"更坏。
-  --   '' = 无会话归属（旧行 / 无凭证路径 / 未知来源），**不是**"某个会话"。
-  session_key   TEXT NOT NULL DEFAULT '',
-  agent_id      TEXT,                     -- 会话/宿主侧标识（自动行会存 session_key）
-  status        TEXT NOT NULL DEFAULT 'active',  -- active | idle | left
-  doing         TEXT,                     -- 一句话：在做什么（≤80 字，撞车判断靠它）
-  surface       TEXT,                     -- 占用面（文件/目录前缀，逗号分隔）
-  first_seen_at TEXT NOT NULL,
-  last_seen_at  TEXT NOT NULL,
-  -- ↓ 2026-10-26（hooks 深度利用 T02）：自动占用的**缓存**三列（真相在 tool_activity）。
-  --   auto_surface 只是"最近一次聚合的快照"，供外部读者/快照快速取用；
-  --   看板渲染、推送、撞车判定都以 tool_activity 的读时聚合为准。
-  --   否则「声明 vs 实际」又变成两份会漂的真相。
-  auto_surface  TEXT,                     -- 最近一次聚合的目录（逗号分隔，≤3）
-  auto_seen_at  TEXT,                     -- 最后一次写动作时间（UTC）
-  auto_source   TEXT                      -- session_start | session_inject | remember | activity
-  ,PRIMARY KEY (board_id, citizen_id, session_key)
-);"""
-
 # 旧库补列清单（顺序纪律：先建表 → 再补列 → 最后建索引）。
 # 声明必须是「可加到非空表上」的形态（SQLite 的 ALTER ADD COLUMN 不允许无默认值 NOT NULL）。
-_PRESENCE_NEW_COLS = (
-    ("auto_surface", "TEXT"),
-    ("auto_seen_at", "TEXT"),
-    ("auto_source", "TEXT"),
-)
-
 # `session_key` **刻意不在上面那份补列清单里**：它要连主键一起重建，走
 # `_ensure_presence_session`（补列与重建是同一次事务的两步，拆开就会留下
 # "有列、两列主键"的半迁移态——那正是 R3 要避免的形态）。
-_PRESENCE_V3_COLS = ("board_id", "citizen_id", "session_key", "agent_id", "status",
-                     "doing", "surface", "first_seen_at", "last_seen_at",
-                     "auto_surface", "auto_seen_at", "auto_source")
-
 # 目标主键（**顺序是契约**：判据 S24 按元组全等比对，不看集合）。
-_PRESENCE_PK_COLS = ("board_id", "citizen_id", "session_key")
-
 # 回填规则（迁移只跑一次；之后不再推断）：只认「已知宿主前缀 + 冒号 + 至少 1 字符」。
 # `?*` 里的 `?` 是必要的：GLOB 的 `*` 能匹配空串，少了 `?` 就会把 `dsh:` 这种空 id
 # 也当成会话键（那等于伪造证据）。非标准形态（`codebuddy-主AI/ffd54d84`：带 `/`、
@@ -625,26 +437,6 @@ _PRESENCE_SESSION_BACKFILL = (
 # 回滚用的**历史形态**（两列主键）。只给 `presence_session_rollback` 建临时表用，
 # 不参与新建库——新库永远走 `_PRESENCE_DDL`（v3）。写死一份是刻意的：v2 从此冻结，
 # 它不该跟着 v3 的列增删漂。
-_PRESENCE_V2_DDL = """CREATE TABLE IF NOT EXISTS presence_v2 (
-  board_id      INTEGER NOT NULL REFERENCES boards(id),
-  citizen_id    TEXT NOT NULL,
-  agent_id      TEXT,
-  status        TEXT NOT NULL DEFAULT 'active',
-  doing         TEXT,
-  surface       TEXT,
-  first_seen_at TEXT NOT NULL,
-  last_seen_at  TEXT NOT NULL,
-  auto_surface  TEXT,
-  auto_seen_at  TEXT,
-  auto_source   TEXT
-  ,PRIMARY KEY (board_id, citizen_id)
-);"""
-
-_PRESENCE_V2_COLS = ("board_id", "citizen_id", "agent_id", "status", "doing", "surface",
-                     "first_seen_at", "last_seen_at", "auto_surface", "auto_seen_at",
-                     "auto_source")
-
-
 class PresenceMigrationError(RuntimeError):
     """presence 迁移失败。**原表一字不动**，调用方决定降级还是中止。
 
@@ -652,97 +444,23 @@ class PresenceMigrationError(RuntimeError):
     调用方必须能区分"迁移没做"与"别的地方出错"，否则只会 `except Exception` 静默吞掉。
     """
 
-_BOARDS_INDEXES = (
-    "CREATE INDEX IF NOT EXISTS ix_boards_scope ON boards(scope, scope_key, period_key)",
-    "CREATE INDEX IF NOT EXISTS ix_boards_status ON boards(status, period_key)",
-    "CREATE INDEX IF NOT EXISTS ix_presence_last ON presence(board_id, last_seen_at)",
-)
-
 # 看板动态（"今日动态"区）——它比"在场"轻，但同样受容量纪律约束。
 # 为什么不复用 `events`：events 是**不可变的事实流**，而看板动态是**可滚动的展示层**；
 # 把展示层塞进事实流会让"重建投影"多一类要处理的事件，得不偿失。
-_BOARD_POSTS_DDL = """CREATE TABLE IF NOT EXISTS board_posts (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  board_id   INTEGER NOT NULL REFERENCES boards(id),
-  citizen_id TEXT NOT NULL,
-  kind       TEXT NOT NULL,               -- checkin | progress | done | note
-  text       TEXT NOT NULL,               -- ≤200 字（渲染时硬截断）
-  created_at TEXT NOT NULL
-);"""
-
-_BOARD_POSTS_INDEXES = (
-    "CREATE INDEX IF NOT EXISTS ix_posts_board ON board_posts(board_id, id DESC)",
-)
 # 看板"已看到"快照（EVAL-261025-20，2026-10-25 修）：记录**每个公民上次注入时**
 # 看到的看板状态。推送候选拿它与当前状态比较——"你看完之后又有人动了"才推。
 # 为什么单独建表而不是塞进 config：config 是全局键值，多公民会互相覆盖。
 # 2026-10-27（P0-3）：主键升到 **(board_id, citizen_id, session_key)**。
 # 旧表按公民记"上次看到哪"——同公民多会话会互相吞推送（A 会话看过，B 会话就收不到
 # "板上有人动了"）。升三列后每个会话各有自己的快照；旧行迁成 session_key=''（无凭证会话）。
-_BOARD_SEEN_DDL = """CREATE TABLE IF NOT EXISTS board_seen (
-  board_id         INTEGER NOT NULL,
-  citizen_id       TEXT NOT NULL,
-  session_key      TEXT NOT NULL DEFAULT '',
-  last_post_id     INTEGER NOT NULL DEFAULT 0,
-  last_presence_at TEXT NOT NULL DEFAULT '',
-  updated_at       TEXT NOT NULL,
-  PRIMARY KEY (board_id, citizen_id, session_key)
-);"""
-_BOARD_SEEN_PK_COLS = ("board_id", "citizen_id", "session_key")
-_BOARD_TABLE_DDLS = (_BOARDS_DDL, _PRESENCE_DDL, _BOARD_POSTS_DDL, _BOARD_SEEN_DDL)
-_BOARD_SCHEMA = "\n" + "\n\n".join(_BOARD_TABLE_DDLS) + "\n"
-
-
 # ------------------------------------------------------ 动作流（2026-10-26 · T02）
 # 独立审计表，**不进记忆库**（设计 §4.1）：
 #   · 不进 `events`：事件流是不可变真相、要参与投影重建；动作流是低语义审计，
 #     进事件会让 rebuild_projection 多处理一类无投影价值的事件；
 #   · 不进 `memory_fts`/`recall`：会污染记忆检索（EVAL 建议 7）。
 # 两条都写成判据（见 test_activity）。
-_TOOL_ACTIVITY_DDL = """CREATE TABLE IF NOT EXISTS tool_activity (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  host        TEXT NOT NULL,          -- dsh | workbuddy（方言来源，便于分宿主统计）
-  session_key TEXT NOT NULL,          -- dsh:<session_id> / codebuddy:<session_id>
-  citizen_id  TEXT,                   -- 由 session_key 反查；查不到 NULL，不猜
-  project     TEXT,                   -- workspace_map 最长前缀；可空（不猜）
-  tool_name   TEXT NOT NULL,          -- 小写归一：write/edit/bash/...
-  action      TEXT NOT NULL,          -- write | exec（本批只落这两种）
-  path        TEXT,                   -- 相对项目根（无则相对 cwd），展示/聚合
-  path_dir    TEXT,                   -- 相对目录，聚合键
-  path_abs    TEXT,                   -- 归一化绝对路径，撞车判定（跨 cwd 可比）
-  args_digest TEXT,                   -- sha256(参数摘要)[:16]，**不含内容**
-  ok          INTEGER,                -- 1/0/NULL（NULL=未知，不假装成功）
-  seen_at     TEXT NOT NULL           -- UTC ISO（%Y-%m-%dT%H:%M:%SZ）
-);"""
-
-_ACTIVITY_INDEXES = (
-    "CREATE INDEX IF NOT EXISTS ix_activity_seen ON tool_activity(seen_at)",
-    "CREATE INDEX IF NOT EXISTS ix_activity_session "
-    "ON tool_activity(session_key, seen_at DESC)",
-    "CREATE INDEX IF NOT EXISTS ix_activity_citizen "
-    "ON tool_activity(citizen_id, seen_at DESC)",
-    "CREATE INDEX IF NOT EXISTS ix_activity_dir "
-    "ON tool_activity(project, path_dir, seen_at DESC)",
-)
-_ACTIVITY_SCHEMA = "\n" + _TOOL_ACTIVITY_DDL + "\n"
-
 # 旧库补列清单（与 `_PRESENCE_NEW_COLS` 同理；当前与 DDL 逐列一致，
 # 留这份清单是为了"下次加列"时不用再想顺序，也为了让补列路径有单一入口）。
-_TOOL_ACTIVITY_COLS = (
-    ("host", "TEXT"),
-    ("session_key", "TEXT"),
-    ("citizen_id", "TEXT"),
-    ("project", "TEXT"),
-    ("tool_name", "TEXT"),
-    ("action", "TEXT"),
-    ("path", "TEXT"),
-    ("path_dir", "TEXT"),
-    ("path_abs", "TEXT"),
-    ("args_digest", "TEXT"),
-    ("ok", "INTEGER"),
-    ("seen_at", "TEXT"),
-)
-
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
   seq       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -845,76 +563,8 @@ def connect(root: Path) -> sqlite3.Connection:
 # 两张推送地基表的「补列 / 建索引」清单。
 # 补列用的声明都必须是**可加到非空表上**的（SQLite 的 ALTER ADD COLUMN 不允许
 # 无默认值的 NOT NULL），所以这里刻意比 _*_DDL 里的声明宽松——新建表仍按严格版走。
-_ACCESS_LOG_COLS = (
-    ("code", "TEXT"),
-    ("citizen_id", "TEXT"),
-    ("session_key", "TEXT"),
-    ("project", "TEXT"),
-    ("via", "TEXT"),
-    ("payload", "TEXT"),
-    ("accessed_at", "TEXT"),
-)
-
-_LINKS_COLS = (
-    ("src", "TEXT"),
-    ("dst", "TEXT"),
-    ("rel", "TEXT"),
-    ("source", "TEXT"),
-    ("weight", "REAL DEFAULT 1.0"),
-    ("evidence", "TEXT"),
-    ("created_at", "TEXT"),
-    ("removed_at", "TEXT"),
-    # 再巩固预留（14 §6）：旧库升级也要补上这 3 列。
-    # 声明必须是「可加到非空表上」的形态（INTEGER 带 DEFAULT），否则 ALTER 会失败。
-    ("last_reinforced_at", "TEXT"),
-    ("reinforce_count", "INTEGER DEFAULT 0"),
-    ("suppressed", "INTEGER DEFAULT 0"),
-)
-
-_ACCESS_LOG_INDEXES = (
-    "CREATE INDEX IF NOT EXISTS ix_mal_code ON memory_access_log(code, accessed_at)",
-    "CREATE INDEX IF NOT EXISTS ix_mal_citizen ON memory_access_log(citizen_id, accessed_at)",
-    "CREATE INDEX IF NOT EXISTS ix_mal_session ON memory_access_log(session_key, accessed_at)",
-)
-
-_LINKS_INDEXES = (
-    "CREATE INDEX IF NOT EXISTS ix_links_src ON links(src) WHERE removed_at IS NULL",
-    "CREATE INDEX IF NOT EXISTS ix_links_dst ON links(dst) WHERE removed_at IS NULL",
-    "CREATE INDEX IF NOT EXISTS ix_links_rel ON links(rel) WHERE removed_at IS NULL",
-    # 再巩固预留：候选池只捞 suppressed=0 且未删除的边，这条部分索引就是它的取数口。
-    "CREATE INDEX IF NOT EXISTS ix_links_suppressed ON links(suppressed) "
-    "WHERE removed_at IS NULL",
-)
-
 # push_log 的补列清单（旧库升级路径）。与上面两份同理：声明必须是**能加到非空表上**的形态
 # （SQLite 的 ALTER ADD COLUMN 不允许无默认值的 NOT NULL），新建表仍按 _PUSH_LOG_DDL 的严格版走。
-_PUSH_LOG_COLS = (
-    ("session_key", "TEXT"),
-    ("citizen_id", "TEXT"),
-    ("project", "TEXT"),
-    ("code", "TEXT"),
-    ("candidate_id", "TEXT"),
-    ("channel", "TEXT"),
-    ("budget_tokens", "INTEGER"),
-    ("pushed_at", "TEXT"),
-    ("reaction", "TEXT"),
-    ("reacted_at", "TEXT"),
-    ("latency_sec", "INTEGER"),
-    # P0-2 第二段（2026-10-29）：推这份内容时它的指纹。结案（accepted/ignored）
-    # 之后只有"当前指纹 != 记录指纹"才允许重推——读过的旧版不再打扰，新版该来。
-    ("content_hash", "TEXT"),
-)
-
-_PUSH_LOG_INDEXES = (
-    # 按会话回看"这个会话被推过什么"——时机策略的主查询就是它
-    "CREATE INDEX IF NOT EXISTS ix_push_session ON push_log(session_key, pushed_at)",
-    # 按记忆回看"这条被推过几次、反应如何"（采纳率按 code 聚合）
-    "CREATE INDEX IF NOT EXISTS ix_push_code ON push_log(code, pushed_at)",
-    # 待判行的取数口：read_body 的回填与 daily_report 的收口都只碰这些行
-    "CREATE INDEX IF NOT EXISTS ix_push_reaction ON push_log(reaction) WHERE reaction IS NULL",
-)
-
-
 def _has_unique_index(conn, table, columns) -> bool:
     """表上是否已有覆盖这几列的唯一索引（**含 CREATE TABLE 里 UNIQUE 自动建的**）。
 
@@ -2956,7 +2606,6 @@ KNOWLEDGE_GAP_MIN_PEER_READS = 3     # 同类其他会话累计读过 ≥3 次�
 KNOWLEDGE_GAP_WINDOW_DAYS = 14       # "常读"的观察窗
 KNOWLEDGE_GAP_LIMIT = 10             # 遗漏最多报这么多条
 
-AUDIT_DIR_NAME = "_audit"
 AUDIT_TOOL_CALLS_FILE = "tool-calls.jsonl"
 
 # 同类判定依据的人话（why 字段要让 AI 一眼看懂"跟谁比"）。
@@ -6815,9 +6464,6 @@ _PROJECT_SOURCES = ("explicit", "stint", "workspace_map", "inferred", "undeclare
 #
 # ⚠️ 名字是**数据**不是代码常量：只有它在 code_registry 里真实登记过才用；没登记就
 # 维持"不开档期"的老行为——代码里凭空造一个项目，等于在库里写一条假事实。
-FALLBACK_PROJECT_NAME = "未分类"
-
-
 def fallback_project(conn):
     """兜底项目前缀；库里没登记过就返回 None（只读，不建项目）。"""
     row = conn.execute(

@@ -46,6 +46,7 @@ FISH_PUSH = P0 / "fish_push.py"
 # 不会有任何判据变红，那正是"循环导入炸弹"最容易进来的时候。
 FISH_TRUST = P0 / "fish_trust.py"
 FISH_REBUILD = P0 / "fish_rebuild.py"
+FISH_SCHEMA = P0 / "fish_schema.py"
 
 spec = importlib.util.spec_from_file_location("fish", str(FISH))
 fish = importlib.util.module_from_spec(spec)
@@ -73,7 +74,13 @@ COMMON_NAMES = ("ulid", "now_utc", "iso_local", "count_tokens", "_exc_text")
 # 评审 🟡-7（2026-10-27）：窗口从 300 行放宽到 2,000 行被推翻——按实测收窄到 ±200 行。
 # 2026-10-28（T03b 合并）：fish_push 因 rerank 接线（+60 行）到 1,309 → 窗口上抬到 1,400
 # （功能增长导致的判据迁移，不是弱化：下限仍 1,050，且 J7/J8 守语义）。
-FISH_LINES_MIN = 13800
+# 2026-11-11（E-11 拆包第二刀）：**DDL 常量整块搬到 `fish_schema.py`**（45 个 / 392 行）。
+# 建表语句是纯数据（无逻辑、无 IO），是拆包里风险最低的一块；`SCHEMA` 仍留在 fish.py，
+# 因为它要拼 `fish_kb._KB_SCHEMA`，搬走会让分层倒置。
+# 实测 14,058 → **13,704 行**。窗口**整体下移**：下界 13,800 → 13,400（它守的是
+# "别把不该搬的一大块搬走"，搬家后当然要跟着挪），上界 14,150 → 13,900。
+# 语义等价的真正硬判据仍是 J1/J1b/J7（名字集合 + 对象同一）与 J8（函数体 AST）。
+FISH_LINES_MIN = 13400
 # 2026-10-29（P1 修复轮，外部审查 §8 P1）：🔴11 公民状态校验 / 🔴10 链式+唯一约束 /
 # 🔴6 body_relpath 路径穿越拦截 / 🔴9 append_event 事务参数 都落在 fish.py 上，
 # 实测 14,302 行 → 上界 14,300 → **14,500**。这是"功能增长"的判据迁移（不是放宽）：
@@ -96,7 +103,7 @@ FISH_LINES_MIN = 13800
 # 实测：fish.py 14,541 → **14,056**。上界因此**从 14,550 收回 14,150**——
 # 这才是"抽层"的收益：不是继续抬窗口，而是把窗口还回去（沿用 2026-10-29 那条先例）。
 # 下界不动：它守的是"别把不该搬的一大块搬走"。
-FISH_LINES_MAX = 14150
+FISH_LINES_MAX = 13900
 # ⚠️ 死常量（2026-11-11 标注）：`EXPECTED_LINE_ACTUAL` 在**任何断言里都没被引用**，
 # 它的值（14,032）也早已过期。只在 `docs/fix-list-语料层-20261027.md:43` 里被记为
 # "陈旧：不改门禁"——保留名字是为了让那条历史记录还能对上号，**不要把它当判据**。
@@ -120,6 +127,9 @@ FISH_COMMON_LINES_MAX = 880
 # 函数，外部审查 🔴9 就出在它身上。给它自己的窗口，防它再长成第二个巨石。
 FISH_REBUILD_LINES_MIN = 380
 FISH_REBUILD_LINES_MAX = 520
+# 2026-11-11 新模块 · 数据库 DDL 常量（纯数据，只依赖 stdlib）。
+FISH_SCHEMA_LINES_MIN = 340
+FISH_SCHEMA_LINES_MAX = 460
 # 2026-11-11 新模块：身份锚授权 + 归属合并链解析（外部审查 🔴5 / 🔴9 的修法）。
 # 按既有惯例给新模块各自留窗口，防止它长成第二个巨石。
 FISH_TRUST_LINES_MIN = 120
@@ -275,7 +285,11 @@ class SplitDependencyTest(unittest.TestCase):
                                 # 所以 `fish_trust` 不许碰任何上层；`fish_rebuild` **允许**
                                 # 依赖 fish_trust（那是向下），只禁更上层的那几个。
                                 (FISH_TRUST, {"fish", "fish_kb", "fish_push", "fish_rebuild"}),
-                                (FISH_REBUILD, {"fish", "fish_kb", "fish_push"})):
+                                (FISH_REBUILD, {"fish", "fish_kb", "fish_push"}),
+                                # 2026-11-11（拆包第二刀）：`fish_schema` 是**最底层**
+                                # （纯 DDL 数据），除 stdlib 外谁都不该依赖。
+                                (FISH_SCHEMA, {"fish", "fish_kb", "fish_push",
+                                               "fish_trust", "fish_rebuild"})):
             mods = _imported_modules(ast.parse(_read(path)))
             bad = sorted(m for m in mods if m in forbidden)
             self.assertEqual(bad, [], f"{path.name} 反向依赖了 {bad}")
@@ -404,6 +418,11 @@ class SplitSizeTest(unittest.TestCase):
                                 f"fish_rebuild.py 只有 {rebuild_lines} 行：搬漏了")
         self.assertLessEqual(rebuild_lines, FISH_REBUILD_LINES_MAX,
                              f"fish_rebuild.py 有 {rebuild_lines} 行：长回去了")
+        schema_lines = len(_read(P0 / "fish_schema.py").split("\n"))
+        self.assertGreaterEqual(schema_lines, FISH_SCHEMA_LINES_MIN,
+                                f"fish_schema.py 只有 {schema_lines} 行：搬漏了")
+        self.assertLessEqual(schema_lines, FISH_SCHEMA_LINES_MAX,
+                             f"fish_schema.py 有 {schema_lines} 行：长回去了")
         self.assertGreater(len(fish_kb.__all__), 100,
                            "fish_kb 的导出面太小，明显漏名")
         self.assertGreaterEqual(len(_read(FISH_KB).split("\n")), 2500,
