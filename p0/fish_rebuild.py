@@ -25,8 +25,7 @@ import datetime
 import json
 from pathlib import Path
 
-from fish_common import (body_relpath, reindex_fts, resolve_owner,
-                         split_code_prefix, UNATTRIBUTED)
+from fish_common import (UNATTRIBUTED, body_relpath, citizen_ids_known, reindex_fts, resolve_owner, split_code_prefix)
 from fish_trust import load_ownership_merge_map, resolve_merged
 
 
@@ -123,7 +122,10 @@ def rebuild_projection(conn, root: Path) -> dict:
 
     # owner 归一所需的知识：哪些才是真公民（见 07 D-13）。
     # 库里没有公民知识时（空库 / 测试）不做归一——不凭猜测改写归属。
-    valid_citizen_ids = {r[0] for r in conn.execute("SELECT citizen_id FROM citizens")}
+    # 2026-11-11（序3 归档验证暴露）：必须含 `citizens_archive` 里的冷公民。
+    # 只用热表时，已归档公民名下的记忆会被判成"无效 owner"→ 归一成系统主人
+    # （实测：归档 12 个公民后 rebuild 改写了 6 条记忆的归属，D-10 同类事故）。
+    valid_citizen_ids = citizen_ids_known(conn)
     sys_owner = resolve_owner(conn)
 
     # ---- 2. 重放 memory.recorded ----

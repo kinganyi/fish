@@ -134,9 +134,14 @@ FROZEN_CITIZENS_SQL = {
             "UPDATE citizens SET is_owner=1 WHERE citizen_id=?",
         ),
         "resolve_owner_arg": (
-            "SELECT 1 FROM citizens WHERE citizen_id=?",
-            "SELECT citizen_id,display_name,kind FROM citizens WHERE status='active' "
-            "ORDER BY created_at",
+            # 2026-11-11（序3 跑归档时暴露，**有记录的改动**）：
+            # ① 原来的 `SELECT 1 FROM citizens WHERE citizen_id=?` 换成
+            #    `fish_common.citizen_ids_known()`——它查 `citizens_all`（热+冷）。
+            #    只用热表时，已归档公民名下的记忆会被判"无效 owner"，
+            #    rebuild 进而把 owner **归一成系统主人**（实测改写 6 条，D-10 同类）。
+            # ② 报错时的候选清单同理改为 `citizens_all`（否则提示会漏掉冷公民）。
+            "SELECT citizen_id,display_name,kind FROM citizens_all "
+            "WHERE status='active' ORDER BY created_at",
         ),
         "set_owner": (
             "SELECT kind,status,display_name FROM citizens WHERE citizen_id=?",
@@ -180,7 +185,6 @@ FROZEN_CITIZENS_SQL = {
             "SELECT display_name,kind,status FROM citizens WHERE status='active' "
             "ORDER BY created_at",
         ),
-        "cmd_healthcheck": ("SELECT citizen_id FROM citizens",),
     },
     # 2026-11-11（E-11 拆包）：`resolve_owner` 与 `rebuild_projection` 连同它们各自的
     # citizens 查询一起搬了家（前者到 fish_common、后者到 fish_rebuild）。
@@ -198,9 +202,16 @@ FROZEN_CITIZENS_SQL = {
             "SELECT status FROM citizens WHERE display_name=? AND status='active' "
             "ORDER BY created_at, citizen_id LIMIT 1",
         ),
+        # 2026-11-11（序3 跑归档时新增）：**有效性口径的唯一入口**。
+        # 它查 `citizens_all`（热+冷），失败才退到热表——两条都在监管内。
+        # 这次把散落各处的 `SELECT 1 FROM citizens WHERE citizen_id=?` 收敛到它这里，
+        # 于是监管从"每处手写"变成"一个入口 + 它的两条 SQL"。
+        "citizen_ids_known": (
+            "SELECT citizen_id FROM citizens_all",
+            "SELECT citizen_id FROM citizens",
+        ),
     },
     "fish_rebuild.py": {
-        "rebuild_projection": ("SELECT citizen_id FROM citizens",),
     },
     "mcp_server.py": {
         "tool_whoami": ("SELECT display_name,kind FROM citizens WHERE citizen_id=?",),
@@ -766,10 +777,10 @@ class FishIdentityP1aTest(unittest.TestCase):
         """判据 G：本轮改动前那 28 条引用 citizens 的 SQL，逐条仍在原函数里、一字未改。"""
         counts = {name: sum(len(v) for v in frozen.values())
                   for name, frozen in FROZEN_CITIZENS_SQL.items()}
-        self.assertEqual(counts, {"fish.py": 23, "fish_common.py": 2,
-                                  "fish_rebuild.py": 1,
+        self.assertEqual(counts, {"fish.py": 21, "fish_common.py": 4,
+                                  "fish_rebuild.py": 0,
                                   "mcp_server.py": 2, "daily_report.py": 1},
-                         f"基线自检：fish 23 / common 2 / rebuild 1 / mcp 2 / "
+                         f"基线自检：fish 21 / common 4 / rebuild 0 / mcp 2 / daily 1（总数 28）"
                          f"daily_report 1（总数 29；原 28 + fish_common 里一条"
                          f"此前未被覆盖的 resolve_name），实际 {counts}")
         for fname, frozen in FROZEN_CITIZENS_SQL.items():

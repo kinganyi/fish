@@ -127,7 +127,11 @@ FISH_COMMON_LINES_MIN = 550
 # `split_code_prefix` 四个纯函数下沉到这里（69 行），实测 727 → **802 行**，上界 750 → 880。
 # 这是**下沉**导致的增长，不是"又长回去了"：它们搬到下层正是为了让 `fish_rebuild`
 # 能在不 import fish 的前提下工作（J2）。
-FISH_COMMON_LINES_MAX = 880
+# 2026-11-11（序3）：+`citizen_ids_known`（有效性口径的唯一入口）。
+# 它是**新增能力**不是搬家——但值得占这 30 行：把散落各处的
+# `SELECT 1 FROM citizens WHERE citizen_id=?` 收敛到一个可审计的地方，
+# 正是这次"归档后 rebuild 改写归属"缺陷的根因所在。
+FISH_COMMON_LINES_MAX = 950
 # 2026-11-11 新模块 · `rebuild_projection`（404 行 + 说明）：fish.py 里最长也最危险的
 # 函数，外部审查 🔴9 就出在它身上。给它自己的窗口，防它再长成第二个巨石。
 FISH_REBUILD_LINES_MIN = 380

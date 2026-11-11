@@ -863,3 +863,29 @@ def board_relpath(scope, scope_key, period_key) -> str:
 # 可筛选、可事后用 `fish owner-fix` 补，也**允许一直不补**。
 # ============================================================
 UNATTRIBUTED = "unattributed"
+
+
+def citizen_ids_known(conn):
+    """所有**已知**公民 id —— 含 `citizens_archive` 里的冷公民。
+
+    ## 为什么必须有这个函数（2026-11-11，序3 跑归档时暴露的真缺陷）
+
+    归档（`archive_citizens`）把闲置公民从热表 `citizens` **搬到** `citizens_archive`。
+    于是"这个 id 是否是公民"有了两种口径：
+
+    | 场景 | 正确口径 | 用错了会怎样 |
+    |---|---|---|
+    | **有效性 / 身份解析**（重建时的 owner 校验、healthcheck 的幽灵检测、`--owner` 校验） | **`citizens_all`**（热+冷） | 已归档公民名下的记忆会被判成"幽灵归属"，`rebuild` 甚至会把 owner **归一成系统主人**（D-10 同类事故） |
+    | **活跃性判定**（token 校验、能否当主人、重名检测） | 只用热表 `citizens` | 已归档的人还能拿 token 干活、还能被设成主人 |
+
+    两者都对，但**不能混用**。这个函数是"有效性"那一侧的**唯一入口**——
+    散落各处手写 `SELECT citizen_id FROM citizens` 正是这次缺陷的成因。
+
+    `citizens_all` 是 UNION ALL 视图（`_ensure_citizens_all_view` 建）。库很旧、视图
+    还没建时退到热表——**退而求其次比崩掉好**，但这种情况会被 `warn_ignored` 记下来。
+    """
+    try:
+        return {r[0] for r in conn.execute("SELECT citizen_id FROM citizens_all")}
+    except Exception as exc:          # noqa: BLE001 —— 视图缺失时退到热表
+        warn_ignored("fish_common.citizen_ids_known", exc)
+        return {r[0] for r in conn.execute("SELECT citizen_id FROM citizens")}

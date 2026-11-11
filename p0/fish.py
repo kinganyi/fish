@@ -87,7 +87,8 @@ import fish_common  # noqa: F401 —— 模块本身也要在（判据 J1d 查�
 import fish_profile
 from fish_common import (  # noqa: F401
     _exc_text, count_tokens, fts_match_expr, fts_text, index_tokens, iso_local,
-    now_utc, ulid)
+    now_utc, ulid, citizen_ids_known
+)
 
 # 原始对话语料层（2026-10-27 · 语料层 T01/T02）：独立库 `corpus.sqlite`，与主库零耦合。
 # 项目/公民解析器以回调注入（这里不把 fish 的解析逻辑搬进语料模块，避免循环导入）。
@@ -3014,12 +3015,14 @@ def resolve_owner_arg(conn, owner):
     """
     if owner in (None, ""):
         return resolve_owner(conn) or "unknown"
-    if conn.execute("SELECT 1 FROM citizens WHERE citizen_id=?", (owner,)).fetchone():
+    # 2026-11-11（序3 归档验证）：有效性要含 `citizens_archive`——已归档公民的 id
+    # 仍是**合法归属目标**（它名下的记忆还在；`--owner` 指向它不该被拒）。
+    if owner in citizen_ids_known(conn):
         return owner
     if owner == LEGACY_OWNER_DEFAULT:
         return resolve_owner(conn) or "unknown"
     cands = conn.execute(
-        "SELECT citizen_id,display_name,kind FROM citizens WHERE status='active' "
+        "SELECT citizen_id,display_name,kind FROM citizens_all WHERE status='active' "
         "ORDER BY created_at").fetchall()
     listing = "\n".join(f"    {c[0]}  {c[1]}（{c[2]}）" for c in cands) or "    （库里还没有公民）"
     raise ValueError(
@@ -8863,7 +8866,9 @@ def cmd_healthcheck(args):
     #     归属指向了不存在的人，事后既查不到也补不回来。
     # 旧实现把两者混成一条并建议"跑 rebuild 归一到系统主人"——那等于把无主
     # **强行嫁祸给主人**，与"允许无主"正好相反。
-    ids = {r[0] for r in conn.execute("SELECT citizen_id FROM citizens")}
+    # 2026-11-11（序3）：必须含 `citizens_archive`。只用热表时，已归档公民名下的
+    # 记忆会被误报成"幽灵归属"（实测归档 12 个后误报 1 条）。
+    ids = citizen_ids_known(conn)
     _rows_owner = list(conn.execute("SELECT code,owner FROM code_index")) if ids else []
     _unattr = [c for c, o in _rows_owner if o == UNATTRIBUTED]
     _ghost = [c for c, o in _rows_owner
