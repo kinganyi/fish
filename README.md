@@ -121,6 +121,22 @@ docs/              设计 / 评审 / 对账文档（40 篇）
 *.md               各阶段的设计与评审报告
 ```
 
+## DSH 插件（`dsh-fish/`）
+
+`dsh-fish/` 是 fish 在 **DeepSeek Harness（DSH）** 上的原生 TypeScript 插件。
+
+**2026-11-09 起定位调整为「只读 + 本体能力补充」**——不再追求与 Python 侧逐字节等价，只做 DSH 里读得到、看得见的那部分。
+
+| 维度 | 内容 |
+|---|---|
+| 形态 | 影子期（只读）：不注册模型可见工具、不注入上下文、不写 fish 库 |
+| 能力 | `/fish shadow presence \| recall \| whoami \| health` + `conversation.view` 槽位的 canvas 面板 |
+| 体量 | 2026-11-09 三轮减重：**16.2 MB → 1.78 MB**（git 跟踪体积）；`lib/index.js` 458 KB → **328 KB** |
+| 判据 | `typecheck 0` / `build 0` / `unit 54/54` / `check-spec 30/30` |
+| 与 Python 的关系 | Python 本体是**权威**；插件只读同一个 SQLite 库。写操作（`rebuild` / `remember` / `push` 等）一律给指引，不代执行 |
+
+细节见 [`dsh-fish/README.md`](dsh-fish/README.md) 与 [`dsh-fish/docs/减重清单-20261109.md`](dsh-fish/docs/减重清单-20261109.md)。
+
 ## 已知限制
 
 - **`visibility=private` 目前只是标签**：写入可选、默认 `shared`；执行层未完成——
