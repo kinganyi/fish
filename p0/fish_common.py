@@ -704,3 +704,99 @@ def clean_prompt(text, *, max_len=4000) -> str:
 def board_period(period_key=None) -> str:
     """看板的周期键：按日（`YYYYMMDD`），与 `daily` 的切分口径一致。"""
     return period_key or local_date()
+
+
+# ============================================================
+# 从 fish.py 下沉（2026-11-11，错题本 E-11 拆包）
+#
+# 为什么搬这四个函数 + 两个常量：它们**全是纯函数或只读查询**，却被
+# `record_memory`（写入口）与 `rebuild_projection`（重建投影）共同依赖。
+# 只要 `rebuild_projection` 还留在 fish.py 里，这两处就只能靠"同一文件"共享；
+# 拆包的第一步必须把它们放到谁都能 import 的下层，否则拆出去就是循环导入。
+#
+# 与 J2 的关系（`fish → fish_kb → fish_common`）：这里只依赖 `re` 与
+# `get_config`，**不 import fish**，所以下沉后方向仍然单向。
+# fish.py 通过 `from fish_common import (...)` 保持同样的名字，
+# 所有既有调用点（含 `merge_cdql.py` 的 `fish.body_relpath`）一个字都不用改。
+# ============================================================
+
+_SLUG_MAX = 24
+
+_SLUG_MAP = str.maketrans({
+    "/": "-", "\\": "-", ":": "-", "*": "-", "?": "-",
+    '"': "", "|": "-", "<": "(", ">": ")",
+    "\n": " ", "\r": " ", "\t": " ",
+})
+
+def slug_title(title, limit=_SLUG_MAX):
+    """标题 → 文件名安全片段（纯函数、稳定、可复算）。
+
+    实测 76 条标题含 Windows 非法字符（`/` 出现 163 次最多），不处理就建不出文件。
+
+    EVAL-261025-18（2026-10-25 修）：**截断必须显式标记**。旧实现 `t[:limit]`
+    静默截断，文件名看起来像"数据损坏"（`title` 字段其实完好）。加 `...`
+    让"这里被截了"一眼可见；总长仍 ≤ limit（省略号算在预算内）。
+    """
+    t = (title or "").strip()
+    t = re.sub(r"\s+", "_", t)          # 空白 → 下划线（保留可读性，去掉歧义）
+    t = t.translate(_SLUG_MAP)          # 非法字符替换
+    t = t.strip("._-")                  # 首尾不能是点/下划线/连字符（Windows 规则）
+    if not t:
+        return "untitled"
+    if len(t) > limit:
+        if limit < 4:
+            # QA 2026-10-25 边界：limit 太短放不下 `...`。退回纯截断，
+            # 保住 docstring 的"总长 ≤ limit"承诺（默认 24 不受影响）。
+            return t[:limit]
+        head = t[:max(1, limit - 3)].rstrip("._-")
+        return (head or "untitled") + "..."
+    return t
+
+def body_relpath(project, code, title):
+    """正文的相对路径：`projects/<项目>/<编码>__<标题缩写>.md`。
+
+    **唯一入口**：`record_memory` 与 `rebuild_projection` 都必须调它，
+    否则两处规则漂移 = 重建即断链（这类"两份实现"的亏本项目吃过多次）。
+
+    **路径穿越在这里拦**（外部审查 🔴6，2026-10-29）：`project_writable` 只查状态
+    不查字符，实测 `body_relpath('../../outside', …)` 会拼出
+    `projects/../../outside/...`，normpath 之后逃出 root。唯一入口必须自己守。
+    """
+    p = str(project or "").strip()
+    if (not p or p in (".", "..") or "/" in p or "\\" in p
+            or re.search(r"[<>:\"|?*\x00-\x1f]", p)
+            or any(seg in (".", "..") for seg in p.split("/"))):
+        raise ValueError(
+            f"项目名非法（不许路径分隔符/点段/控制字符）：{project!r}")
+    return f"projects/{project}/{code}__{slug_title(title)}.md"
+
+def split_code_prefix(code):
+    """从编码里拆出项目前缀（**右锚定**：日期与序号格式固定，前缀任意）。
+
+    为什么不能 `code.split("-")[0]`：前缀自 2026-10-25 起允许含连字符
+    （`anyi-studio-261022-01`），按第一个 `-` 切会把 `anyi-studio` 切成 `anyi`，
+    于是重建投影时项目归属全错、且**不会报错**——典型的静默数据损伤。
+
+    口诀：**从右往左剥 `-<6位日期>-<2~4位序号>`，左边剩下的全是前缀。**
+    与 `tails()` 用的是同一套规则（它用 `rsplit("-", 2)`，天然兼容）。
+    """
+    if not code:
+        return None
+    parts = code.rsplit("-", 2)
+    if len(parts) != 3:
+        return None
+    prefix, date_part, seq = parts
+    if not (date_part.isdigit() and len(date_part) == 6):
+        return None
+    if not (seq.isdigit() and 2 <= len(seq) <= 4):
+        return None
+    return prefix or None
+
+def resolve_owner(conn) -> str:
+    """系统主人：优先读实体属性 citizens.is_owner；回退旧配置（向后兼容）。"""
+    row = conn.execute(
+        "SELECT citizen_id FROM citizens WHERE is_owner=1 AND status='active'").fetchone()
+    if row:
+        return row[0]
+    # 兼容 v0.3 之前的写法：owner 存在 config 里
+    return get_config(conn, "owner_citizen") or get_config(conn, "default_citizen")

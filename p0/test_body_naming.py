@@ -37,6 +37,10 @@ from pathlib import Path
 spec = importlib.util.spec_from_file_location("fish", "fish.py")
 fish = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fish)
+# 2026-11-11（E-11 拆包）：`slug_title` / `body_relpath` 已下沉到 fish_common。
+# N6 的变异点必须打在**那个模块**上——只改 fish 侧的 re-export 副本，
+# `body_relpath` 看不见（详见 test_N6 里的注释）。
+import fish_common  # noqa: E402
 
 ILLEGAL = set('<>:"/\\|?*')
 
@@ -156,12 +160,16 @@ class BodyNamingTest(unittest.TestCase):
             body="正文", owner=self.cid)
         before = self.conn.execute("SELECT file_path FROM code_index WHERE code=?",
                                    (code,)).fetchone()[0]
-        orig = fish.slug_title
+        orig = fish_common.slug_title
         try:
-            fish.slug_title = lambda t, limit=24: "MUTATED"   # 改规则
+            # 变异点必须是 `fish_common.slug_title`（2026-11-11 E-11 拆包后）：
+            # `body_relpath` 与 `slug_title` 现在同住 `fish_common`，它查的是**那个模块的**
+            # 全局名。改 `fish.slug_title` 只是换掉 re-export 的副本，`body_relpath`
+            # 根本看不见 —— 那样这条判据会变成"永远绿"的摆设。
+            fish_common.slug_title = lambda t, limit=24: "MUTATED"   # 改规则
             after = fish.body_relpath("TESTP", code, "决策：用方案 A")
         finally:
-            fish.slug_title = orig
+            fish_common.slug_title = orig
         self.assertNotEqual(after, before,
                             "换了规则后路径居然没变——那 N6 测不出漂移")
 

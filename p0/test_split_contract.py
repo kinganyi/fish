@@ -41,6 +41,11 @@ FISH = P0 / "fish.py"
 FISH_KB = P0 / "fish_kb.py"
 FISH_COMMON = P0 / "fish_common.py"
 FISH_PUSH = P0 / "fish_push.py"
+# 2026-11-11（E-11 拆包）新增的两个模块：同样必须守 J2 单向依赖。
+# **之前 J2 只列了三份旧模块**——新模块一旦不在名单里，往里加 `import fish`
+# 不会有任何判据变红，那正是"循环导入炸弹"最容易进来的时候。
+FISH_TRUST = P0 / "fish_trust.py"
+FISH_REBUILD = P0 / "fish_rebuild.py"
 
 spec = importlib.util.spec_from_file_location("fish", str(FISH))
 fish = importlib.util.module_from_spec(spec)
@@ -83,7 +88,15 @@ FISH_LINES_MIN = 13800
 # 抽完仍净增约 21 行（诊断注释与错误提示要留），实测 14,518 行 → 上界 14,500 → **14,550**。
 # 口径不变：下界不动、行为由 test_session_bind（S4/S4b）与 rebuild 判据钉住。
 # **真正的解法仍是错题本 E-11（把 fish.py 拆开）**，不是继续抬这个窗口。
-FISH_LINES_MAX = 14550
+# 2026-11-11（E-11 拆包第一刀）：**窗口还回去了**。
+#   · `rebuild_projection`（404 行）→ `fish_rebuild.py`；
+#   · 它依赖的四个纯函数/只读查询（`slug_title` / `body_relpath` / `resolve_owner` /
+#     `split_code_prefix`，共 69 行）下沉到 `fish_common`（拆包的前提：拆出去的模块
+#     不许 import fish，所以这些必须先到下层）。
+# 实测：fish.py 14,541 → **14,056**。上界因此**从 14,550 收回 14,150**——
+# 这才是"抽层"的收益：不是继续抬窗口，而是把窗口还回去（沿用 2026-10-29 那条先例）。
+# 下界不动：它守的是"别把不该搬的一大块搬走"。
+FISH_LINES_MAX = 14150
 # ⚠️ 死常量（2026-11-11 标注）：`EXPECTED_LINE_ACTUAL` 在**任何断言里都没被引用**，
 # 它的值（14,032）也早已过期。只在 `docs/fix-list-语料层-20261027.md:43` 里被记为
 # "陈旧：不改门禁"——保留名字是为了让那条历史记录还能对上号，**不要把它当判据**。
@@ -98,7 +111,15 @@ FISH_PUSH_LINES_MAX = 1550
 FISH_PUSH_RANK_LINES_MIN = 120
 FISH_PUSH_RANK_LINES_MAX = 300
 FISH_COMMON_LINES_MIN = 550
-FISH_COMMON_LINES_MAX = 750
+# 2026-11-11（E-11 拆包第一刀）：`slug_title` / `body_relpath` / `resolve_owner` /
+# `split_code_prefix` 四个纯函数下沉到这里（69 行），实测 727 → **802 行**，上界 750 → 880。
+# 这是**下沉**导致的增长，不是"又长回去了"：它们搬到下层正是为了让 `fish_rebuild`
+# 能在不 import fish 的前提下工作（J2）。
+FISH_COMMON_LINES_MAX = 880
+# 2026-11-11 新模块 · `rebuild_projection`（404 行 + 说明）：fish.py 里最长也最危险的
+# 函数，外部审查 🔴9 就出在它身上。给它自己的窗口，防它再长成第二个巨石。
+FISH_REBUILD_LINES_MIN = 380
+FISH_REBUILD_LINES_MAX = 520
 # 2026-11-11 新模块：身份锚授权 + 归属合并链解析（外部审查 🔴5 / 🔴9 的修法）。
 # 按既有惯例给新模块各自留窗口，防止它长成第二个巨石。
 FISH_TRUST_LINES_MIN = 120
@@ -248,7 +269,13 @@ class SplitDependencyTest(unittest.TestCase):
         for path, forbidden in ((FISH_KB, {"fish"}),
                                 (FISH_COMMON, {"fish", "fish_kb"}),
                                 # 评审 🟡-8：T02 新增的 fish_push 也要查（漏 import 炸弹）
-                                (FISH_PUSH, {"fish"})):
+                                (FISH_PUSH, {"fish"}),
+                                # 2026-11-11（E-11 拆包）：新模块纳入同一判据。
+                                # 依赖分层：fish_common ← fish_trust ← fish_rebuild ← fish。
+                                # 所以 `fish_trust` 不许碰任何上层；`fish_rebuild` **允许**
+                                # 依赖 fish_trust（那是向下），只禁更上层的那几个。
+                                (FISH_TRUST, {"fish", "fish_kb", "fish_push", "fish_rebuild"}),
+                                (FISH_REBUILD, {"fish", "fish_kb", "fish_push"})):
             mods = _imported_modules(ast.parse(_read(path)))
             bad = sorted(m for m in mods if m in forbidden)
             self.assertEqual(bad, [], f"{path.name} 反向依赖了 {bad}")
@@ -371,6 +398,12 @@ class SplitSizeTest(unittest.TestCase):
                                 f"fish_trust.py 只有 {trust_lines} 行：搬漏了")
         self.assertLessEqual(trust_lines, FISH_TRUST_LINES_MAX,
                              f"fish_trust.py 有 {trust_lines} 行：长回去了")
+        # 新模块（2026-11-11 抽出：rebuild_projection）
+        rebuild_lines = len(_read(P0 / "fish_rebuild.py").split("\n"))
+        self.assertGreaterEqual(rebuild_lines, FISH_REBUILD_LINES_MIN,
+                                f"fish_rebuild.py 只有 {rebuild_lines} 行：搬漏了")
+        self.assertLessEqual(rebuild_lines, FISH_REBUILD_LINES_MAX,
+                             f"fish_rebuild.py 有 {rebuild_lines} 行：长回去了")
         self.assertGreater(len(fish_kb.__all__), 100,
                            "fish_kb 的导出面太小，明显漏名")
         self.assertGreaterEqual(len(_read(FISH_KB).split("\n")), 2500,

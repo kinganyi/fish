@@ -115,9 +115,6 @@ FROZEN_CITIZENS_SQL = {
             "SELECT 1 FROM citizens WHERE is_owner=1",
             "UPDATE citizens SET is_owner=1 WHERE citizen_id=?",
         ),
-        "resolve_owner": (
-            "SELECT citizen_id FROM citizens WHERE is_owner=1 AND status='active'",
-        ),
         "resolve_owner_arg": (
             "SELECT 1 FROM citizens WHERE citizen_id=?",
             "SELECT citizen_id,display_name,kind FROM citizens WHERE status='active' "
@@ -166,6 +163,25 @@ FROZEN_CITIZENS_SQL = {
             "ORDER BY created_at",
         ),
         "cmd_healthcheck": ("SELECT citizen_id FROM citizens",),
+    },
+    # 2026-11-11（E-11 拆包）：`resolve_owner` 与 `rebuild_projection` 连同它们各自的
+    # citizens 查询一起搬了家（前者到 fish_common、后者到 fish_rebuild）。
+    # **查询一字未改，只是所在文件变了** —— 判据 G 的本意是"一条都不许改"，
+    # 搬家不算改，所以这里按新位置登记，而不是把基线放宽或删掉。
+    "fish_common.py": {
+        "resolve_owner": (
+            "SELECT citizen_id FROM citizens WHERE is_owner=1 AND status='active'",
+        ),
+        # 判据 G 原先只冻结 fish.py / mcp_server.py / daily_report.py 三个文件，
+        # `fish_common` **不在覆盖范围内**。2026-11-11 把 fish_common 纳入后，
+        # 这条既有的 citizens 查询才浮出来 —— 补登记是**加强覆盖**，不是放宽：
+        # 在此之前它改坏了也没人会发现。
+        "resolve_name": (
+            "SELECT status FROM citizens WHERE display_name=? AND status='active' "
+            "ORDER BY created_at, citizen_id LIMIT 1",
+        ),
+    },
+    "fish_rebuild.py": {
         "rebuild_projection": ("SELECT citizen_id FROM citizens",),
     },
     "mcp_server.py": {
@@ -183,6 +199,11 @@ FROZEN_CITIZENS_SQL = {
 # 本轮**新增**的函数里允许出现 citizens 引用（P1-a 的补列、视图定义与视图自愈）。
 # 除此之外出现新的 citizens 引用函数 → 判据 G 红：那说明有人动了查询面却没声明。
 DECLARED_NEW_FUNCS = {
+    # 2026-11-11（E-11 拆包）：两个新文件里**没有**"未声明的新 citizens 引用"——
+    # 它们各自的 citizens 查询都已登记进 FROZEN_CITIZENS_SQL 的对应条目。
+    # 显式列出空集而不是靠 `.get(fname, set())` 兜底：这样"忘了登记"会红。
+    "fish_common.py": set(),
+    "fish_rebuild.py": set(),
     "fish.py": {"_ensure_identity_tables", "_ensure_citizens_all_view",
                 "_citizens_all_view_ddl",
                 # P1-b（session 命令族）新增的 4 个会话公民读写点。按本判据的纪律，
@@ -727,8 +748,12 @@ class FishIdentityP1aTest(unittest.TestCase):
         """判据 G：本轮改动前那 28 条引用 citizens 的 SQL，逐条仍在原函数里、一字未改。"""
         counts = {name: sum(len(v) for v in frozen.values())
                   for name, frozen in FROZEN_CITIZENS_SQL.items()}
-        self.assertEqual(counts, {"fish.py": 25, "mcp_server.py": 2, "daily_report.py": 1},
-                         f"基线自检：口径应为 fish 25 / mcp 2 / daily_report 1，实际 {counts}")
+        self.assertEqual(counts, {"fish.py": 23, "fish_common.py": 2,
+                                  "fish_rebuild.py": 1,
+                                  "mcp_server.py": 2, "daily_report.py": 1},
+                         f"基线自检：fish 23 / common 2 / rebuild 1 / mcp 2 / "
+                         f"daily_report 1（总数 29；原 28 + fish_common 里一条"
+                         f"此前未被覆盖的 resolve_name），实际 {counts}")
         for fname, frozen in FROZEN_CITIZENS_SQL.items():
             got = citizens_sql_by_function(HERE / fname)
             for func, stmts in frozen.items():
@@ -747,7 +772,7 @@ class FishIdentityP1aTest(unittest.TestCase):
         改的是 resolve_owner 那句（owner 有效性判定，24 处里最关键的一处）。
         在临时副本上改，真源码一个字节都不动。
         """
-        source = (HERE / "fish.py").read_text(encoding="utf-8")
+        source = (HERE / "fish_common.py").read_text(encoding="utf-8")
         marker = "SELECT citizen_id FROM citizens WHERE is_owner=1 AND status='active'"
         self.assertIn(marker, source, "变异夹具失效：源码里找不到这句")
         broken = source.replace(marker, "SELECT citizen_id FROM citizens WHERE is_owner=1")
@@ -757,7 +782,7 @@ class FishIdentityP1aTest(unittest.TestCase):
         got = citizens_sql_by_function(copy)
         with self.assertRaises(AssertionError):
             self.assertEqual(got["resolve_owner"],
-                             FROZEN_CITIZENS_SQL["fish.py"]["resolve_owner"],
+                             FROZEN_CITIZENS_SQL["fish_common.py"]["resolve_owner"],
                              "变异没被抓住：改了查询却没红灯")
 
 
