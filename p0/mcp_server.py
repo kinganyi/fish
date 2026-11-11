@@ -52,7 +52,9 @@ META_PREFIX = "io.modelcontextprotocol/"
 # ------------------------------------------------------------ 身份：每次调用带 token
 # 归属缺失时的**明确取值**（不是 None、不是空串）：库里读出来的 owner 必须能自解释，
 # 空值会让"没归属"和"老数据没这列"看起来一模一样。
-UNATTRIBUTED = "unattributed"
+# 2026-11-11：改成引用 `fish.UNATTRIBUTED`——原先这里与 `fish.py` 各存一份同值常量，
+# 正是"两份实现必然漂"的隐患（`enforce_mem_type_auth` 现在要按这个值判鉴权）。
+UNATTRIBUTED = fish.UNATTRIBUTED
 
 # 一次调用能落到哪一档身份。valid 以外的每一档都有自己的提示文案，
 # 因为它们对应的**下一步动作**不同（换新凭证 / 别用这条 / 补带 token）。
@@ -808,6 +810,12 @@ class FishServer:
     #           把"当前身份"写回进程，而进程是共享的（本轮要根治的就是这件事）。
 
     def tool_remember(self, a, ident):
+        # 外部审查 🔴6（分级写入鉴权，用户 2026-11-11 拍板）：
+        # `rule`/`identity` 必须来自有效凭证；`fact`/`episode`/`lesson`/`artifact` 免凭证。
+        # 策略本体在 `fish.enforce_mem_type_auth`（CLI 与 MCP 共用一份，避免两份实现漂）。
+        # `ident.citizen_id` 只在 token **有效**时才非空（`_resolve_identity` 失效时给 None）。
+        fish.enforce_mem_type_auth(
+            a.get("mem_type", "fact"), has_credential=bool(ident.citizen_id))
         # 查重提示的出口（2026-10-25 · 阶段 C）：传一个空 list 进去，写入后由
         # `record_memory` 把相似项填进来。**不传（None）= 零开销**，所以这是一个
         # 纯增量参数——旧调用路径一个字都不变。

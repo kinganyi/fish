@@ -74,7 +74,16 @@ FISH_LINES_MIN = 13800
 # 实测 14,302 行 → 上界 14,300 → **14,500**。这是"功能增长"的判据迁移（不是放宽）：
 # 下界不动、新模块窗口不动，且这些改动的行为由各自判据（test_identity_lifecycle /
 # test_event_tx / test_path_traversal）逐条钉住。
-FISH_LINES_MAX = 14500
+#
+# 2026-11-11（债务清理轮）：同样适用上面这条先例，但这次**先抽层再抬窗口**——
+#   · 🔴5 身份接管：无凭证路径改由本机身份锚白名单授权（不再"签发过即放行"）；
+#   · 🔴9 rebuild 不重放归属：重放前先建 citizen.merged / citizen.retired 映射；
+# 两处新增逻辑**已抽到新模块 `fish_trust.py`**（145 行：锚授权 + 归属链解析），
+# fish.py 只剩调用与指针（详细演进史在模块 docstring 里，不占这个 14.5k 行文件）。
+# 抽完仍净增约 21 行（诊断注释与错误提示要留），实测 14,518 行 → 上界 14,500 → **14,550**。
+# 口径不变：下界不动、行为由 test_session_bind（S4/S4b）与 rebuild 判据钉住。
+# **真正的解法仍是错题本 E-11（把 fish.py 拆开）**，不是继续抬这个窗口。
+FISH_LINES_MAX = 14550
 EXPECTED_LINE_ACTUAL = 14032
 FISH_PUSH_LINES_MIN = 1050
 # 2026-10-29（结构整改）：融合/排序层抽出为 `fish_push_rank.py`（9 个纯函数，187 行），
@@ -86,6 +95,10 @@ FISH_PUSH_RANK_LINES_MIN = 120
 FISH_PUSH_RANK_LINES_MAX = 300
 FISH_COMMON_LINES_MIN = 550
 FISH_COMMON_LINES_MAX = 750
+# 2026-11-11 新模块：身份锚授权 + 归属合并链解析（外部审查 🔴5 / 🔴9 的修法）。
+# 按既有惯例给新模块各自留窗口，防止它长成第二个巨石。
+FISH_TRUST_LINES_MIN = 120
+FISH_TRUST_LINES_MAX = 260
 
 
 def _read(path: Path) -> str:
@@ -348,6 +361,12 @@ class SplitSizeTest(unittest.TestCase):
                                 f"fish_common.py 只有 {common_lines} 行：下沉漏了")
         self.assertLessEqual(common_lines, FISH_COMMON_LINES_MAX,
                              f"fish_common.py 有 {common_lines} 行：长回去了")
+        # 新模块（2026-11-11 抽出：身份锚授权 + 归属合并链解析）
+        trust_lines = len(_read(P0 / "fish_trust.py").split("\n"))
+        self.assertGreaterEqual(trust_lines, FISH_TRUST_LINES_MIN,
+                                f"fish_trust.py 只有 {trust_lines} 行：搬漏了")
+        self.assertLessEqual(trust_lines, FISH_TRUST_LINES_MAX,
+                             f"fish_trust.py 有 {trust_lines} 行：长回去了")
         self.assertGreater(len(fish_kb.__all__), 100,
                            "fish_kb 的导出面太小，明显漏名")
         self.assertGreaterEqual(len(_read(FISH_KB).split("\n")), 2500,

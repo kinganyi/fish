@@ -822,6 +822,37 @@ def kb_index_fresh(conn, *, max_age_hours=KB_INDEX_DEFAULT_MAX_AGE_HOURS) -> dic
     out["active_rows"] = int((row[0] if row else 0) or 0)
     last = (row[1] if row else None)
     out["last_indexed_at"] = str(last) if last else None
+
+    # 2026-11-11（外部审查 🔴1 的线上故障）：**新鲜度不能只看 `MAX(indexed_at)`**。
+    #
+    # `indexed_at` 是"**这一行**最后被写"的时刻，而增量重建只刷新**变更过**的行——
+    # `last_affected=0` 是常态（vault 没改动）。于是"索引完全正确 + 维护正常跑成功"
+    # 也会被判陈旧，K7 断路器随即让 KB 候选**恒为 0 且完全静默**。
+    #
+    # 实测（2026-11-11 生产库）：
+    #   · kb_index 296 行，indexed_at 全在 2026-10-27T20:43（一次性全量建库）
+    #   · maintenance_task.kb_reindex.last_run_at = 2026-11-10T15:00:13Z，status=ok，
+    #     last_affected=0
+    #   → 按 MAX(indexed_at) 算 345.2h > 168h 判陈旧；按台账算约 23h，其实很新。
+    #
+    # 正解：**台账里"上一次成功重建"的时刻也是新鲜证据**，两者取更新者。
+    # 注意"中断/进行中"已被上面的 `kb.index_run == 'running'` 拦掉，这里只认 `ok`。
+    ledger_last = None
+    try:
+        lrow = conn.execute(
+            "SELECT last_run_at, last_status FROM maintenance_task "
+            "WHERE task_name='kb_reindex'").fetchone()
+        if lrow and str(lrow[0] or "").strip() and str(lrow[1] or "") == "ok":
+            ledger_last = str(lrow[0]).strip()
+    except sqlite3.Error as exc:
+        warn_ignored('fish_kb_index.py:824 kb_index_fresh ledger', exc)
+    out["last_reindex_run_at"] = ledger_last
+    # 两个时间戳同格式（ISO8601 `…Z`），可直接按字符串取较大者。
+    _cands = [str(x) for x in (last, ledger_last) if x]
+    if _cands:
+        last = max(_cands)
+        out["last_indexed_at"] = str(last)
+
     if not out["active_rows"] or not last:
         return out
     age = _kb_index_age_hours(str(last))
@@ -867,6 +898,46 @@ def kb_index_stats(conn) -> dict:
     last = conn.execute("SELECT MAX(indexed_at) FROM kb_index").fetchone()
     out["last_indexed_at"] = str(last[0]) if last and last[0] else None
     out["index_mb"] = _kb_index_db_mb(conn)
+    return out
+
+
+def health_lines(conn) -> list:
+    """给 `fish healthcheck` 用的知识库体检行（外部审查 🔴1c，2026-11-11）。
+
+    为什么单独成函数：`fish.py` 已 14.5k 行（错题本 E-11，J4 判据守着它的规模），
+    这 20 行体检逻辑属于知识库索引层，放在它自己的模块里更合适。
+
+    为什么"必须报"：KB 的 K7 断路器会在索引被判陈旧时**静默**让候选恒为 0。
+    2026-11-11 实测过这个静默失效——索引 296 篇完全正确、`kb_reindex` 前一天跑过
+    且 `ok`，却因新鲜度取错了量被判陈旧 345h，KB 自动召回整整一天是关着的，
+    而**任何日志、任何回执都看不出来**。所以三条判据分开报：
+    新鲜度 / 规模 / 断路器的后果——只报"没候选"的话根本看不出原因。
+
+    任何异常都转成一行"判不到"（**不吞、不假装通过**）。
+    """
+    out = []
+    try:
+        fresh = kb_index_fresh(conn)
+        st = kb_index_stats(conn)
+        if not st.get("active"):
+            out.append("  知识库索引：未建（跑 fish kb reindex；KB 自动召回此时为关闭）")
+            return out
+        state = "新鲜" if fresh.get("fresh") else "**陈旧**"
+        out.append(
+            f"  知识库索引 {st['active']} 篇 / {state}"
+            f"（age {fresh.get('age_hours')}h，阈值 "
+            f"{KB_INDEX_DEFAULT_MAX_AGE_HOURS:.0f}h，最后重建 "
+            f"{fresh.get('last_reindex_run_at') or '无记录'}）")
+        if not fresh.get("fresh"):
+            out.append("  ⚠ K7 断路器：索引被判陈旧 → **KB 推送候选恒为 0**"
+                       "（不报错、不重扫）。跑 fish kb reindex，"
+                       "或查 maintenance_task.kb_reindex 的 last_status")
+        if st.get("error"):
+            out.append(f"  ⚠ 索引里有 {st['error']} 篇 error 状态（跑 fish kb reindex 重试）")
+        if st.get("deleted"):
+            out.append(f"  索引 deleted {st['deleted']} 篇（vault 已删除，属正常）")
+    except Exception as exc:      # noqa: BLE001 —— 体检查不到就如实说"判不到"
+        out.append(f"  知识库索引：判不到（{type(exc).__name__}: {exc}）")
     return out
 
 

@@ -41,6 +41,9 @@ import fish_activity
 import fish_naming
 import fish_surface
 from fish_surface import normalize_surface, surface_hit  # noqa: F401 —— 对外仍是 fish 的名字
+# 外部审查 🔴5/🔴6/🔴9 的修法（2026-11-11 抽出成模块，避免 fish.py 继续膨胀 · J4/E-11）
+from fish_trust import (AUTH_REQUIRED_MEM_TYPES, enforce_mem_type_auth,  # noqa: F401
+                        identity_anchor_grants, load_ownership_merge_map, resolve_merged)
 
 # 共享原语（2026-10-27 · 拆包 T02）：时间 / 摘要 / 文本计数只有一份实现，
 # 家在 `fish_common`。`fish.now_utc` 等旧名字继续可用，且与 `fish_common.now_utc`
@@ -4890,6 +4893,14 @@ IDENTITY_SOURCE_TOKEN = "身份来源：token（session_tokens）"
 IDENTITY_SOURCE_REGISTER = "身份来源：register 登记（不参与归属）"
 IDENTITY_SOURCE_UNATTRIBUTED = "身份来源：未归属"
 
+# 归属哨兵：**"当时没凭证"的唯一表示**（而不是 None）。
+# 为什么不是 None：owner 是"这条记忆归谁"的唯一字段，None 会被读侧当成"老数据没这一列"
+# （同一个 NULL 两种含义 = 审计毒药）。'unattributed' 是明确的"当时没凭证"，
+# 能被筛选、能被 `owner-fix` 补归属。
+# 2026-11-11：原先 `mcp_server.py:55` 自己定义了一份同名常量，现统一到这里再被两边引用
+# ——两处各写一份哨兵值，正是本文件反复警告的"两份实现必然漂"。
+UNATTRIBUTED = "unattributed"
+
 CREDENTIAL_NO_TOKEN = "凭证状态：未提供凭证（无凭证写入的归属会记成 unattributed）"
 CREDENTIAL_UNKNOWN = ("凭证状态：未知（这条 token 不在库中——明文只在签发时输出一次，"
                       "丢了就重签：同一个 session_name → 同一个公民，只换凭证）")
@@ -5574,31 +5585,20 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
                     raise ValueError(
                         "bind_token 已吊销超过 7 天，不再作为证明（请用当前凭证）")
             return
-        # 外部审查 🔴1（2026-10-29）：**任何**已有公民的绑定都必须出示证明。
-        # 旧实现"无活凭证则放行"留了一条无证明接管：`register` 新建的公民从未签发
-        # token（正是攻击者的入口），凭回执里可读的 citizen_id 就能拿一条有效 token。
-        #
-        # **窄化豁免（2026-10-29 二次修正，用户实测抓到的回归）**：
-        # 上面那条"一律要证明"把 **hook 的正常重连**也挡死了——
-        # `fish_dsh_hook.py:303` 在会话开场显式传 `--citizen`（为了不每次新建公民），
-        # 而 hook 进程**拿不出 token**，于是每次会话开局都 `session start failed`，
-        # 整条链路记为"未归属"。
-        #
-        # 真正的分界线不是"有没有活凭证"，而是"**这个公民有没有签发过任何凭证**"：
-        #   · 签发过（hook 的公民都符合，历史已存在） → 允许无证明重连（幂等语义）
-        #   · 从未签发过（`register` 的产物，评审官 🔴1 的入口） → 拒绝
-        # 这既恢复了 hook，又**精确堵住**了那个洞：攻击者能拿到的只有"从未有 token
-        # 的公民"，而这类现在一律拒绝。
-        ever_issued = conn.execute(
-            "SELECT 1 FROM session_tokens WHERE citizen_id=? LIMIT 1",
-            (target_id,)).fetchone()
-        if ever_issued:
+        # 外部审查 🔴5（2026-11-11）：**取消"签发过 token 即放行"**。
+        # 那一版（10-29 二改）本意是恢复 hook，但把门做反了——所有真实公民都签发过
+        # token，于是"知道 citizen_id 就能接管"对全部真实身份成立。
+        # 现在只由**本机身份锚的会话白名单**授权；完整演进史见
+        # `fish_trust.identity_anchor_grants` 的 docstring。
+        if identity_anchor_grants(target_id, ident.get("session_key")):
             return
         raise ValueError(
             "绑定已有公民需要证明：fish session start --citizen <id> "
             "--bind-token <该公民签发过的任一 token（吊销 7 天内仍有效）>"
-            "（或设 FISH_SESSION_BIND_TOKEN）"
-            "；若这是 register 新建、从未签发过凭证的公民，请改用新的 session_name")
+            "（或设 FISH_SESSION_BIND_TOKEN）；"
+            "本机 hook 请改用身份锚 p0/fish_identity.json"
+            "（{\"citizen\": <id>, \"sessions\": [<该会话的 session_key>]}）"
+            "——只写 citizen 而不给 sessions 白名单不再放行")
 
     if forced:
         row = conn.execute(
@@ -6400,6 +6400,13 @@ def cmd_remember(args):
         owner_arg = getattr(args, "owner", None) or token_actor_citizen_id(conn)
         owner = resolve_owner_arg(conn, owner_arg)
         occurred_at = normalize_occurred_at(getattr(args, "occurred_at", None))
+        # 外部审查 🔴6（分级写入鉴权）：`has_credential` **只看 env 凭证**，
+        # 不看 `owner`——不带 `--owner` 时 `resolve_owner_arg` 会回落成系统主人
+        # （一个合法 citizen_id），按它判会把"无凭证写规矩"误判成有凭证，
+        # 且会把规矩错误归属给主人。CLI 没有 `--token` 是有意为之
+        # （明文进 shell 历史），凭证走环境变量 `FISH_SESSION_TOKEN`。
+        enforce_mem_type_auth(getattr(args, "type", "fact"),
+                              has_credential=bool(token_actor_citizen_id(conn)))
     except ValueError as e:
         conn.close()
         print(f"错误：{e}", file=sys.stderr)
@@ -9904,8 +9911,16 @@ def cmd_healthcheck(args):
         print(f"  语料 {cst['segments']} 段 / 会话 {cst['sessions']} / 降级 {len(cst['degraded'])}"
               + (f"  ⚠ 停滞 {cst['alarm']}（连续 {cst['stall']['zero_streak']} 轮 0 新增）"
                  if cst.get("alarm") else ""))
-    except Exception:               # noqa: BLE001 —— 语料体检失败不该拖垮主库体检
-        pass
+    except Exception as exc:        # noqa: BLE001 —— 语料体检失败不该拖垮主库体检
+        # 2026-11-11：原先是裸 `pass` ——"判不到"被吞成"没问题"，违反三态分明。
+        print(f"  语料：判不到（{type(exc).__name__}: {exc}）")
+    # 知识库索引（外部审查 🔴1c，2026-11-11）：三条判据分开报，逻辑在索引层模块里。
+    try:
+        import fish_kb_index as _kbi
+        for _line in _kbi.health_lines(conn):
+            print(_line)
+    except Exception as exc:        # noqa: BLE001
+        print(f"  知识库索引：判不到（{type(exc).__name__}: {exc}）")
     conn.close()
 
 
@@ -9960,6 +9975,26 @@ def rebuild_projection(conn, root: Path) -> dict:
     rep["renamed_map_size"] = len(rename_map)
     rep["renamed_events"] = renamed_events
     rep["renamed_applied"] = 0
+
+    # ---- 0b. 公民合并/迁移映射（外部审查 🔴9 · 2026-11-11 修）----
+    # 问题：`citizen.merged` / `citizen.retired{--migrate-to}` 已经把归属搬走了，
+    # 但 rebuild 只重放 `memory.owner_fixed`，**不重放这两类事件**。
+    # 后果是**一次 rebuild 静默撤销人工合并**：owner 回到原始 actor 的公民，
+    # 而那个公民此时 status 已是 `merged_into:<dst>` / `retired` —— 留下指向
+    # 已退役公民的幽灵归属（报告 07 D-10 记载 2026-10-21 真跑时伤过 3 条记忆）。
+    #
+    # 修法与上面的 `code.renamed.batch` 同款：**重放前先把映射建好**，重放时套用它。
+    # 事件 payload 结构（见写入点）：
+    #   citizen.merged  → {"src": <被并入>, "dst": <并入到>, "moved": {...}}
+    #   citizen.retired → {"migrated_to": <接收方或 None>, ...}
+    # 外部审查 🔴9（2026-11-11）：重放前先建"公民 → 最终公民"映射，
+    # 否则一次 rebuild 就把人工合并静默撤销（owner 回到已退役的 src 公民）。
+    # 实现抽在 `fish_trust`（J4/E-11：fish.py 不再膨胀）。
+    merge_map, merge_events = load_ownership_merge_map(conn)
+    rep["merged_map_size"] = len(merge_map)
+    rep["merged_events"] = merge_events
+    rep["owner_merged"] = 0
+    rep["owner_merged_list"] = []
 
     # ---- 1. 重建前快照：历史事实兜底 + 访问记录的唯一来源 ----
     # 2026-10-25：快照要存**足够补回一整行**的字段。原先只存了 owner/时间/状态这些
@@ -10031,6 +10066,15 @@ def rebuild_projection(conn, root: Path) -> dict:
                 rep["from_event"] += 1
 
         owner = actor.get("citizen_id") or old.get("owner") or "unknown"
+        # 外部审查 🔴9（2026-11-11）：**先解析合并链，再判"是否有效公民"**。
+        # 不解析 = rebuild 把人工合并静默撤销 —— owner 回到原始 actor 的公民，
+        # 而那个公民此刻 status 已是 `merged_into:<dst>`，留下幽灵归属。
+        if owner not in ("", "unknown", None):
+            _resolved = resolve_merged(merge_map, owner)
+            if _resolved != owner:
+                rep["owner_merged"] += 1
+                rep["owner_merged_list"].append(f"{code}: {owner!r} → {_resolved!r}")
+                owner = _resolved
         # owner 必须是有效公民（07 D-13）。有公民知识时把无效值归一到系统主人并逐条记录，
         # 而不是把它写回投影（否则会留下指向幽灵公民的归属）。
         if valid_citizen_ids and owner not in valid_citizen_ids and owner != "unknown":

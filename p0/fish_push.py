@@ -46,6 +46,7 @@ from fish_surface import (  # T02：拆包后的跨模块引用
 
 from fish_common import (
     warn_ignored,
+    warn_derived,
     ATTENTION_OPEN_KEYWORDS,
     ATTENTION_OPEN_WINDOW_DAYS,
     ATTENTION_TITLE_MAX_CHARS,
@@ -379,17 +380,26 @@ def _kb_push_candidates_index(conn, q, *, project, exclude, limit, now) -> list:
     """
     try:
         import fish_kb_index
-    except Exception:       # noqa: BLE001 —— 索引层坏了不能拖垮推送
+    except Exception as exc:       # noqa: BLE001 —— 索引层坏了不能拖垮推送
+        # 外部审查 🔴1b（2026-11-11）：**失败必须出声**。
+        # 原先这里裸 `return []`，于是"索引层坏了"与"确实没有候选"在观测上完全一样，
+        # 复盘会得出"KB 推送没用"的错误结论（06 号报告 P0-1 的同款实证）。
+        warn_derived("fish_push._kb_push_candidates_index:import", exc)
         return []
     try:
         fresh = fish_kb_index.kb_index_fresh(conn)
-    except Exception:       # noqa: BLE001
+    except Exception as exc:       # noqa: BLE001
+        warn_derived("fish_push._kb_push_candidates_index:fresh", exc)
         return []
     if not fresh.get("fresh"):
-        return []                       # K7：断路器（陈旧/未建 → 空，不重扫）
+        # K7：断路器（陈旧/未建 → 空，不重扫）。**这是设计如此，不是失败**，
+        # 所以不在这里告警（否则"索引旧了"会刷屏）；它的可观测面在
+        # `fish healthcheck` 的 KB 段（🔴1c，2026-11-11 接上）。
+        return []
     try:
         res = fish_kb_index.search_kb(conn, query=q, limit=max(int(limit) * 3, 6))
-    except Exception:       # noqa: BLE001
+    except Exception as exc:       # noqa: BLE001
+        warn_derived("fish_push._kb_push_candidates_index:search", exc)
         return []
     exclude = set(exclude or ())
     now_dt = now or datetime.datetime.now(datetime.timezone.utc)

@@ -82,12 +82,68 @@ class SessionBindTest(unittest.TestCase):
     # S-4（2026-10-29 窄化后）：**签发过凭证**的公民允许无证明重连——hook 依赖这条
     # （`fish_dsh_hook.py` 在会话开场显式传 `--citizen`，但它拿不出 token）。
     # 真正的防线在 S-8：从未签发过 token 的公民一律拒绝。
-    def test_S4_issued_citizen_allows_proofless_rebind(self):
+    # S-4（2026-11-11 重写，外部审查 🔴5）：**无凭证不得接管已有公民**。
+    #
+    # 旧断言是「签发过 token 的公民允许无证明重连（hook 的幂等路径）」——它测的
+    # 其实是 `alias="other-ai"`（自报会话名）去绑别人的公民，**不是 hook 路径**
+    # （hook 走 env 里的 `dsh:` 键）。而"签发过即放行"这个豁免把门做反了：
+    # 所有真实公民都签发过 token，于是"知道 citizen_id 就能拿到新 token"对
+    # 全部真实身份成立。2026-11-11 已推翻，改由**身份锚白名单**授权。
+    def test_S4_proofless_rebind_rejected(self):
         first = fish.start_session(self.conn, alias="probe-ai", kind="visitor")
-        again = fish.start_session(self.conn, citizen=first["citizen_id"],
-                                   alias="other-ai", kind="visitor")
-        self.assertEqual(again["citizen_id"], first["citizen_id"],
-                         "签发过 token 的公民允许无证明重连（hook 的幂等路径）")
+        with self.assertRaises(ValueError) as ctx:
+            fish.start_session(self.conn, citizen=first["citizen_id"],
+                               alias="other-ai", kind="visitor")
+        self.assertIn("需要证明", str(ctx.exception))
+
+    # S-4b（2026-11-11 新增）：身份锚授权判定的正反两面 + 变异自证。
+    def test_S4b_identity_anchor_grants(self):
+        import json as _json
+        import os
+        import tempfile
+
+        cid = "179" + "A" * 23
+        made = []
+
+        def _mk(text):
+            fd, p = tempfile.mkstemp(suffix=".json")
+            os.close(fd)
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            made.append(p)
+            return p
+
+        def _dump(obj):
+            return _mk(_json.dumps(obj, ensure_ascii=False))
+
+        try:
+            p = _dump({"citizen": cid, "sessions": ["dsh:s1"]})
+            # 正面：白名单会话 + 匹配公民 → 授权
+            self.assertTrue(fish.identity_anchor_grants(cid, "dsh:s1", anchor_path=p))
+            # 反面 1：会话不在白名单
+            self.assertFalse(fish.identity_anchor_grants(cid, "dsh:s2", anchor_path=p))
+            # 反面 2：公民不匹配
+            self.assertFalse(fish.identity_anchor_grants("999", "dsh:s1", anchor_path=p))
+            # 反面 3：空 session_key
+            self.assertFalse(fish.identity_anchor_grants(cid, "", anchor_path=p))
+            # 反面 4：空白名单 = 拒绝（有意保守，免证明是安全让步）
+            self.assertFalse(fish.identity_anchor_grants(
+                cid, "dsh:s1", anchor_path=_dump({"citizen": cid, "sessions": []})))
+            # 反面 5：缺 sessions 键 = 拒绝
+            self.assertFalse(fish.identity_anchor_grants(
+                cid, "dsh:s1", anchor_path=_dump({"citizen": cid})))
+            # 反面 6：文件不存在 = 拒绝
+            self.assertFalse(fish.identity_anchor_grants(
+                cid, "dsh:s1", anchor_path=p + ".missing"))
+            # 反面 7：坏 JSON = 拒绝且不抛
+            self.assertFalse(fish.identity_anchor_grants(
+                cid, "dsh:s1", anchor_path=_mk("{not json")))
+        finally:
+            for f in made:
+                try:
+                    os.unlink(f)
+                except OSError:
+                    pass
 
     # S-5
     def test_S5_wrong_proof_rejected(self):
