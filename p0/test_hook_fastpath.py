@@ -11,6 +11,7 @@ import json
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -73,6 +74,58 @@ class HookFastpathTest(unittest.TestCase):
         hook_fastpath.record_attempt(self.tmp, "posttool", "timeout")
         self.assertTrue(a.exists())
         self.assertFalse(b.exists(), "不同 hook 的状态文件必须分开")
+
+
+    # F-5（2026-11-11，🔴3 残留）：按**自测耗时**武装冷却。
+    # 超时是宿主杀进程、hook 等不到，所以它唯一能给的客观事实是"这次跑了多久"。
+    def test_F5_note_elapsed_arms_after_three_slow(self):
+        t0 = time.time() - 5.0          # 假装本次跑了 5 秒，远超 1.5 阈值
+        left = 0
+        for _ in range(3):
+            left = hook_fastpath.note_elapsed(self.tmp, "pretool", t0)
+        self.assertEqual(left, hook_fastpath.COOLDOWN_SECONDS)
+        self.assertGreater(hook_fastpath.cooldown_remaining(self.tmp, "pretool"), 0)
+
+    # F-6：快的一次必须清零 streak —— 防"无脑记 timeout 把冷却焊死"
+    def test_F6_note_elapsed_fast_does_not_arm(self):
+        left = 0
+        for _ in range(5):
+            left = hook_fastpath.note_elapsed(self.tmp, "posttool", time.time())
+        self.assertEqual(left, 0)
+        self.assertEqual(hook_fastpath.cooldown_remaining(self.tmp, "posttool"), 0)
+
+    # ---- F-7 / F-8：**这两条才是 🔴3 残口的判据** ----------------
+    # 只测 `record_attempt` 本身证明不了任何事 —— 那正是死代码的形态：
+    # 函数完全正确、测试全绿，但**生产里没人调它**。所以要直接跑 hook 的入口。
+    def _run_hook_entry(self, module):
+        import io
+        old_stdin, old_data = sys.stdin, module.DATA
+        module.DATA = self.tmp          # 绝不指向生产 data/
+        sys.stdin = io.StringIO("{}")
+        try:
+            try:
+                module.main([])
+            except Exception:           # noqa: BLE001 —— main 的 finally 仍会记一次冷却
+                pass
+        finally:
+            sys.stdin = old_stdin
+            module.DATA = old_data
+
+    def test_F7_pretool_entry_records_state(self):
+        import fish_pretool_hook as h
+        self.assertFalse(hook_fastpath.hook_state_path(self.tmp, "pretool").exists())
+        self._run_hook_entry(h)
+        self.assertTrue(
+            hook_fastpath.hook_state_path(self.tmp, "pretool").exists(),
+            "pretool 入口没记录冷却状态 → `note_elapsed` 又成了死代码")
+
+    def test_F8_posttool_entry_records_state(self):
+        import fish_push_hook as h
+        self.assertFalse(hook_fastpath.hook_state_path(self.tmp, "posttool").exists())
+        self._run_hook_entry(h)
+        self.assertTrue(
+            hook_fastpath.hook_state_path(self.tmp, "posttool").exists(),
+            "posttool 入口没记录冷却状态 → `note_elapsed` 又成了死代码")
 
 
 if __name__ == "__main__":

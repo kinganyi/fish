@@ -34,6 +34,7 @@ from fish_common import warn_ignored
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -198,6 +199,26 @@ def own_citizen_of(data_dir, session_key):
 
 
 def main(argv=None) -> int:
+    """入口包装：只多做一件事——把**自测耗时**记进冷却状态（🔴3 残留，2026-11-11）。
+
+    为什么包在外面而不是塞进 `_run` 的每条 return：`_run` 有十来条提前返回路径，
+    逐条加一行必然漏一条；包一层能把"每次执行都记一次"变成**结构保证**。
+
+    这一层补的是外部审查 🔴3 的最后一个残口：`hook_fastpath.cooldown_remaining`
+    一直在查冷却，但**从来没人写入**冷却状态，于是"连续超时退避"永不武装。
+    超时是宿主杀进程、hook 等不到那个事件，所以只能自测耗时（见 `note_elapsed`）。
+    """
+    t0 = time.time()
+    try:
+        return _run(argv)
+    finally:
+        try:
+            hook_fastpath.note_elapsed(DATA, "pretool", t0)
+        except Exception:      # noqa: BLE001 —— 记冷却失败绝不能影响工具放行
+            pass
+
+
+def _run(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     host = _host_from_argv(argv)
     # P0-⑥（外部审查 🔴3）：关闭态秒退 + 冷却（与 posttool 同一口径）。

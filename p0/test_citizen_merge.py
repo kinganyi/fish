@@ -112,5 +112,35 @@ class CitizenMergeTest(unittest.TestCase):
         self.assertIn("ULID", str(ctx.exception))
 
 
+    # M-9（2026-11-11 补，外部审查 🔴10 的缺口：文件头自述"未覆盖回滚"）
+    #
+    # 判据要证的是**部分迁移不留盘**：失败点故意设在 `kb_access` 上，而它排在
+    # `_ownership_tables` 里 `code_index` **之后** —— 失败发生时 `code_index.owner`
+    # 已经被改过了，所以只有真回滚才能让下面三条同时成立。
+    def test_M9_failure_rolls_back_everything(self):
+        import sqlite3
+        # 触发器只在"有行被 UPDATE"时才触发，所以先造一条 kb_access 归属行
+        self.conn.execute(
+            "INSERT INTO kb_access (vault_id, path, citizen_id, action, result, via, ts) "
+            "VALUES (?,?,?,?,?,?,?)",
+            ("v1", "a.md", self.a, "read", "ok", "cli", "2026-11-01T00:00:00Z"))
+        self.conn.commit()
+        self.conn.execute(
+            "CREATE TRIGGER boom BEFORE UPDATE OF citizen_id ON kb_access "
+            "BEGIN SELECT RAISE(ABORT, 'boom'); END;")
+        self.conn.commit()
+        before_merged = self._events("citizen.merged")
+        with self.assertRaises(sqlite3.Error):
+            fish.citizen_merge(self.conn, src=self.a, dst=self.b, apply=True)
+        # 回滚证据三条：归属没动、状态没变、事件没写
+        self.assertEqual(self._owner_count(self.a), 2, "回滚失败：owner 被改走了")
+        self.assertEqual(self._owner_count(self.b), 0)
+        st = self.conn.execute(
+            "SELECT status FROM citizens WHERE citizen_id=?", (self.a,)).fetchone()[0]
+        self.assertEqual(st, "active", "回滚失败：src 被标成 merged 了")
+        self.assertEqual(self._events("citizen.merged"), before_merged,
+                         "回滚失败：仍写了 citizen.merged 事件")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

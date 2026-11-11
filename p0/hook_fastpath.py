@@ -85,6 +85,31 @@ def cooldown_remaining(data_dir, hook: str) -> int:
     return left if left > 0 else 0
 
 
+# 超过这个耗时就算"接近宿主超时"。宿主给 pretool/posttool 的 timeout 是 3 秒，
+# 所以 1.5 秒已经是一半预算——连续 3 次（COOLDOWN_AFTER_TIMEOUTS）就该退避了。
+SLOW_SECONDS = 1.5
+
+
+def note_elapsed(data_dir, hook: str, started_at, *, slow_seconds=SLOW_SECONDS) -> int:
+    """按**自测耗时**记一次尝试（`pretool` / `posttool` 专用）。
+
+    为什么这里不能用"超时"这个事件：超时是**宿主杀进程**，hook 自己永远等不到那一刻，
+    所以它唯一能提供的客观事实是"我这次跑了多久"。连续 N 次接近超时就冷却 N 分钟，
+    下一轮直接秒退 —— 不让用户每次工具调用都等满宿主给的 3 秒。
+
+    为什么 `prompt` 不走这条：prompt hook 自己起子进程、能直接拿到 `timeout` 状态，
+    用 `record_attempt(..., status)` 更准（那边就是这么用的）。
+
+    任何异常都返回 0（少一层冷却，不影响正确性）。
+    """
+    try:
+        elapsed = time.time() - float(started_at)
+    except (TypeError, ValueError):
+        return 0
+    return record_attempt(data_dir, hook,
+                          "timeout" if elapsed >= float(slow_seconds) else "ok")
+
+
 def record_attempt(data_dir, hook: str, status: str) -> int:
     """记一次尝试；返回**剩余冷却秒数**（>0 = 本次不要再走慢路径）。"""
     path = hook_state_path(data_dir, hook)

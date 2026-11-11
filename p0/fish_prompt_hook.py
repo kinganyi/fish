@@ -40,6 +40,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import hook_io  # noqa: E402 —— 统一 stdout 出口（编码只在一处决定）
 import fish_activity  # noqa: E402 —— 采集/配置/心跳的共享核心（不 import fish）
+import hook_fastpath  # noqa: E402 —— 冷却的唯一实现（🔴3，2026-11-11 去重）
 
 FISH = HERE / "fish.py"
 # 数据目录：默认本目录下的 data；可用 FISH_DATA 覆盖（与其它 hook 同口径，测试可隔离）。
@@ -173,45 +174,24 @@ def ask_fish(raw: str, host: str, data_dir=None, *, timeout: int = 3):
 # ---------------------------------------------------- 连续超时降级（B 报告 BUG-1 的建议）
 # 3 次连续超时 → 冷却 10 分钟（只心跳、不推送）。目的：在"磁盘忙/杀软扫描"的窗口里
 # 不再反复撞超时（每次撞都可能把用户的一句话判成 block）。
-COOLDOWN_AFTER_TIMEOUTS = 3
-COOLDOWN_SECONDS = 600
-_HOOK_STATE = "prompt_hook_state.json"
-
-
-def _save_hook_state(path, state) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(state), encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError as exc:
-        warn_ignored('fish_prompt_hook.py:167 _save_hook_state', exc)
-
-
+#
+# 2026-11-11（外部审查 🔴3 残留）：这里原先是一份**独立实现**——自己的常量、自己的
+# 状态文件 `prompt_hook_state.json`、自己的 `_save_hook_state`。而 `hook_fastpath.py`
+# 里本来就有一份逻辑同构的 `record_attempt(data_dir, hook, status)`，当初正是为 🔴3
+# 写的（它的 docstring 记着"🟠-H：任意一个 hook 迟到就冷却全局 600s 是错的"，
+# 所以做了按 hook 隔离）。
+#
+# 两份并存的结果：`hook_fastpath.record_attempt` 成了**只有测试在调的死代码**，
+# 而 prompt hook 还在用那份单文件的全局冷却。现在统一走 `hook_fastpath`，
+# 状态文件变成 `_audit/hook-fastpath-prompt.json`，与 pretool/posttool 同一套命名。
 def _record_attempt(data_dir, status) -> int:
-    """记一次尝试；返回剩余冷却秒数（>0 = 本次不推送，只心跳）。"""
-    path = Path(data_dir or DATA) / "_audit" / _HOOK_STATE
-    state = {}
-    try:
-        if path.exists():
-            state = json.loads(path.read_text(encoding="utf-8")) or {}
-    except (OSError, ValueError):
-        state = {}
-    now = time.time()
-    until = float(state.get("cooldown_until") or 0)
-    if now < until:
-        return int(until - now)
-    streak = int(state.get("timeout_streak") or 0)
-    if status == "timeout":
-        streak += 1
-    elif status == "ok":
-        streak = 0
-    if streak >= COOLDOWN_AFTER_TIMEOUTS:
-        _save_hook_state(path, {"timeout_streak": 0,
-                                "cooldown_until": now + COOLDOWN_SECONDS})
-        return COOLDOWN_SECONDS
-    _save_hook_state(path, {"timeout_streak": streak, "cooldown_until": 0})
-    return 0
+    """记一次尝试；返回剩余冷却秒数（>0 = 本次不推送，只心跳）。
+
+    委托给 `hook_fastpath.record_attempt`（**唯一实现**）。prompt 侧能直接拿到
+    `timeout` 状态（它自己起子进程、自己判超时），所以不像 pretool/posttool
+    那样要靠自测耗时。
+    """
+    return hook_fastpath.record_attempt(data_dir or DATA, "prompt", status)
 
 
 def _prompt_enabled(data_dir=None) -> bool:

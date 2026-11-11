@@ -571,5 +571,56 @@ class DailyCorpusGateTest(unittest.TestCase):
         self.assertEqual(rc, 0)
 
 
+class RedactBareBase64Test(unittest.TestCase):
+    """🔴8 的最后残口（2026-11-11）：无键名、无 PEM 标记的**裸 base64**。
+
+    这条判据的重点**不是"能掩"**，而是"能掩的同时不伤及无辜"——
+    脱敏规则最容易犯的错是过度匹配，把 64 位哈希、普通长句一起吃掉，
+    于是语料可用性下降，而没有任何告警。
+    """
+
+    def test_B1_long_blob_is_redacted_and_body_gone(self):
+        """400+ 连续 base64 → 被掩，且**原文一个字符都不留**。"""
+        blob = "QUJD" * 120                      # 480 字符，纯 base64 字母
+        text, n, by = redact_mod.redact("密钥材料：" + blob)
+        self.assertGreaterEqual(n, 1)
+        self.assertIn("base64_blob", by)
+        self.assertNotIn(blob[:80], text, "原文片段仍在输出里 = 没真掩")
+        self.assertIn("〔已脱敏:base64_blob〕", text)
+
+    def test_B2_sha256_hex_not_redacted(self):
+        """对照组：64 位十六进制哈希**不能**被掩（它是合法内容，不是凭证）。"""
+        sha = "a" * 64
+        text, n, by = redact_mod.redact("commit sha256=" + sha)
+        # 命中只可能来自 token_env（键名 token 命中），绝不该来自 base64_blob
+        self.assertNotIn("base64_blob", by, "64 位哈希被当成 base64 掩掉了")
+        self.assertIn(sha, text)
+
+    def test_B3_long_sentence_not_redacted(self):
+        """对照：长英文句子（含空格）不命中。"""
+        sentence = "The quick brown fox jumps over the lazy dog. " * 20
+        _, _, by = redact_mod.redact(sentence)
+        self.assertNotIn("base64_blob", by)
+
+    def test_B4_threshold_boundary(self):
+        """阈值边界：399 不掩、400 掩（数字本身也是判据的一部分）。"""
+        under = "A" * 399
+        _, _, by_under = redact_mod.redact("x " + under)
+        self.assertNotIn("base64_blob", by_under, "399 字符不该触发")
+        over = "A" * 400
+        _, _, by_over = redact_mod.redact("x " + over)
+        self.assertIn("base64_blob", by_over, "400 字符必须触发")
+
+    def test_B5_pem_body_still_handled_by_private_key_rule(self):
+        """PEM 整段仍由 `private_key` 规则吃掉（新规则不抢、也不破坏它）。"""
+        pem = ("-----BEGIN RSA PRIVATE KEY-----\n"
+               + "MIIEow" * 400 + "\n"
+               + "-----END RSA PRIVATE KEY-----")
+        text, n, by = redact_mod.redact(pem)
+        self.assertIn("private_key", by)
+        self.assertNotIn("MIIEow", text, "PEM 正文残留")
+        self.assertGreaterEqual(n, 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

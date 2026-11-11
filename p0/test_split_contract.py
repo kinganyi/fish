@@ -84,6 +84,10 @@ FISH_LINES_MIN = 13800
 # 口径不变：下界不动、行为由 test_session_bind（S4/S4b）与 rebuild 判据钉住。
 # **真正的解法仍是错题本 E-11（把 fish.py 拆开）**，不是继续抬这个窗口。
 FISH_LINES_MAX = 14550
+# ⚠️ 死常量（2026-11-11 标注）：`EXPECTED_LINE_ACTUAL` 在**任何断言里都没被引用**，
+# 它的值（14,032）也早已过期。只在 `docs/fix-list-语料层-20261027.md:43` 里被记为
+# "陈旧：不改门禁"——保留名字是为了让那条历史记录还能对上号，**不要把它当判据**。
+# 真正生效的是上面的 `FISH_LINES_MIN/MAX` 窗口。
 EXPECTED_LINE_ACTUAL = 14032
 FISH_PUSH_LINES_MIN = 1050
 # 2026-10-29（结构整改）：融合/排序层抽出为 `fish_push_rank.py`（9 个纯函数，187 行），

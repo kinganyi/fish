@@ -36,6 +36,7 @@
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -113,6 +114,22 @@ def maybe_warn_pending(payload, host) -> None:
 
 
 def main(argv=None):
+    """入口包装：把**自测耗时**记进冷却状态（🔴3 残留，2026-11-11）。
+
+    补的是同一处残口：`cooldown_remaining` 一直在查、但没人写入。
+    超时是宿主杀进程、hook 等不到，所以按自测耗时判（见 `note_elapsed`）。
+    """
+    t0 = time.time()
+    try:
+        return _run(argv)
+    finally:
+        try:
+            hook_fastpath.note_elapsed(DATA, "posttool", t0)
+        except Exception:      # noqa: BLE001 —— 记冷却失败绝不能影响工具结果
+            pass
+
+
+def _run(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     host = _host_from_argv(argv)
     collect = "--no-collect-activity" not in argv
