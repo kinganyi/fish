@@ -3626,8 +3626,13 @@ def auto_session_display_name(host, session_key, role=None) -> str:
     return f"{base}:{role}" if role else base
 
 
-# CLI 入口的 shim 名（FB-13）。`install_cli.py --apply` 生成的就是它。
+# CLI 入口的两个文件名（FB-13）。`install_cli.py --apply` 生成的就是它们：
+#   fish.cmd        纯 ASCII 的一行转发（`@python "%~dp0fish_launch.py" %*`）
+#   fish_launch.py  承载真实路径的启动器（Python 按 UTF-8 读源码 → 不受代码页影响）
+# 这两个名字在 `install_cli.py` 里也有一份（它不能 import fish：那会把整个核心拖进来）。
+# 两处必须一致——`test_cli_entry.py` 有判据钉住，改名时不会一漏一改。
 CLI_ENTRY_SHIM = "fish.cmd"
+CLI_ENTRY_LAUNCHER = "fish_launch.py"
 
 
 def cli_entry_hint(p0_dir=None) -> str:
@@ -3638,12 +3643,26 @@ def cli_entry_hint(p0_dir=None) -> str:
     绕路的具体形态就是"身份未核"的日常来源（明明能签 machine 级，却一直用
     self-reported 在跑）。一行路径的成本，换掉一次静默降级。
 
-    `<root>/p0/fish.py` 里的 root 是仓库根（`p0` 的上一级）；这里直接给绝对路径，
-    因为它要能被**复制粘贴就能跑**。
+    2026-11-11：改成**状态感知**。以前不管装没装都说"去跑 install_cli.py --apply"，
+    于是装好了它也看不出来（还得自己试一次）；更糟的是**装了却不说**会让 AI 以为
+    只能用工具、继续绕路。现在按实况分两种说法。
+
+    判定"已就绪"要看两件事，缺一不可：
+      ① `shutil.which("fish")` 找得到（在 PATH 上）；
+      ② 它旁边有 `fish_launch.py`（确认是**我们**的 shim，而不是别的同名程序）。
+    只看 ① 会把一个撞名的 `fish.exe` 报成"已就绪"——那比不说更误导。
     """
     p0 = Path(p0_dir) if p0_dir else Path(__file__).resolve().parent
+    found = shutil.which("fish")
+    if found:
+        try:
+            beside = Path(found).resolve().parent / CLI_ENTRY_LAUNCHER
+        except OSError:      # noqa: BLE001 —— 路径解析失败就当没装，别在回执里抛
+            beside = None
+        if beside is not None and beside.exists():
+            return "CLI 入口：fish（已就绪，`fish --help` 验证）"
     return (f"CLI 入口：python {p0 / 'fish.py'}"
-            f"（或 install_cli.py --apply 生成 {CLI_ENTRY_SHIM}）")
+            f"（或 install_cli.py --apply 生成 {CLI_ENTRY_SHIM}，之后可直接敲 fish）")
 
 
 def hash_session_token(token: str) -> str:

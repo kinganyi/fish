@@ -25,6 +25,7 @@ import importlib.util
 import io
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -477,29 +478,94 @@ class FB12ArchiveCitizensTest(_Case):
 
 # ============================================================== FB-13 CLI 入口安装
 class FB13InstallCliTest(_Case):
-    """FB-13：`install_cli.py` 默认演练 / `--apply` 生成 shim + 两个回执带入口行。"""
+    """FB-13：`install_cli.py` 默认演练 / `--apply` 生成 shim + 启动器 + 两个回执带入口行。
+
+    2026-11-11 重构（`install_cli.py` 模块头有完整来龙去脉）：旧设计把绝对路径直接写进
+    `fish.cmd` 并按 `mbcs`(cp936) 保存，结果在本机**一敲就报 `can't open file`**——
+    cmd 实际按 UTF-8 读 .cmd，中文路径变乱码。表面像"文件不存在"，其实全是转码。
+
+    新设计：`.cmd` **纯 ASCII**（只有 `@python "%~dp0fish_launch.py" %*`），
+    真实路径住进 `fish_launch.py`（Python 恒按 UTF-8 读源码）。
+    所以这一组判据里最重要的不是"能生成文件"，而是：
+      · shim 里**一个非 ASCII 字符都没有**（否则又回到代码页赌博）；
+      · shim 里**没有绝对路径**（否则项目一搬家就失效）；
+      · 启动器里的 TARGET **逐字等于**真实 fish.py（中文路径必须原样）；
+      · **端到端真跑一次** `fish.cmd --help`（这条本来就能抓住原来那个 bug）。
+    """
 
     def test_FB13_dry_run_writes_nothing(self):
         bin_dir = self.base / "bin"
         res = install_cli.install(apply=False, bin_dir=bin_dir)
         self.assertFalse(res["written"])
         self.assertFalse(bin_dir.exists(), "演练不许创建目录/文件")
-        self.assertTrue(res["content"].startswith('@"'),
-                        f"shim 内容要以 @\" 开头：{res['content']!r}")
-        self.assertIn(str(Path("fish.py").resolve()), res["content"])
+        self.assertTrue(res["content"].startswith("@"),
+                        f"批处理要以 @ 开头（抑制回显）：{res['content']!r}")
         self.assertIn("%*", res["content"], "参数必须原样转发")
 
-    def test_FB13_apply_generates_shim(self):
+    def test_FB13_shim_is_pure_ascii(self):
+        """**核心判据**：`.cmd` 必须纯 ASCII。
+
+        非 ASCII 一旦进 .cmd，它的解码就取决于"cmd 按哪个代码页读批处理"——
+        而本机实测 ANSI=936、OEM=936、cmd 却按 UTF-8 读。**chcp 看不出真相**，
+        所以只能在源头消灭非 ASCII，不能靠选对编码。
+        """
+        res = install_cli.plan(bin_dir=self.base / "bin")
+        bad = [ch for ch in res["content"] if ord(ch) > 127]
+        self.assertEqual(bad, [],
+                         f"shim 里出现非 ASCII：{bad!r}——又会变成代码页赌博")
+        res["content"].encode("ascii")      # 再钉一次：编码失败就说明有非 ASCII
+
+    def test_FB13_shim_has_no_absolute_path(self):
+        """shim 不许出现绝对路径——用 `%~dp0`（自身目录），项目搬家才不失效。"""
+        res = install_cli.plan(bin_dir=self.base / "bin")
+        content = res["content"]
+        self.assertIn("%~dp0", content, "必须用 %~dp0 定位同目录的启动器")
+        self.assertNotIn(str(res["fish_py"]), content, "不许把 fish.py 的绝对路径写进 shim")
+        self.assertNotIn(str(res["python"]), content, "不许把 python 的绝对路径写进 shim")
+        self.assertIn(install_cli.LAUNCHER_NAME, content, "必须指向启动器")
+
+    def test_FB13_launcher_target_round_trips(self):
+        """启动器里的 TARGET 必须**逐字等于**真实 fish.py（中文路径不能被转义/截断）。"""
+        res = install_cli.plan(bin_dir=self.base / "bin")
+        text = res["launcher_content"]
+        expected = f'TARGET = r"{res["fish_py"]}"'
+        self.assertIn(expected, text, f"启动器里没找到 {expected!r}")
+        # ASCII 之外的字符必须原样出现在源码里（Python 按 UTF-8 读 → 不会乱码）
+        for ch in str(res["fish_py"]):
+            if ord(ch) > 127:
+                self.assertIn(ch, text, f"路径里的非 ASCII 字符 {ch!r} 丢了")
+                break
+
+    def test_FB13_apply_generates_both_files(self):
         bin_dir = self.base / "bin"
         res = install_cli.install(apply=True, bin_dir=bin_dir)
-        shim = bin_dir / "fish.cmd"
-        self.assertTrue(res["verified"], "写后必须逐字校验通过")
-        self.assertTrue(shim.exists())
-        # 2026-10-26 合并后修复：shim 按 Windows ANSI（mbcs）写，读也得同编码
-        # （主树路径含中文时，artifacts 里是中文而非 ASCII）。
-        text = shim.read_text(encoding="mbcs" if os.name == "nt" else "utf-8")
-        self.assertIn(str(Path("fish.py").resolve()), text, "shim 必须指向本仓 fish.py")
-        self.assertIn("%*", text, "参数必须原样转发")
+        shim = bin_dir / install_cli.SHIM_NAME
+        launcher = bin_dir / install_cli.LAUNCHER_NAME
+        self.assertTrue(res["verified"], "写后必须逐字校验通过（两个文件都要）")
+        self.assertTrue(shim.exists() and launcher.exists())
+        # 两个文件都按 UTF-8 写；.cmd 因为纯 ASCII，任何代码页读结果都一样
+        self.assertIn("%*", shim.read_text(encoding="utf-8"))
+        self.assertIn('TARGET = r"', launcher.read_text(encoding="utf-8"))
+
+    def test_FB13_end_to_end_help_through_cmd(self):
+        """**端到端**：真生成 shim，用 cmd 执行一次 `fish --help`，退出码 0 且认得出 -h。
+
+        这条是原 bug 的直接探针：旧 shim（cp936 中文路径）在这里必然红，
+        报 `can't open file ... 'fish.py': [Errno 2]`。
+        用字节读输出再按 ASCII 找 `usage: fish`——ASCII 在任何代码页下都不变形，
+        所以这条判据本身不受编码影响（否则判据会跟着环境飘）。
+        """
+        bin_dir = self.base / "bin"
+        res = install_cli.install(apply=True, bin_dir=bin_dir)
+        self.assertTrue(res["verified"])
+        r = subprocess.run(
+            ["cmd", "/c", str(res["shim_path"]), "--help"],
+            capture_output=True, timeout=120)
+        out = (r.stdout or b"").decode("utf-8", "replace") + \
+              (r.stderr or b"").decode("utf-8", "replace")
+        self.assertEqual(r.returncode, 0,
+                         f"shim 跑不通（这就是那个转码 bug 的形状）：{out[:400]}")
+        self.assertIn("usage: fish", out, f"没拿到 usage：{out[:300]}")
 
     def test_FB13_main_defaults_to_dry_run(self):
         """`main()` 不加 --apply 时同样不落文件，并打印"没有写任何文件"。"""
@@ -508,31 +574,42 @@ class FB13InstallCliTest(_Case):
         with contextlib.redirect_stdout(buf):
             code = install_cli.main(["--bin-dir", str(bin_dir)])
         self.assertEqual(code, 0)
-        self.assertFalse((bin_dir / "fish.cmd").exists())
+        self.assertFalse((bin_dir / install_cli.SHIM_NAME).exists())
         self.assertIn("没有写任何文件", buf.getvalue())
         self.assertIn(str(bin_dir), buf.getvalue(), "要打印需要加进 PATH 的目录")
 
-    def test_FB13_main_apply_writes_shim(self):
+    def test_FB13_main_apply_writes_both(self):
         bin_dir = self.base / "bin"
         with contextlib.redirect_stdout(io.StringIO()):
             code = install_cli.main(["--apply", "--bin-dir", str(bin_dir)])
         self.assertEqual(code, 0)
-        self.assertTrue((bin_dir / "fish.cmd").exists())
+        self.assertTrue((bin_dir / install_cli.SHIM_NAME).exists())
+        self.assertTrue((bin_dir / install_cli.LAUNCHER_NAME).exists())
 
     def test_FB13_whoami_receipt_has_entry_line(self):
+        """回执里必须有入口行，且**必须来自唯一实现** `fish.cli_entry_hint()`。
+
+        2026-11-11：`cli_entry_hint()` 改成**状态感知**后，这台机器上 shim 已装好，
+        说法从"去跑 install_cli.py --apply"变成"fish（已就绪）"。所以这里**不许**再
+        写死某一种文案——那会把"装好了"这件事判成红。改为：
+          ① 行存在（前缀稳定）；
+          ② 内容与 `fish.cli_entry_hint()` **逐字一致**（证明用的是唯一实现，
+             而不是回执里另抄了一份会漂的字符串）。
+        两条分支（装了/没装）由 `test_cli_entry.py` 各自钉住。
+        """
         out = self.srv.tool_whoami({}, self.anon)
-        self.assertIn("CLI 入口：python ", out, out)
-        self.assertIn("fish.py", out)
-        self.assertIn("install_cli.py --apply", out)
-        self.assertIn("fish.cmd", out)
+        self.assertIn("CLI 入口：", out, out)
+        self.assertIn(fish.cli_entry_hint(), out,
+                      "回执里的入口行必须来自 fish.cli_entry_hint()")
 
     def test_FB13_register_receipt_has_entry_line(self):
         """register 的两条分支（新建 / 已存在）都要有入口行。"""
+        hint = fish.cli_entry_hint()
         first = self.srv.tool_register({"display_name": "a2-入口"}, self.anon)
-        self.assertIn("CLI 入口：python ", first, first)
+        self.assertIn(hint, first, first)
         again = self.srv.tool_register({"display_name": "a2-入口"}, self.anon)
         self.assertIn("已存在，直接使用", again)
-        self.assertIn("CLI 入口：python ", again, again)
+        self.assertIn(hint, again, again)
 
 
 if __name__ == "__main__":
