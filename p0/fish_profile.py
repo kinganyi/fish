@@ -86,15 +86,28 @@ from fish_db import append_event, set_config
 #   stable   永不变（称呼）——总是注入
 #   lasting  长期有效（生活/工作/性格）——注入前若干条
 #   volatile 会过期（近期动态）——**带时效标记**才注入，过期不注入
+# 每个槽位带一个**注入序号**（第 4 位），越小越先注入。
+#
+# 为什么需要它（2026-11-11 实测暴露的缺陷）：R1-6 说"L0 只放称呼 + 3 条**最稳定**字段"，
+# 而第一版把它实现成"按目录顺序取前 3 条 lasting"。目录顺序是 生活→工作→性格，
+# 于是只要生活组填了几格，**性格组（价值观/沟通偏好/决策风格）永远进不了默认注入**——
+# 而那三条恰恰最影响 AI 怎么做事。实测：9 格填满后，注入包里只有
+# 所在地 / 身份 / 业务线，沟通偏好与决策风格一条都没出现。
+#
+# "最稳定"是个语义判断，不是字母序。所以改成**显式排序**：人可以通过改这张表控制，
+# 判据钉住"性格必须排在生活之前"这条语义。
 PROFILE_GROUPS = (
-    ("称呼", "stable", ("名字", "怎么叫我")),
-    ("生活", "lasting", ("所在地", "家庭", "作息")),
-    ("工作", "lasting", ("身份", "业务线", "公司", "当前重点")),
-    ("性格", "lasting", ("价值观", "沟通偏好", "决策风格")),
+    # (组名, 稳定性, ((槽名, 注入序号), ...))
+    ("称呼", "stable", (("名字", 0), ("怎么叫我", 1))),
+    # 性格排在最前：它决定 AI **怎么跟这个人相处**，比"他在哪"重要。
+    ("性格", "lasting", (("沟通偏好", 10), ("决策风格", 11), ("价值观", 12))),
+    ("工作", "lasting", (("身份", 20), ("当前重点", 21), ("业务线", 22), ("公司", 23))),
+    ("生活", "lasting", (("所在地", 30), ("家庭", 31), ("作息", 32))),
     # `近期动态` 的槽位名刻意避开了注入包 L1 里那些词（"当前项目"等）：
     # L1 的「当前项目」是**这次会话**的坐标，画像的「在忙什么」是**这个人**的现状，
     # 两者同名会让人以为是同一件事。撞名的代价是误读，不值得省几个字。
-    ("近期动态", "volatile", ("在忙什么", "最近的变化", "待解决")),
+    # 这一组是 volatile，序号只用于 full 模式排序。
+    ("近期动态", "volatile", (("在忙什么", 40), ("最近的变化", 41), ("待解决", 42))),
 )
 
 # 注入分级（R1-6）：L0 只放"称呼 + 3 条最稳定字段"。
@@ -118,12 +131,14 @@ PROFILE_FILE = "画像.md"
 
 def profile_catalog():
     """`{组名: {"permanence":…, "slots": (...)}}`，给 CLI 的报错/帮助用。"""
-    return {g: {"permanence": p, "slots": tuple(s)} for g, p, s in PROFILE_GROUPS}
+    return {g: {"permanence": p, "slots": tuple(x[0] for x in s)}
+            for g, p, s in PROFILE_GROUPS}
 
 
 def profile_all_slot_keys():
     """全部合法 slot_key（`组.槽名`），有序。"""
-    return [f"{g}.{s}" for g, _p, slots in PROFILE_GROUPS for s in slots]
+    return [f"{g}.{name}" for g, _p, slots in PROFILE_GROUPS
+            for name, _rank in slots]
 
 
 def resolve_slot(group, name):
@@ -137,9 +152,10 @@ def resolve_slot(group, name):
     for gname, perm, slots in PROFILE_GROUPS:
         if gname != g:
             continue
-        if n not in slots:
+        names = [x[0] for x in slots]
+        if n not in names:
             raise ValueError(
-                f"「{gname}」没有槽位「{n}」。可用：{'/'.join(slots)}"
+                f"「{gname}」没有槽位「{n}」。可用：{'/'.join(names)}"
                 f"（要加新槽位请改 `fish_profile.PROFILE_GROUPS`——这是**故意的**固定表）")
         return f"{gname}.{n}", perm
     raise ValueError(
@@ -181,8 +197,8 @@ def list_slots(conn, group=None):
     for g, _perm, slots in PROFILE_GROUPS:
         if group and g != group:
             continue
-        for s in slots:
-            k = f"{g}.{s}"
+        for name, _rank in slots:
+            k = f"{g}.{name}"
             if k in got:
                 out.append(got[k])
     return out
@@ -451,16 +467,43 @@ def render_profile_block(conn, *, full=False):
     # 1) 称呼（stable）——全部
     for s in by_group.get("称呼", []):
         lines.append(f"  {s['slot_name']}：{s['value']}")
-    # 2) 最稳定的若干条 lasting（按目录顺序取前 N）
-    extra = 0
-    for gname, perm, _slots in PROFILE_GROUPS:
+    # 2) lasting 组：**按槽位的注入序号**取前 N 条（不是按目录顺序）。
+    #
+    # 2026-11-11 修：第一版按目录顺序取，于是"性格"（在目录最后）永远进不来——
+    # 而沟通偏好/决策风格恰恰最影响 AI 怎么做事。现在序号写死在 `PROFILE_GROUPS` 里，
+    # 排序依据是**语义**（越影响相处的越前），不是字母序。
+    # 分组轮转分配（round-robin），而不是纯按序号取前 N。
+    #
+    # 为什么（两次实测的教训）：
+    #   · 按**目录顺序**取 → 性格组（排在最后）永远进不来，而它最影响 AI 怎么做事；
+    #   · 改成**纯按序号**取 → 性格三条全占满，把「工作·身份」挤掉，AI 连这个人是
+    #     干什么的都不知道了。
+    # 两个极端都不对。真正要的是**每组都有代表**：先取各组排最前的那条，
+    # 再取各组的第二条——这样 3 条恰好覆盖 3 个 lasting 组，各司其职。
+    buckets = []
+    for gname, perm, slots in PROFILE_GROUPS:
         if perm != "lasting":
             continue
-        for s in by_group.get(gname, []):
-            if extra >= PROFILE_STABLE_EXTRA and not full:
-                break
-            lines.append(f"  {gname}·{s['slot_name']}：{s['value']}")
-            extra += 1
+        rank_of = {name: r for name, r in slots}
+        items = sorted(by_group.get(gname, []),
+                       key=lambda x: rank_of.get(x["slot_name"], 999))
+        if items:
+            buckets.append((min(rank_of.values()), gname, items))
+    buckets.sort(key=lambda b: b[0])          # 组之间按该组最小序号排
+    picked = []
+    round_no = 0
+    while True:
+        added = False
+        for _r, gname, items in buckets:
+            if round_no < len(items):
+                picked.append((gname, items[round_no]))
+                added = True
+        if not added:
+            break
+        round_no += 1
+    limit = None if full else PROFILE_STABLE_EXTRA
+    for gname, s in (picked if limit is None else picked[:limit]):
+        lines.append(f"  {gname}·{s['slot_name']}：{s['value']}")
     # 3) 近期动态：过期不注入，注入必带 as-of
     for s in by_group.get("近期动态", []):
         if not _is_fresh(s.get("as_of"), max_days):
@@ -496,7 +539,7 @@ def render_markdown(conn):
         out.append(f"## {gname}")
         if perm == "volatile":
             out.append("<!-- 这一组带时效：sync 时会把 as-of 记成当前时间 -->")
-        for sname in slots:
+        for sname, _rank in slots:
             s = by_group.get(gname, {}).get(sname)
             val = s["value"] if s else ""
             out.append(f"- {sname}: {val}")

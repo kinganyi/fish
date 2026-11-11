@@ -281,6 +281,47 @@ class InjectionGradingTest(_ProfileBase):
         self.assertNotIn("三个月前的事", block, "过期动态被当成'当下'注入就是误导")
         self.assertIn("安逸", block, "stable 槽位不受时效影响")
 
+    def test_P1_8b_every_lasting_group_gets_a_representative(self):
+        """默认注入必须**每组至少一条**——不许有哪一组永远进不来。
+
+        ## 这条判据守的是一个真实缺陷（2026-11-11 实测暴露）
+
+        第一版按"目录顺序"取前 3 条 lasting。目录顺序是 生活→工作→性格，
+        于是把 9 格填满之后，注入包里有 所在地/身份/业务线，而
+        **沟通偏好 / 决策风格 / 价值观 一条都没有**——偏偏那三条最影响 AI 怎么做事。
+
+        第二版改成"纯按序号取前 3"，结果反过来：性格三条全占满，
+        **「工作·身份」被挤掉**，AI 连这个人是干什么的都不知道。
+
+        两个极端都不对。现在的规则是**分组轮转**：每组各取一条，覆盖所有 lasting 组。
+        这条判据钉住"不许回到任何一种极端"。
+        """
+        # **必须把每个 lasting 组填满**，否则这条判据测不出东西。
+        # 第一版只填每组一条，结果"按目录顺序取前 3"恰好也能覆盖三组——
+        # 变异测试一跑就发现判据没红（判据自己先失明了）。
+        # 填满之后，目录顺序会把前 3 条全给「生活」组，工作/性格被排除 → 才能红。
+        got_groups = []
+        for g, perm, slots in fish_profile.PROFILE_GROUPS:
+            if perm != "lasting":
+                continue
+            for name, _rank in slots:
+                fish_profile.set_slot(self.conn, g, name, f"{g}-{name}")
+            got_groups.append(g)
+        self.assertGreaterEqual(len(got_groups), 3, "lasting 组应有 3 个")
+        block = fish_profile.render_profile_block(self.conn)
+        for g in got_groups:
+            self.assertIn(f"{g}·", block,
+                          f"「{g}」组一条都没进默认注入——某个组被系统性排除了")
+
+    def test_P1_8c_personality_outranks_location(self):
+        """性格组必须排在生活组之前（越影响相处越靠前），而不是按目录字母序。"""
+        order = {g: min(r for _n, r in slots)
+                 for g, _p, slots in fish_profile.PROFILE_GROUPS}
+        self.assertLess(order["称呼"], order["性格"])
+        self.assertLess(order["性格"], order["生活"],
+                        "性格组必须排在生活组之前：沟通偏好/决策风格比'他在哪'重要")
+        self.assertLess(order["性格"], order["工作"])
+
     def test_P1_8_empty_profile_renders_nothing(self):
         """空画像连标题都不输出（注入包里出现空壳段 = 噪音 + 白花预算）。"""
         self.assertEqual(fish_profile.render_profile_block(self.conn), "")
