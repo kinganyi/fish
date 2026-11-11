@@ -8248,6 +8248,41 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
     # 入口指引（第 1 层引导）：把 AI 引到 MCP 工具，而不是读文件/查 SQLite
     l2_lines.append("【操作指引】记→remember ｜ 查→recall/resolve_code ｜ "
                     "上下文→neighbors ｜ 状态→inject（勿直接读写 data/ 或 sqlite）")
+    # 知识库提示（2026-10-30）：把 KB 的存在告诉 AI——否则没人会想到去查
+    # （生产读数：`kb_access` 2376 条里 99.9% 是 10-26/27 建库自测，真实业务查询≈0）。
+    #
+    # 设计纪律（开源通用性，三条都是硬要求）：
+    #   · 篇数 / 目录名 **全部从 kb_index 实时聚合**：不写死任何数字或目录名，
+    #     换一个库（别人的 Obsidian / 别的语言目录）自动适配；
+    #   · 空库、或 kb_index 表不存在（老库 / 别的部署）→ **不追加**：
+    #     不占预算，也不制造"暂无知识库"这种噪音（噪音会训练 AI 跳过这一段）；
+    #   · 只交代"有什么 / 怎么查 / 别编造"，**不描述具体内容**——内容用 search 取，
+    #     写进注入包就等于把过期摘要固化。
+    #
+    # 性能（2026-10-30 实测 296 行库）：走 ix_kb_index_status 索引，
+    # 中位 0.005 ms（20 次），比同段 proj_rows 快约 100 倍。仍加两道保险：
+    # ① 只在选了 `index` 段时才查（不选就不付代价）；② 开关 inject.kb_hint_enabled。
+    if "index" in want:
+        try:
+            _kb_on = int(get_config(conn, "inject.kb_hint_enabled"))
+        except (KeyError, TypeError, ValueError):
+            _kb_on = 1
+        if _kb_on:
+            try:
+                _kb_rows = conn.execute(
+                    "SELECT CASE WHEN instr(rel_path,'/') > 0 "
+                    "            THEN substr(rel_path,1,instr(rel_path,'/')-1) "
+                    "            ELSE '(root)' END AS top, COUNT(*) AS n "
+                    "FROM kb_index WHERE status = 'active' GROUP BY top ORDER BY n DESC"
+                ).fetchall()
+            except sqlite3.Error:
+                _kb_rows = []   # 表不存在 / 列不匹配 → 静默跳过（不因 KB 拖垮注入）
+            if _kb_rows:
+                _kb_total = sum(r[1] for r in _kb_rows)
+                _kb_parts = "、".join(f"{r[0]} {r[1]}" for r in _kb_rows[:5])
+                l2_lines.append(
+                    f"知识库 {_kb_total} 篇（{_kb_parts}）：需要背景资料时用 kb search 查，"
+                    "不要凭印象编造。")
     l2 = ("\n".join(l2_lines) + "\n") if l2_lines else ""
     l2_built = bool(l2)         # 供"L2 是被裁掉还是本来就没有"的声明区分（见 truncation_counts）
     if "index" not in want:
