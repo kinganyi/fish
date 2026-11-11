@@ -24,6 +24,7 @@ fish 身份层 · P1-a（纯结构）验收
 为什么判据 A 要连"归档表与热表逐列一致"一起断言：citizens_all 是 UNION ALL，只按**列位置**
 拼，不看列名。两张表结构一旦漂开，视图会静默错位（而不是报错）——那是本轮最昂贵的失手。
 """
+import contextlib
 import ast
 import re
 import shutil
@@ -37,6 +38,23 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import fish  # noqa: E402
+import fish_db  # noqa: E402 —— 变异点要一起打到消费方
+
+
+def _patch_all(name, value):
+    '''变异点打在**两个模块**上（2026-11-11 E-11 拆包后必须这样）。
+
+    拆包把「常量定义」和「消费函数」分到了不同模块：DDL 常量在 fish_schema、
+    建表函数在 fish_db，而 migrate 仍在 fish.py 里通过 from-import 快照调用它们。
+    只 patch 一侧，另一侧会把东西照原样建回来——那种「红」是假的，判据也就废了。
+    '''
+    @contextlib.contextmanager
+    def cm():
+        with contextlib.ExitStack() as st:
+            for mod in (fish, fish_db):
+                st.enter_context(mock.patch.object(mod, name, value))
+            yield
+    return cm()
 
 # 13 列的**顺序**就是 citizens_all 的拼接口。刻意手写一份、不从 fish 里读：
 # 判据必须独立于被测实现，否则"实现自己和自己一致"是恒绿。
@@ -470,7 +488,7 @@ class FishIdentityP1aTest(unittest.TestCase):
         self.assertNotEqual(broken, fish.SCHEMA, "变异没生效：SCHEMA 里没匹配到 agent_accounts")
         kept = tuple(d for d in fish._IDENTITY_TABLE_DDLS if "agent_accounts" not in d)
         self.assertEqual(len(kept), 3, "夹具前提：摘掉一张表后应剩 3 条 DDL")
-        with mock.patch.object(fish, "_IDENTITY_TABLE_DDLS", kept):
+        with _patch_all("_IDENTITY_TABLE_DDLS", kept):
             conn = self._fresh("mut-a-ddl", schema=broken)
         try:
             self.assertNotIn("agent_accounts", _objects(conn, "table"), "变异没生效：表还是建了")
@@ -565,7 +583,7 @@ class FishIdentityP1aTest(unittest.TestCase):
         conn = fish.connect(root)
         try:
             conn.executescript(fish.SCHEMA)
-            with mock.patch.object(fish, "_CITIZENS_NEW_COLS", ()), \
+            with _patch_all("_CITIZENS_NEW_COLS", ()), \
                     self.assertRaises(sqlite3.OperationalError):
                 fish.migrate(conn)
         finally:
@@ -576,9 +594,9 @@ class FishIdentityP1aTest(unittest.TestCase):
         conn = fish.connect(root)
         try:
             conn.executescript(fish.SCHEMA)
-            with mock.patch.object(fish, "_CITIZENS_NEW_COLS", ()), \
-                    mock.patch.object(fish, "_IDENTITY_INDEXES", ()), \
-                    mock.patch.object(fish, "_ensure_citizens_all_view", lambda c: None):
+            with _patch_all("_CITIZENS_NEW_COLS", ()), \
+                    _patch_all("_IDENTITY_INDEXES", ()), \
+                    _patch_all("_ensure_citizens_all_view", lambda c: None):
                 fish.migrate(conn)           # 跑得完，但列补不出来
             with self.assertRaises(AssertionError):
                 self._assert_structure(conn, "变异：摘掉补列清单")
@@ -706,7 +724,7 @@ class FishIdentityP1aTest(unittest.TestCase):
         `_ensure_stint_open_index`（名字没变、定义变了，必须先 DROP 再重建）。
         变异靶点因此换到那个函数上——**被测的东西没变**：摘掉索引后唯一性必须消失。
         """
-        with mock.patch.object(fish, "_ensure_stint_open_index", lambda conn: None):
+        with _patch_all("_ensure_stint_open_index", lambda conn: None):
             conn = self._fresh("mut-e")
         try:
             self.assertNotIn("ux_stint_open", _objects(conn, "index"),

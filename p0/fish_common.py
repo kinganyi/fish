@@ -800,3 +800,41 @@ def resolve_owner(conn) -> str:
         return row[0]
     # 兼容 v0.3 之前的写法：owner 存在 config 里
     return get_config(conn, "owner_citizen") or get_config(conn, "default_citizen")
+
+
+# ============================================================
+# 看板路径规则（2026-11-11 从 `fish.py` 下沉，E-11 拆包第四刀的前置）
+#
+# 与 `body_relpath` 同类：**纯路径规则**，不碰库、不碰 IO。下沉到共享层之后，
+# 数据库迁移那一族（`_ensure_boards_home_paths`）才能在不引用 `fish.py` 的前提下用它。
+# ============================================================
+
+BOARD_SCOPES = ("root", "project", "branch")
+
+def board_relpath(scope, scope_key, period_key) -> str:
+    """看板渲染文件的相对路径。**唯一入口**（同 body_relpath 的纪律：两处各拼一次必然漂移）。
+
+    ## 2026-10-26 口径变更（裁决 C3）：`boards.path` 从"相对 data_root"改为"相对 fish-home"
+
+    | scope   | 旧 path                            | 新 path                                  | 深度 |
+    |---------|------------------------------------|------------------------------------------|------|
+    | root    | `看板-261026.md`                    | `00-首页/看板-261026.md`                  | 2    |
+    | project | `projects/<项目>/看板-261025.md`     | `10-项目库/<项目>/看板-261025.md`          | 3    |
+    | branch  | `boards/branch/<k>/看板-261025.md`   | `10-项目库/_分支-<k>/看板-261025.md`       | 3    |
+
+    ## 为什么分支是 `_分支-<k>` 一级而不是 `_分支/<k>` 两级
+
+    PRD §5.4 写的是 `10-项目库/_分支/<k>/看板-….md`，相对 `home_root` 是 **4 层**——
+    直接撞 HOME-1 的"任何文件深度 ≤3"，于是 `layout verify` 会把自己刚渲染出来的
+    分支看板判成 `depth_exceeded`。两条信息量相同（`<k>` 就是分支名），
+    但深度是**机器可判**的，命名只是可读性偏好 → 判据优先。
+    实测生产库 `scope='branch'` 是 0 行，这个修改不迁移任何既有数据。
+    """
+    name = f"看板-{period_key}.md"
+    if scope == "root":
+        return f"00-首页/{name}"
+    if scope == "project":
+        return f"10-项目库/{scope_key}/{name}"
+    if scope == "branch":
+        return f"10-项目库/_分支-{scope_key}/{name}"
+    raise ValueError(f"未知 scope：{scope!r}（可用：{', '.join(BOARD_SCOPES)}）")

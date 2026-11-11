@@ -47,6 +47,9 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fish  # noqa: E402
 import mcp_server  # noqa: E402
+import fish_db  # noqa: E402 —— 变异点必须打在**消费方模块**上
+                       # （2026-11-11 拆包后 `_ensure_push_tables` 在 fish_db，
+                       #  fish.py 侧只是 from-import 快照，patch 它不影响消费方）
 import daily_report  # noqa: E402
 
 ACTOR_NAME = "wb-push"
@@ -829,13 +832,13 @@ CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL,
             conn.executescript(fish.SCHEMA)
 
             # 变体 1：列没了、索引还在 → 建索引当场失败
-            with mock.patch.object(fish, "_LINKS_COLS", old_cols), \
+            with mock.patch.object(fish_db, "_LINKS_COLS", old_cols), \
                     self.assertRaises(sqlite3.OperationalError):
                 fish.migrate(conn)
 
             # 变体 2：列与索引一起摘 → 跑得完，但断言必须红
-            with mock.patch.object(fish, "_LINKS_COLS", old_cols), \
-                    mock.patch.object(fish, "_LINKS_INDEXES", old_idx):
+            with mock.patch.object(fish_db, "_LINKS_COLS", old_cols), \
+                    mock.patch.object(fish_db, "_LINKS_INDEXES", old_idx):
                 fish.migrate(conn)
             with self.assertRaises(AssertionError):
                 self._assert_reinforce_columns(conn, where="变异：摘掉 ALTER 后")
@@ -924,7 +927,7 @@ CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL,
         conn = fish.connect(root)
         try:
             conn.executescript(fish.SCHEMA)
-            with mock.patch.object(fish, "_LINKS_INDEXES", keep):
+            with mock.patch.object(fish_db, "_LINKS_INDEXES", keep):
                 fish.migrate(conn)
             with self.assertRaises(AssertionError):
                 self._assert_suppressed_index(conn)
@@ -1290,7 +1293,7 @@ CREATE TABLE push_log (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT);
         conn = fish.connect(root)
         try:
             conn.executescript(fish.SCHEMA)    # IF NOT EXISTS：旧表不会被改动
-            with mock.patch.object(fish, "_PUSH_LOG_COLS", ()), \
+            with mock.patch.object(fish_db, "_PUSH_LOG_COLS", ()), \
                     self.assertRaises(sqlite3.OperationalError):
                 fish.migrate(conn)             # 补列没了 → 建索引撞 no such column
         finally:
