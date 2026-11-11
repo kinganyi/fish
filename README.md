@@ -94,8 +94,8 @@ python p0/fish.py healthcheck
 |---|---|
 | 测试 | **1,680 passed / 9 skipped**（118 个测试文件；`python -m pytest -q -p no:cacheprovider`）。另有 2 条需私有 `data/` 目录的判据在本仓库里会失败——它们测的是"在生产库只读副本上复现缺陷"，不设 `FISH_PROD_DB` 就判不到 |
 | 变异体 | **27 个**（`p0/mutation_*.py`）——用来证明判据**真的会失败**，不是摆设 |
-| 代码规模 | `fish.py` **14,541 行** + **26 个** `fish_*.py` 领域模块（含 2026-11-11 新抽的 `fish_trust.py`） |
-| 跟踪文件 | 340 |
+| 代码规模 | `fish.py` **12,984 行** + **29 个** `fish_*.py` 领域模块。2026-11-11 拆包抽出四个：`fish_trust`（身份锚/授权）、`fish_rebuild`（重建投影）、`fish_schema`（全部 DDL + `connect`）、`fish_db`（建表/补列一族） |
+| 跟踪文件 | 343 |
 
 > 读数口径（2026-11-11 校准）：上面是**本仓库**的读数；在生产树（带私有 `data/`）里跑
 > 全量是 **1,686 passed / 5 skipped / 0 failed**，两边总数一致。引用测试数时请说清
@@ -185,6 +185,10 @@ docs/              设计 / 评审 / 对账文档（40 篇）
 - **脱敏**：补上裸 base64（≥400 字符）规则，并明确低于该长度的边界。
 - **测试口径**：新增 `pytest.ini`（此前从生产目录跑 `pytest` 会把备份目录里的 227 个
   测试一起收进来，导致"测试数"有多个互相冲突的公开值）。
+- **结构债（E-11）**：`fish.py` 从 **14,541 → 12,984 行（−10.7%）**，拆出四个模块——
+  `fish_trust` / `fish_rebuild` / `fish_schema` / `fish_db`。分层现在是
+  `fish_common ← fish_schema ← fish_db ← fish_kb / fish_rebuild / fish_trust ← fish.py`，
+  新模块一律禁止反向 `import fish`（J2 静态判据守着）。拆完把行数窗口**往下调**而不是放宽。
 
 ### 2026-10-29
 
