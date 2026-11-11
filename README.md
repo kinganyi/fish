@@ -198,6 +198,114 @@ docs/              设计 / 评审 / 对账文档（40 篇）
 - **安全**：路径穿越拦截、语料按公民过滤、私钥整段脱敏、hook 关闭态早退（0.2s）
 - **诚实性**：SKIP/MISS 用退出码表达、金标缺文件 fail-open、变异体覆盖到 27 个
 
+## 致谢 / Acknowledgements
+
+fish 的判断标准、数据结构与排序算法不是凭空来的。下面按**借鉴方式**分组——
+证据等级不同，所以分开写：**读过全文**的、**抓了原文逐段比对**的、**只引了出处**的，
+不能混为一谈。
+
+### 一、读了全文并落地到设计（5 篇）
+
+> 这 5 篇的全文 PDF 存于开发侧私有工作区的 `_research/` 目录，**未随源码发布**
+> （第三方论文不并入本仓，避免许可问题）。下表给出可公开访问的原始出处。
+
+| 论文 | 作者 / 出处 | 落到 fish 哪里 |
+|---|---|---|
+| **Mikoshi: An Existence Execution Environment for Persistent Artificial Identity** | Kuranto Nanamori, Preprint v2.0, 2026-07-25, [Zenodo 21536749](https://zenodo.org/records/21536749) | 身份连续性的五条主张 → 六种 `mem_type`（"不可折叠"是硬约束）；`resident/visitor/role/system` 四种居留形态；"权威当下" → 注入包的定位 |
+| **REALM: Retrieval-Driven Memory Reconsolidation for Long-Term LLM Agents** | Yuanyi Song 等（上海交大 / OPPO / NUS）, [arXiv:2609.16053](https://arxiv.org/abs/2609.16053) | 检索驱动的记忆再巩固 → `links.weight` 随使用动态调整（原设计是"写入时算好的静态值"，被这篇否掉） |
+| **When Should the Agent Speak? A Survey of Intervention Timing for Always-On AI Assistants** | Tao An（FIM Labs, Singapore）, 2026-07-19, [Zenodo 21438397](https://zenodo.org/records/21438397) | 推送判据 = **预期收益 > 预期打扰成本**（原设计只有收益、没有成本项） |
+| **DAWN: Duty-Aware Wake Network for Hibernating Personal Agents on Device** | Ravi Kiran Kadaboina, 2026-09-24, [Zenodo 22941511](https://zenodo.org/records/22941511) | 静默 / 通知 / 升级三态；唤醒时"该不该开口"的决策 |
+| **The Agent Brain: Mapping Modern AI Agent Components to Human Neural Architecture** | Tom Jaejoon Lee（ClawSouls）, 2026-03-05, [Zenodo 18869871](https://zenodo.org/records/18869871) | 人脑分区 ↔ 模块映射的旁证（只取到标题与摘要，未声称深入借鉴） |
+
+### 二、抓了原文逐段比对（架构对照，原文存于 `p0/research/_raw/`）
+
+**记忆与知识组织**
+
+- [HippoRAG](https://arxiv.org/abs/2405.14831)（NeurIPS 2024）—— 离线建图 + 在线 PPR，支撑"索引离线化"的取舍
+- [Mem0](https://arxiv.org/abs/2504.19413) —— 两阶段管道 + LLM 决定四种操作
+- [Zep / Graphiti](https://arxiv.org/abs/2501.13956)（[getzep/graphiti](https://github.com/getzep/graphiti)）—— **双时态 + 边失效**
+- [MemGPT](https://arxiv.org/abs/2310.08560) —— 三层上下文 + 自编辑
+- [A-MEM: Agentic Memory](https://arxiv.org/abs/2502.12110) —— Zettelkasten 式笔记；**新记忆会反向改写旧记忆**
+- [Microsoft GraphRAG](https://arxiv.org/abs/2404.16130) —— 社区检测 + 社区摘要 + 分层下钻（"分页+下钻"的文献依据）
+- [Cognee](https://arxiv.org/abs/2505.24478)（[topoteretes/cognee](https://github.com/topoteretes/cognee)）—— 图 + 向量混合组织
+- [Retrieval-Augmented Generation for LLMs: A Survey](https://arxiv.org/abs/2312.10997) —— 索引优化三块 / 增强检索三条路径
+- [Letta](https://github.com/letta-ai/letta) —— 记忆块的工程化实现对照
+
+**推送与排序**
+
+- [Generative Agents](https://arxiv.org/abs/2304.03442)（Park et al.）—— memory stream 的 **recency / importance / relevance 三因子相乘**与指数衰减
+- **Reciprocal Rank Fusion**（Cormack, Clarke & Buettcher, SIGIR 2009）—— RRF 的定义与 `k=60`
+- [How often do Answers Change? Estimating Recency Requirements in QA](https://arxiv.org/abs/2603.16544) —— recency 需求是**查询相关**的，所以时效门要分通道
+- [Temporal Information Retrieval and Extraction: From Foundations to RAG](https://dl.acm.org/doi/pdf/10.1145/3805712.3808638)（ACM 2026）—— 时间作为过滤 / 排序信号 / 表示的三条路径
+- [TREC 2012 Microblog](https://trec.nist.gov/pubs/trec21/papers/UWaterlooMDS.microblog.nb.pdf)（University of Waterloo）—— RRF 与逻辑回归的对照
+- [Paying Attention?](https://blogs.lse.ac.uk/behaviouralscience/2017/04/21/paying-attention-an-enquiry-into-the-impact-of-interruptions-on-task-performance-and-well-being/)（LSE Behavioural Science, 2017）与 [Mobile use in an age of interruption](https://www.sciencedirect.com/science/article/abs/pii/S0378720624001514)（2024）—— "打扰有成本"的实证依据
+
+**搜索与目录工程（官方文档）**
+
+- [Elasticsearch Index Modules](https://www.elastic.co/guide/en/elasticsearch/reference/current/index-modules.html) / [Lucene 9.10 Index Package](https://lucene.apache.org/core/9_10_0/core/org/apache/lucene/index/package-summary.html) —— 不可变段 + 后台合并
+- [Vespa Overview](https://docs.vespa.ai/en/overview.html) / [Ranking](https://docs.vespa.ai/en/ranking.html) —— **三阶段排序漏斗**
+- [Exa: next-gen search](https://exa.ai/blog/how-to-build-nextgen-search) / [web-scale vector DB](https://exa.ai/blog/building-web-scale-vector-db)
+- [Everything](https://www.voidtools.com/)（voidtools）—— MFT 直读 + 内存副本 + USN 增量 + 查询编译，四机制叠加
+- [Obsidian Omnisearch](https://github.com/scambier/obsidian-omnisearch) / [Obsidian Bases](https://help.obsidian.md/bases) —— 知识库检索与声明式视图的对照（结论：Bases 不是索引）
+- [Nuxt Content](https://content.nuxt.com/) —— 静态内容管线的分层与分页
+
+### 三、只引了出处、未见全文存档（**如实标注**）
+
+下面三篇被当作理论锚点引用，但项目里**没有全文存档**，因此**不声称深入借鉴**：
+
+- **Memcurrency: Memory Decay and Refresh Mechanism for Long-Running LLM Agents** —— [IEEE 11633479](https://ieeexplore.ieee.org/document/11633479/)：支撑"衰减必要 + 按类型分层"
+- **Typed Decay**（preprint）—— [Zenodo 22643061](https://zenodo.org/records/22643061)：typed decay 的直接依据
+- **Giving stateless agents a sense of time: A reconsolidating episodic–semantic memory architecture** —— [ScienceDirect S0950705126019192](https://www.sciencedirect.com/science/article/pii/S0950705126019192)：支撑"回忆是重构，不是读取"
+
+### 四、经典认知理论（公式与模型的来源）
+
+- **ACT-R 激活公式**（Anderson 等）—— 扇形效应 `S_ji = S − log(fan_j)`
+- **扩散激活**（Collins & Loftus 传统）—— 激活沿边扩散、按距离衰减
+- **记忆再巩固**（Nader et al., 2000 传统）—— 重新激活 → 可塑状态 → 连接被改写
+
+### 五、软件依赖
+
+fish 的第三方依赖只有两个，其余全部是 Python 标准库：
+
+| 依赖 | 用途 |
+|---|---|
+| [zstandard](https://github.com/facebook/zstd) | 读取 zstd 压缩的 DSH 会话日志 |
+| [tiktoken](https://github.com/openai/tiktoken) | token 计数（注入包预算） |
+
+> **本项目未内嵌（vendor）任何第三方项目代码。** 对上述论文与工程的借鉴是
+> **架构与算法层面**的，不是代码拷贝。`p0/requirements.txt` 里也写明了"核心路径纯 stdlib，
+> 保持可离线、可打包"。
+
+### 六、取证方式（可复跑）
+
+上面每一条都能在仓库里找到痕迹（下面的命令以仓库根目录为当前目录，直接可跑）：
+
+```bash
+# 1. 抓取原文（17 篇 / 约 76 万字，每篇一个文件）
+ls p0/research/_raw/*.txt
+#    每篇的来源 URL 与抓取字数见 docs 里 31/32 号文档的 §0「调研语料（可复查）」
+
+# 2. 第三方依赖（确认只有 2 个）
+cd p0 && python - <<'PY'
+import ast, os, sys
+stdlib, local = set(sys.stdlib_module_names), {f[:-3] for f in os.listdir(".") if f.endswith(".py")}
+third = set()
+for f in os.listdir("."):
+    if not f.endswith(".py") or f.startswith(("test_", "mutation_")):
+        continue
+    for n in ast.walk(ast.parse(open(f, encoding="utf-8").read())):
+        if isinstance(n, ast.Import):
+            names = [a.name.split(".")[0] for a in n.names]
+        elif isinstance(n, ast.ImportFrom) and n.module and n.level == 0:
+            names = [n.module.split(".")[0]]
+        else:
+            names = []
+        third |= {x for x in names if x not in stdlib and x not in local and x != "__future__"}
+print("第三方依赖:", sorted(third))
+PY
+# → 第三方依赖: ['tiktoken', 'zstandard']
+```
+
 ## 版权
 
 © 2026 安逸。内部项目公开源码，**未附开源许可证**；引用或复用请先联系作者。
