@@ -107,6 +107,10 @@ BASELINE_TOOL_PROPS = {
     # 与其它工具同一口径：token 由 `_attach_token` 统一补，这里只列业务字段。
     "corpus": {"action", "host", "limit", "max_chars", "pointer", "project",
                "query", "ranker", "role"},
+    # 2026-11-11（序2 主人画像）：两个工具，**没有 profile_set**——
+    # 画像是人写的，AI 只能 propose（R1-2 写权分离落在接口层）。
+    "profile_show": {"group"},
+    "profile_propose": {"group", "name", "value", "rationale", "remove"}
 }
 
 # 进程态身份的名字——判据 H 的扫描目标（出现即红，注释不算：只看语法树里的属性访问）。
@@ -569,7 +573,7 @@ class FishIdentityP1cTest(unittest.TestCase):
         # 2026-10-26（T05 / B3）：16 → 18（kb 读 + kb_write 写；读/写是两个权限位，裁决 C2）。
         # 2026-10-27（语料层 T03）：18 → 19（新增 `corpus`：search/read/stats 三读动作；
         # 主理人已批准的设计契约变更；18 个旧工具的描述/schema 由 golden 逐字锁住）。
-        self.assertEqual(len(names), 19,
+        self.assertEqual(len(names), 21,
                          f"{where}：工具数量变了（{len(names)} 个：{names}）")
         self.assertEqual(sorted(names), sorted(BASELINE_TOOL_PROPS),
                          f"{where}：工具集合变了：{names}")

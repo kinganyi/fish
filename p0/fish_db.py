@@ -22,13 +22,13 @@
 `fish_schema`（全部 DDL 与 `SCHEMA`）与 stdlib。**不 import `fish`**。
 """
 import datetime
+import json
 import re
 import sqlite3
 import sys
 from pathlib import Path
 
-from fish_common import (board_relpath, _board_seen_columns, _presence_columns,
-                         warn_derived, warn_ignored)
+from fish_common import (_board_seen_columns, _key_type, _presence_columns, board_relpath, get_config, now_utc, ulid, warn_derived, warn_ignored)
 from fish_schema import (
     AUDIT_DIR_NAME, FALLBACK_PROJECT_NAME, SCHEMA, _ACCESS_LOG_COLS,
     _ACCESS_LOG_DDL, _ACCESS_LOG_INDEXES, _ACTIVITY_INDEXES, _ACTIVITY_SCHEMA,
@@ -621,3 +621,68 @@ def _ensure_boards_home_paths(conn, *, degraded=None):
             changed.append({"id": row[0], "from": row[4], "to": want})
     conn.commit()
     return changed
+
+
+# ============================================================
+# 事件写入原语（2026-11-11 从 `fish.py` 下沉，E-11 拆包第五刀的前置）
+#
+# 为什么它必须在 DB 层：`append_event` 是**事件溯源的唯一写入口**（ADR-001），
+# 而事件是整套系统的真相源。它只做一件事——往 `events` 表 INSERT 一行，
+# 不依赖任何领域概念（记忆 / 看板 / 推送 / 画像）。
+#
+# 下沉它的直接动机：`fish_profile`（主人画像）必须写事件（否则重建不保真，
+# 就是 D-10 那类事故的温床），而领域模块不许 import `fish`（J2 分层：
+# `fish_common ← fish_schema ← fish_db ← fish_profile ← fish`）。
+# 把写原语放在 DB 层，领域模块就能合法地写事件——**而不是各自另造一套**。
+# ============================================================
+
+def append_event(conn, etype, actor, subject, payload, cause=None, *,
+                 commit=True) -> int:
+    """追加一条事件。
+
+    `commit=True`（默认）保持旧行为：事件写进去就提交。
+    **`commit=False` 让调用方自己控制事务边界**（外部审查 🔴9：旧实现把 commit 焊死在
+    这里，上层没法把"业务写 + 事件"组成一个事务——merge/retire 的归属变更因此不可重放）。
+    """
+    cur = conn.execute(
+        "INSERT INTO events (event_id, ts, type, actor, subject, payload, cause, schema) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (ulid(), now_utc(), etype, json.dumps(actor, ensure_ascii=False),
+         json.dumps(subject, ensure_ascii=False), json.dumps(payload, ensure_ascii=False),
+         cause, "evt@1"),
+    )
+    if commit:
+        conn.commit()
+    return cur.lastrowid
+
+
+# ============================================================
+# 配置写入（2026-11-11 从 `fish.py` 下沉，与 `get_config` 同层语义）
+#
+# 它必须跟 `append_event` 在同一个模块：写配置要记 `config.changed` 事件，
+# 而 `append_event` 已下沉到这里。放 `fish_common` 会形成 common → db 的**上行依赖**。
+# 下沉之后 `fish_profile`（画像）才能合法地读写自己的配置键（提问节律等）。
+# ============================================================
+
+def set_config(conn, key, value):
+    default, typ, allowed = _key_type(key)
+    if typ == "int":
+        value = int(value)
+    elif typ == "float":
+        value = float(value)
+    elif typ == "bool":
+        value = bool(value) if not isinstance(value, str) else value.lower() in ("1", "true", "yes")
+    if allowed and str(value) not in allowed:
+        raise ValueError(f"{key} 只能是 {allowed}，收到 {value}")
+    old = get_config(conn, key)
+    conn.execute(
+        "INSERT INTO config (key,value,type,updated_at) VALUES (?,?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        (key, str(value).lower() if isinstance(value, bool) else str(value), typ, now_utc()),
+    )
+    conn.commit()
+    append_event(conn, "config.changed",
+                 {"citizen_id": "system", "evidence_level": "signed"},
+                 {"kind": "config", "id": key},
+                 {"key": key, "old_value": old, "new_value": value})
+    return value

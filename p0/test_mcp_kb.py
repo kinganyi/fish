@@ -146,7 +146,7 @@ class MCPKBToolsTest(unittest.TestCase):
 
     # ------------------------------------------------------------ 1. 工具面
 
-    def test_01_tools_list_names_are_19(self):
+    def test_01_tools_list_names_are_21(self):
         """工具面 = 18 个旧工具 + `corpus`（T03 加的第 19 个；**名单仍写死**不反读）。
 
         2026-10-27 三关修复顺手修掉这条**既有红**：T03 加 `corpus` 时这里没跟着改成 19，
@@ -154,8 +154,8 @@ class MCPKBToolsTest(unittest.TestCase):
         """
         r = self.c.request("tools/list")
         names = {t["name"] for t in r["result"]["tools"]}
-        self.assertEqual(names, TOOL_NAMES | {"corpus"})
-        self.assertEqual(len(r["result"]["tools"]), 19)
+        self.assertEqual(names, TOOL_NAMES | {"corpus", "profile_show", "profile_propose"})
+        self.assertEqual(len(r["result"]["tools"]), 21)
         for tool in r["result"]["tools"]:
             self.assertIn("inputSchema", tool)
             self.assertEqual(tool["inputSchema"]["type"], "object")

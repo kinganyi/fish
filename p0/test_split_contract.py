@@ -49,6 +49,7 @@ FISH_TRUST = P0 / "fish_trust.py"
 FISH_REBUILD = P0 / "fish_rebuild.py"
 FISH_SCHEMA = P0 / "fish_schema.py"
 FISH_DB = P0 / "fish_db.py"
+FISH_PROFILE = P0 / "fish_profile.py"
 
 spec = importlib.util.spec_from_file_location("fish", str(FISH))
 fish = importlib.util.module_from_spec(spec)
@@ -139,6 +140,11 @@ FISH_SCHEMA_LINES_MAX = 700
 # 注意 `migrate` **不在**这里：它是编排者，要调 KB 专属的 ensure，搬走会成上行依赖。
 FISH_DB_LINES_MIN = 520
 FISH_DB_LINES_MAX = 720
+# 2026-11-11 新模块 · 主人画像（R1-1 槽位化；固定表 + 建议队列 + 注入分级）。
+# 域逻辑 + CLI 表现层同处一个模块（改画像的人只需打开一个文件）；
+# 因此窗口比纯领域模块大——它同时承担了 fish.py 里那 10 个命令的实现。
+FISH_PROFILE_LINES_MIN = 600
+FISH_PROFILE_LINES_MAX = 1000
 # 2026-11-11 新模块：身份锚授权 + 归属合并链解析（外部审查 🔴5 / 🔴9 的修法）。
 # 按既有惯例给新模块各自留窗口，防止它长成第二个巨石。
 FISH_TRUST_LINES_MIN = 120
@@ -302,7 +308,11 @@ class SplitDependencyTest(unittest.TestCase):
                                 # 2026-11-11（拆包第四刀）：`fish_db`（建表/补列一族）
                                 # 只许依赖 fish_common + fish_schema，不许碰上层。
                                 (FISH_DB, {"fish", "fish_kb", "fish_push",
-                                           "fish_trust", "fish_rebuild"})):
+                                           "fish_trust", "fish_rebuild"}),
+                                # 2026-11-11（序2）：画像模块。只许依赖
+                                # fish_common / fish_schema / fish_db（写事件要它）。
+                                (FISH_PROFILE, {"fish", "fish_kb", "fish_push",
+                                                "fish_trust", "fish_rebuild"})):
             mods = _imported_modules(ast.parse(_read(path)))
             bad = sorted(m for m in mods if m in forbidden)
             self.assertEqual(bad, [], f"{path.name} 反向依赖了 {bad}")
@@ -436,6 +446,11 @@ class SplitSizeTest(unittest.TestCase):
                                 f"fish_schema.py 只有 {schema_lines} 行：搬漏了")
         self.assertLessEqual(schema_lines, FISH_SCHEMA_LINES_MAX,
                              f"fish_schema.py 有 {schema_lines} 行：长回去了")
+        prof_lines = len(_read(P0 / "fish_profile.py").split("\n"))
+        self.assertGreaterEqual(prof_lines, FISH_PROFILE_LINES_MIN,
+                                f"fish_profile.py 只有 {prof_lines} 行：搬漏了")
+        self.assertLessEqual(prof_lines, FISH_PROFILE_LINES_MAX,
+                             f"fish_profile.py 有 {prof_lines} 行：长回去了")
         db_lines = len(_read(P0 / "fish_db.py").split("\n"))
         self.assertGreaterEqual(db_lines, FISH_DB_LINES_MIN,
                                 f"fish_db.py 只有 {db_lines} 行：搬漏了")

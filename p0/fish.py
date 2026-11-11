@@ -67,17 +67,24 @@ from fish_schema import (AUDIT_DIR_NAME, FALLBACK_PROJECT_NAME, SCHEMA, _ACCESS_
 from fish_common import BOARD_SCOPES, UNATTRIBUTED, board_relpath  # noqa: F401
 # 2026-11-11（E-11 拆包第四刀）：建表/补列/迁移辅助搬到 fish_db。
 # `migrate` 本身仍在本文件（它编制 KB 专属的 ensure，搬走会造成上行依赖）。
-from fish_db import (PresenceMigrationError, _CITIZENS_ALL_COLUMNS, _PRESENCE_SESSION_BACKFILL, _board_seen_backup,
-                      _citizens_all_view_ddl, _ensure_activity_table, _ensure_board_seen_session, _ensure_board_tables,
-                      _ensure_boards_home_paths, _ensure_citizens_all_view, _ensure_identity_tables, _ensure_name_tables,
-                      _ensure_presence_session, _ensure_push_tables, _ensure_stint_open_index, _ensure_workspace_table,
-                      _has_unique_index, _presence_backup, _presence_data_root, _presence_pk_cols,
-                      _presence_pk_cols_of, _presence_rebuild_ddl, _presence_session_counts)
+# 2026-11-11（E-11 拆包五刀前置）：`append_event` 下沉 `fish_db`
+# —— 事件是真相源，写原语属于 DB 层；领域模块据此可合法写事件（J2 分层不破）。
+# 2026-11-11（E-11 拆包五刀前置）：`set_config` 下沉 `fish_db`
+# —— 它与 `append_event` 必须同模块（写配置要记 config.changed 事件）。
+from fish_db import (    PresenceMigrationError, _CITIZENS_ALL_COLUMNS, _PRESENCE_SESSION_BACKFILL, _board_seen_backup,
+    _citizens_all_view_ddl, _ensure_activity_table, _ensure_board_seen_session, _ensure_board_tables,
+    _ensure_boards_home_paths, _ensure_citizens_all_view, _ensure_identity_tables, _ensure_name_tables,
+    _ensure_presence_session, _ensure_push_tables, _ensure_stint_open_index, _ensure_workspace_table,
+    _has_unique_index, _presence_backup, _presence_data_root, _presence_pk_cols,
+    _presence_pk_cols_of, _presence_rebuild_ddl, _presence_session_counts, append_event,
+    set_config)
 
 # 共享原语（2026-10-27 · 拆包 T02）：时间 / 摘要 / 文本计数只有一份实现，
 # 家在 `fish_common`。`fish.now_utc` 等旧名字继续可用，且与 `fish_common.now_utc`
 # 是**同一个对象**（`from … import` 再导出，不是复制一份）。
 import fish_common  # noqa: F401 —— 模块本身也要在（判据 J1d 查对象同一性）
+# 2026-11-11：主人画像（R1-1 槽位化）。领域逻辑在模块里，本文件只做 CLI 壳。
+import fish_profile
 from fish_common import (  # noqa: F401
     _exc_text, count_tokens, fts_match_expr, fts_text, index_tokens, iso_local,
     now_utc, ulid)
@@ -701,54 +708,10 @@ def migrate(conn: sqlite3.Connection):
     conn.commit()
 
 
-def append_event(conn, etype, actor, subject, payload, cause=None, *,
-                 commit=True) -> int:
-    """追加一条事件。
-
-    `commit=True`（默认）保持旧行为：事件写进去就提交。
-    **`commit=False` 让调用方自己控制事务边界**（外部审查 🔴9：旧实现把 commit 焊死在
-    这里，上层没法把"业务写 + 事件"组成一个事务——merge/retire 的归属变更因此不可重放）。
-    """
-    cur = conn.execute(
-        "INSERT INTO events (event_id, ts, type, actor, subject, payload, cause, schema) "
-        "VALUES (?,?,?,?,?,?,?,?)",
-        (ulid(), now_utc(), etype, json.dumps(actor, ensure_ascii=False),
-         json.dumps(subject, ensure_ascii=False), json.dumps(payload, ensure_ascii=False),
-         cause, "evt@1"),
-    )
-    if commit:
-        conn.commit()
-    return cur.lastrowid
-
-
 # ------------------------------------------------------------------ 配置
 
 
 
-
-
-def set_config(conn, key, value):
-    default, typ, allowed = _key_type(key)
-    if typ == "int":
-        value = int(value)
-    elif typ == "float":
-        value = float(value)
-    elif typ == "bool":
-        value = bool(value) if not isinstance(value, str) else value.lower() in ("1", "true", "yes")
-    if allowed and str(value) not in allowed:
-        raise ValueError(f"{key} 只能是 {allowed}，收到 {value}")
-    old = get_config(conn, key)
-    conn.execute(
-        "INSERT INTO config (key,value,type,updated_at) VALUES (?,?,?,?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-        (key, str(value).lower() if isinstance(value, bool) else str(value), typ, now_utc()),
-    )
-    conn.commit()
-    append_event(conn, "config.changed",
-                 {"citizen_id": "system", "evidence_level": "signed"},
-                 {"kind": "config", "id": key},
-                 {"key": key, "old_value": old, "new_value": value})
-    return value
 
 
 # ------------------------------------------------------------------ 编码
@@ -1192,6 +1155,14 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
                 conn, title=title, body=body or "", exclude={code}))
         except Exception as exc:      # 查重是提示：不阻塞写入，但失败要出声（静默清零）
             warn_derived(conn, "find_similar_memories", exc)
+    # 2026-11-11（R1-4 提问节律）：每成功写一篇**记忆文档**就推进一格游标。
+    # 为什么不放进事务里：这是**节律游标**，不是业务事实——写失败最多让下一次
+    # 提问晚一篇，不值得为它把整条写入回滚。反过来，若放进事务且回滚，
+    # 计数就会和真实文档数悄悄脱钩。
+    try:
+        fish_profile.bump_question_counter(conn)
+    except Exception as _exc:      # noqa: BLE001 —— 计数失败不该让记忆写入失败
+        warn_ignored('fish.py record_memory bump_question_counter', _exc)
     return code, rel
 
 
@@ -6860,8 +6831,10 @@ def _unnamed_hint(conn, citizen_id):
 #   · 想给某个场景做裁剪（如工具后推送只要态势），只能整包拿、自己再切。
 # 现在 `sections` 直说"我这次要哪几段"。**L0 身份段永远保留**（不可关闭）：
 # 身份不是"可选内容"，它是这个包的立身之本（设计如此，不是省事的默认）。
-INJECTION_SECTIONS = ("status", "board", "rules", "attention", "lessons",
-                      "push", "index", "recent")
+# 2026-11-11：新增 `profile`（主人画像，R1-6）。它与 L0 身份同档——
+# 画像一旦被裁，注入包就退化成"一台不认人的机器"，所以默认在全段里。
+INJECTION_SECTIONS = ("profile", "status", "board", "rules", "attention",
+                      "lessons", "push", "index", "recent")
 # 受控别名：调用方嘴上说的和内部键名不必一致，但**只认这张表**——
 # 静默接受任意字符串会让"拼错的段名"变成"少了一段且没人报错"。
 _SECTION_ALIASES = {"lesson": "lessons", "l2": "index", "rule": "rules",
@@ -7154,6 +7127,22 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
                "3. 你的身份是系统签发的，不要根据记忆叙事推断自己是谁。\n")
     l0_min = (ident + "\n" + owner_line + f"记忆根目录：{root_s}。\n"
               "铁律：先查再答；编码由系统分配；身份由系统签发。\n")
+
+    # ---- 主人画像（R1-6，2026-11-11）----
+    # 位置：紧跟在 L0 身份之后。理由——身份回答「你是谁」，画像回答「你服务的这个人
+    # 是谁」，两者合起来才是完整的"我在哪、为谁干活"。放到 L1/L2 之间会让"为谁干活"
+    # 变成可裁内容，而它和身份一样是**立身之本**。
+    #
+    # 分级（R1-6 原话「L0 只放称呼 + 3 条最稳定字段，近期动态必须带时效标记」）逻辑
+    # 全在 `fish_profile.render_profile_block` 里；这里只负责「有没有」与「接在哪」。
+    # 空图像**连标题都不输出**——注入包里出现一个空壳段是噪音，也白花预算。
+    #
+    # 与裁剪链的关系：画像和铁律同档（都是"最后才动"），因为它一旦被裁，
+    # 注入包就退化成"一台不认人的机器"。
+    _profile_text = fish_profile.render_profile_block(conn) if "profile" in want else ""
+    if _profile_text:
+        l0_full = l0_full + "\n" + _profile_text + "\n"
+        l0_min = l0_min + _profile_text + "\n"
 
     # ---- L1 状态 ----
     # 2026-10-24 修（EVAL 外部评估 R1 + 自查），同一处两个问题：
@@ -8913,6 +8902,19 @@ def cmd_rebuild(args):
     migrate(conn)
     before = conn.execute("SELECT COUNT(*) FROM code_index").fetchone()[0]
     rep = rebuild_projection(conn, root)
+
+    # 2026-11-11（R1-1 / D-10 纪律）：画像槽位也**必须**从事件校正。
+    # 单独一步而不是塞进 rebuild_projection：后者只重建 `code_index`，
+    # 混进去会让两个投影的对账报告互相污染（一个报 mismatch，另一个也报）。
+    try:
+        _prep = fish_profile.rebuild_slots(conn)
+        print(f"画像槽位重建：事件 {_prep['from_events']} 个 / 一致 {_prep['projected']}"
+              f" / 校正 {_prep['fixed']}"
+              + (f" / ⚠ 对不上 {len(_prep['mismatch'])}" if _prep['mismatch'] else ""))
+        for _m in _prep['mismatch'][:10]:
+            print(f"    - {_m}")
+    except Exception as _exc:      # noqa: BLE001 —— 画像重建失败不该让整次 rebuild 崩
+        warn_ignored('fish.py cmd_rebuild profile', _exc)
     print(f"重建完成：{before} → {rep['total']} 条"
           f"（重放 {rep['projected']} 条记录事件、{rep['superseded_events']} 条替代事件、"
           f"{rep['retired_events']} 条作废事件）")
@@ -12421,6 +12423,24 @@ def cmd_archive(args):
         conn.close()
 
 
+# ====================================================== 主人画像 CLI（薄适配器）
+#
+# **实现全在 `fish_profile.run_cli`**（表现层跟着领域走——改画像的人只需要看一个文件）。
+# 这里只做 `cmd_*` 都躲不开的三件事：建连接、落 SCHEMA、跑迁移。
+#
+# 写权分离（R1-2）体现在**接口面**：MCP 只有 `profile_show` / `profile_propose`，
+# **没有写入口**；set/accept 这些只存在于 CLI。
+def cmd_profile(args):
+    conn = connect(Path(args.root))
+    conn.executescript(SCHEMA)
+    migrate(conn)
+    try:
+        return fish_profile.run_cli(args, conn, actor_fn=token_actor_citizen_id,
+                                    config_fn=get_config)
+    finally:
+        conn.close()
+
+
 def main():
     # 计划任务/无控制台环境下 stdout 是 GBK，中文与 ⚠ 等符号会直接崩（实测 ExitCode=1）。
     # 这里强制 UTF-8，避免"功能正常但退出码 1"的假失败。
@@ -13027,6 +13047,72 @@ def main():
 
     p = sub.add_parser("events"); p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_events)
+
+    # ---- 主人画像（R1-1/R1-2/R1-4/R1-5/R1-6，2026-11-11）----
+    # 人通道：set/remove/accept/reject/render/sync/ask/defer。
+    # **AI 通道（MCP）没有 set**——写权分离发生在接口层，不是靠自觉。
+    p = sub.add_parser("profile", help="主人画像：固定槽位（一格一值，覆盖不追加）")
+    psub = p.add_subparsers(dest="profile_action", required=True)
+
+    pp = psub.add_parser("show", help="看当前画像（含待采纳建议数）")
+    pp.add_argument("--group", default=None)
+    pp.add_argument("--json", action="store_true")
+    pp.set_defaults(func=cmd_profile)
+
+    pp = psub.add_parser("set", help="【人】写一格（覆盖，不是追加）")
+    pp.add_argument("group", help="称呼/生活/工作/性格/近期动态")
+    pp.add_argument("name", help="该组下的槽名")
+    pp.add_argument("value")
+    pp.add_argument("--reason", default="")
+    pp.add_argument("--as", dest="as_actor", default=None)
+    pp.set_defaults(func=cmd_profile)
+
+    pp = psub.add_parser("remove", help="【人】清空一格")
+    pp.add_argument("slot_key", help="形如 称呼.名字")
+    pp.add_argument("--reason", default="")
+    pp.add_argument("--as", dest="as_actor", default=None)
+    pp.set_defaults(func=cmd_profile)
+
+    pp = psub.add_parser("propose", help="【AI】提建议——**不改画像**，等人采纳")
+    pp.add_argument("group"); pp.add_argument("name")
+    pp.add_argument("value", nargs="?", default=None)
+    pp.add_argument("--remove", action="store_true", help="建议清空这一格")
+    pp.add_argument("--rationale", default="")
+    pp.add_argument("--as", dest="as_actor", default=None)
+    pp.set_defaults(func=cmd_profile)
+
+    pp = psub.add_parser("proposals", help="看待采纳建议")
+    pp.add_argument("--status", default="pending")
+    pp.set_defaults(func=cmd_profile)
+
+    pp = psub.add_parser("accept", help="【人】采纳一条建议（此刻才改画像）")
+    pp.add_argument("proposal_id")
+    pp.add_argument("--as", dest="as_actor", default=None)
+    pp.set_defaults(func=cmd_profile)
+
+    pp = psub.add_parser("reject", help="【人】拒绝一条建议")
+    pp.add_argument("proposal_id")
+    pp.add_argument("--note", default="")
+    pp.add_argument("--as", dest="as_actor", default=None)
+    pp.set_defaults(func=cmd_profile)
+
+    pp = psub.add_parser("render", help="渲染 <data_root>/profile/画像.md（人的编辑面）")
+    pp.add_argument("--force", action="store_true", help="丢弃文件里人在库外的改动")
+    pp.set_defaults(func=cmd_profile)
+
+    pp = psub.add_parser("sync", help="把文件里的编辑导入（文件 → 事件 → 槽位）")
+    pp.add_argument("--as", dest="as_actor", default=None)
+    pp.set_defaults(func=cmd_profile)
+
+    pp = psub.add_parser("ask", help="看三问 / 回答（R1-4 提问节律）")
+    pp.add_argument("--answer", default=None)
+    pp.add_argument("--as", dest="as_actor", default=None)
+    pp.set_defaults(func=cmd_profile)
+
+    pp = psub.add_parser("defer", help="本轮不回答（会留痕，同样清零）")
+    pp.add_argument("--as", dest="as_actor", default=None)
+    pp.set_defaults(func=cmd_profile)
+
 
     args = ap.parse_args()
     # 2026-10-26（复审 🟡N4）：**子命令的返回码必须传播出去。**

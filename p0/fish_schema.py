@@ -490,6 +490,72 @@ _KB_VAULT_COLS = ("vault_id", "name", "path", "path_key", "mode", "ignore_globs"
 import sqlite3
 from pathlib import Path
 
+# ============================================================
+# 主人画像（R1-1 槽位化，2026-11-11）
+#
+# 为什么是**表**而不是记忆：用户原话"永不衰减的这类信息，本质上有变质和越来越大的
+# 风险"。记忆是**追加式**（有衰减兜底），画像**不能衰减**（衰减就违背"永不"），
+# 所以没有自然清理机制——唯一出路是换结构：**一格一值，写入是覆盖不是追加**。
+#
+# 三张表分工：
+#   profile_slots      已采纳的槽位（**投影**：由 `profile.edited` 事件重放得到）
+#   profile_proposals  待采纳建议（AI 只能写这里，人点采纳才进 slots）
+#   profile_questions  提问节律历史（R1-4；"本轮不回答"也要留痕）
+# ============================================================
+_PROFILE_SLOTS_DDL = """
+CREATE TABLE IF NOT EXISTS profile_slots (
+    slot_key         TEXT PRIMARY KEY,
+    slot_group       TEXT NOT NULL,
+    slot_name        TEXT NOT NULL,
+    value            TEXT NOT NULL,
+    permanence       TEXT NOT NULL,
+    as_of            TEXT,
+    version          INTEGER NOT NULL DEFAULT 1,
+    actor_citizen_id TEXT,
+    updated_at       TEXT NOT NULL
+);
+"""
+
+_PROFILE_PROPOSALS_DDL = """
+CREATE TABLE IF NOT EXISTS profile_proposals (
+    proposal_id    TEXT PRIMARY KEY,
+    slot_key       TEXT NOT NULL,
+    action         TEXT NOT NULL,
+    proposed_value TEXT,
+    rationale      TEXT,
+    proposed_by    TEXT NOT NULL,
+    proposed_at    TEXT NOT NULL,
+    status         TEXT NOT NULL,
+    decided_by     TEXT,
+    decided_at     TEXT,
+    decision_note  TEXT
+);
+"""
+
+_PROFILE_QUESTIONS_DDL = """
+CREATE TABLE IF NOT EXISTS profile_questions (
+    question_id   TEXT PRIMARY KEY,
+    raised_at     TEXT NOT NULL,
+    trigger_count INTEGER NOT NULL,
+    status        TEXT NOT NULL,
+    answered_at   TEXT
+);
+"""
+
+_PROFILE_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS ix_profile_slots_group ON profile_slots(slot_group)",
+    "CREATE INDEX IF NOT EXISTS ix_profile_proposals_status ON profile_proposals(status)",
+    "CREATE INDEX IF NOT EXISTS ix_profile_proposals_slot ON profile_proposals(slot_key)",
+    "CREATE INDEX IF NOT EXISTS ix_profile_questions_status ON profile_questions(status)",
+)
+
+# 索引之间必须补分号：`_PROFILE_INDEXES` 里每条都没写 `;`（写成元组时不好看），
+# 直接 "\n".join 会拼出 `...)\nCREATE INDEX ...` → sqlite 报 near "CREATE": syntax error。
+_PROFILE_SCHEMA = ("\n" + _PROFILE_SLOTS_DDL + _PROFILE_PROPOSALS_DDL
+                   + _PROFILE_QUESTIONS_DDL
+                   + ";\n".join(_PROFILE_INDEXES) + ";\n")
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
   seq       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -576,7 +642,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
   tokenize='unicode61'
 );
 """ + _PUSH_SCHEMA + _IDENTITY_SCHEMA + _WORKSPACE_SCHEMA + _NAME_SCHEMA + _BOARD_SCHEMA \
-    + _ACTIVITY_SCHEMA + _KB_SCHEMA
+    + _ACTIVITY_SCHEMA + _KB_SCHEMA + _PROFILE_SCHEMA   # 画像（2026-11-11 起）
 
 def connect(root: Path) -> sqlite3.Connection:
     root.mkdir(parents=True, exist_ok=True)

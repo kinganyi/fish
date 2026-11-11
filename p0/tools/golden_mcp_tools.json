@@ -136,6 +136,7 @@
      "description": "只构建这些段（缺省=全段）。可取值：status（当前项目坐标）/ board（看板）/ rules（规矩）/ attention（该注意什么）/ lessons（错题本）/ push（候选）/ index（L2 索引）/ recent（最近三件事）。**L0 身份段永远保留**（不可关闭，设计如此）。",
      "items": {
       "enum": [
+       "profile",
        "status",
        "board",
        "rules",

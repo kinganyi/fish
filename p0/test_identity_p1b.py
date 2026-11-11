@@ -153,7 +153,8 @@ MCP_TOOL_NAMES = ["remember", "recall", "neighbors", "resolve_code", "read_body"
                   "session_start", "board", "kb", "kb_write",
                   # 2026-10-27（语料层 T03）：18 → 19，新增 `corpus`
                   # （search/read/stats 三读动作；主理人已批准的设计契约变更）。
-                  "corpus"]
+                  "corpus", "profile_show", "profile_propose"
+]
 
 _SQL_START = re.compile(r"^(SELECT|INSERT|UPDATE|DELETE|PRAGMA|ALTER|CREATE|REPLACE)\b", re.I)
 

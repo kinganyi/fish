@@ -698,7 +698,10 @@ CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL,
             "kb", "kb_write",
             # 2026-10-27（语料层 T03）：18 → 19，新增 `corpus`（三读动作；
             # 声明式契约变更，旧 18 个工具的描述/schema 由 golden 逐字锁住）。
-            "corpus"])
+            "corpus",
+            # 2026-11-11（序2 主人画像）：19 → 21，新增 profile_show / profile_propose。
+            # **没有 profile_set**——画像是人写的，AI 只能提建议（R1-2）。
+            "profile_show", "profile_propose"])
         expect = {
             "remember": {"project", "title", "body", "mem_type", "tags", "cause",
                          "occurred_at", "supersedes", "attachments"},
@@ -719,6 +722,10 @@ CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL,
             # 2026-10-26（反馈批 B · FB-02）：inject 的 `sections` / `include_board`
             # 同为**声明过的**基线变更（B 批漏登记，C 批同步；与 p1c 同一处口径）。
             "inject": {"budget", "project", "sections", "include_board"},
+            # 2026-11-11（序2 主人画像）：19 → 21。两个工具，**没有 profile_set**——
+            # 画像是人写的，AI 只能提建议（R1-2 写权分离落在接口层）。
+            "profile_show": {"group"},
+            "profile_propose": {"group", "name", "value", "rationale", "remove"},
             "healthcheck": set(),
             # 2026-10-25 加（用户批准的工具数变更）：MCP 面唯一的签发口。
             "session_start": {"citizen", "display_name", "session_name", "project", "kind"},

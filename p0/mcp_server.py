@@ -42,6 +42,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fish  # noqa: E402
+import fish_profile   # noqa: E402 —— 主人画像（R1-2：AI 只能 propose）
 import fish_corpus  # noqa: E402
 
 MODERN_VERSION = "2026-07-28"
@@ -266,6 +267,8 @@ TOOLS = [
             "required": ["prefix"],
         },
     },
+
+
     {
         "name": "supersede",
         "title": "标记替代",
@@ -593,6 +596,38 @@ TOOLS = [
                            "description": "排序算法（缺省 default；未登记的名字会响亮失败）"},
             },
             "required": ["action"],
+        },
+    },
+    {
+        "name": "profile_show",
+        "title": "看主人画像",
+        "description": "读主人（人类主人）的画像槽位：称呼 / 生活 / 工作 / 性格 / 近期动态。"
+                       "**只读**。要改画像请用 profile_propose——AI 不得直接写画像。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "group": {"type": "string",
+                          "description": "只看某一组（称呼/生活/工作/性格/近期动态），缺省全部"},
+            },
+        },
+    },
+    {
+        "name": "profile_propose",
+        "title": "给主人画像提建议",
+        "description": "给主人的画像提一条**建议**（不会直接改画像）。"
+                       "画像是人写的：AI 只能建议，主人点采纳才生效（R1-2 写权分离）。"
+                       "槽位是固定的（称呼/生活/工作/性格/近期动态），"
+                       "不认识的组名或槽名会被拒绝并列出全部可选项。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "group": {"type": "string", "description": "称呼/生活/工作/性格/近期动态"},
+                "name": {"type": "string", "description": "该组下的槽名"},
+                "value": {"type": "string", "description": "建议的新值（与 remove=true 二选一）"},
+                "rationale": {"type": "string", "description": "为什么这么建议（会留档）"},
+                "remove": {"type": "boolean", "description": "改为建议清空这一格"},
+            },
+            "required": ["group", "name"],
         },
     },
 ]
@@ -1001,6 +1036,51 @@ class FishServer:
         return (f"已注册前缀：{prefix} → {ns}\n"
                 f"现在可以 remember(project='{prefix}', ...) 写入。\n"
                 + fish.format_dup_hint(project_hints=hints))
+
+    # ------------------------------------------------ 主人画像（R1-2，2026-11-11）
+    #
+    # **写权分离在接口层**：这里只有 show 与 propose，**没有 set**。
+    # AI 想改画像只能提建议，等人在 CLI 上 `fish profile accept` 才生效。
+    # 这不是靠自觉——是 MCP 面**没有那个工具**。
+    def tool_profile_show(self, a, ident):
+        """读主人画像（只读）。空画像时明说"还是空的"，不假装有内容。"""
+        slots = fish_profile.list_slots(self.conn, group=a.get("group"))
+        if not slots:
+            return ("主人画像还是空的（人可以用 `fish profile set` 填；"
+                    "AI 只能 `profile_propose` 提建议）。\n")
+        out = ["主人画像："]
+        cur = None
+        for s in slots:
+            if s["slot_group"] != cur:
+                cur = s["slot_group"]
+                out.append(f"## {cur}")
+            stamp = (f"（as-of {(s['as_of'] or '')[:10]}）"
+                     if s["permanence"] == "volatile" else "")
+            out.append(f"  {s['slot_name']}{stamp}：{s['value']}")
+        pend = fish_profile.list_proposals(self.conn)
+        if pend:
+            out.append(f"\n另有待主人采纳的建议 {len(pend)} 条（你查看即可，不要催）。")
+        return "\n".join(out) + "\n"
+
+    def tool_profile_propose(self, a, ident):
+        """AI 给画像提建议——**不碰槽位**。"""
+        try:
+            if a.get("remove"):
+                pid = fish_profile.propose_removal(
+                    self.conn, a["group"], a["name"],
+                    by=ident.citizen_id, rationale=a.get("rationale", ""))
+            else:
+                if not a.get("value"):
+                    return "错误：要给 value（或用 remove=true 建议清空）。\n"
+                pid = fish_profile.propose(
+                    self.conn, a["group"], a["name"], a["value"],
+                    by=ident.citizen_id, rationale=a.get("rationale", ""))
+        except ValueError as e:
+            return f"错误：{e}\n"
+        return (f"已提交建议 {pid}（**画像没有变**）。\n"
+                f"主人会在 CLI 上 `fish profile proposals` 看到它，"
+                f"用 `fish profile accept {pid}` 采纳才生效。\n")
+
 
     def tool_supersede(self, a, ident):
         """把旧编码标记为被新编码替代。"""
@@ -2123,6 +2203,8 @@ class FishServer:
             "resolve_code": self.tool_resolve,
             "read_body": self.tool_read_body,
             "add_project": self.tool_add_project,
+        "profile_show": self.tool_profile_show,
+        "profile_propose": self.tool_profile_propose,
             "supersede": self.tool_supersede,
             "whoami": self.tool_whoami,
             "register": self.tool_register,

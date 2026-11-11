@@ -427,9 +427,12 @@ class McpSurfaceTest(unittest.TestCase):
     def test_tool_count_and_order(self):
         import mcp_server
         names = [tool["name"] for tool in mcp_server.TOOLS]
-        self.assertEqual(len(names), 19)
-        self.assertEqual(names[:-1], self.OLD_TOOLS)
-        self.assertEqual(names[-1], "corpus")
+        self.assertEqual(len(names), 21)
+        self.assertEqual(names[:18], self.OLD_TOOLS)
+        self.assertEqual(names[18], "corpus")
+        # 2026-11-11（序2 主人画像）：画像两个工具追加在末尾；
+        # **旧工具的名字与顺序一字不动**（金标准仍只锁那 18 个）。
+        self.assertEqual(names[19:], ["profile_show", "profile_propose"])
 
     def test_corpus_tool_is_read_only_and_has_token(self):
         import mcp_server

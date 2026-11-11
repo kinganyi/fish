@@ -113,7 +113,8 @@ class MCPProtocolTest(unittest.TestCase):
                                  "read_body", "whoami", "register", "rename_citizen",
                                  "close_project", "reopen_project",
                                  "inject", "healthcheck", "add_project", "supersede",
-                                 "session_start", "board", "kb", "kb_write", "corpus"})
+                                 "session_start", "board", "kb", "kb_write", "corpus",
+                                   "profile_show", "profile_propose"})
         # 每个工具必须有 inputSchema
         for t in r["result"]["tools"]:
             self.assertIn("inputSchema", t)
