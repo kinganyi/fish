@@ -28,6 +28,25 @@ from pathlib import Path
 from fish_common import (UNATTRIBUTED, body_relpath, citizen_ids_known, reindex_fts, resolve_owner, split_code_prefix)
 from fish_trust import load_ownership_merge_map, resolve_merged
 
+class RebuildError(Exception):
+    """重建中止（**投影未被修改**）。
+
+    ## 为什么要有专门的异常类型（外部审查 F-P0-2）
+
+    重建是"恢复手段"。它失败时必须能被上层**明确区分**于"重建成功但有偏差"——
+    前者应该让 CLI 以非零退出并保持数据库原样，后者只写进报告。
+
+    旧实现的失败模式正好相反：删完投影再逐条重放，畸形事件一来就抛裸异常，
+    而投影已经被清空，调用方甚至不知道"库现在是空的"。
+
+    `detail` 带诊断信息（坏事件 seq 列表、hint），供 CLI/MCP 原样透出。
+    """
+
+    def __init__(self, message, *, detail=None):
+        super().__init__(message)
+        self.detail = detail or {}
+
+
 
 def rebuild_projection(conn, root: Path) -> dict:
     """从事件重放重建 `code_index` 投影，返回对账报告。
@@ -117,8 +136,39 @@ def rebuild_projection(conn, root: Path) -> dict:
                       "visibility": r[14], "tags": r[15], "file_path": r[16]}
     rep["snapshot_size"] = len(snap)
 
+    # ---- 1b. **先校验全部事件，再动投影**（外部审查 F-P0-2）----
+    #
+    # 旧实现：`DELETE FROM code_index` + `commit()`，然后才逐条重放 events。
+    # 重放中任一畸形事件抛异常 → **投影已被清空**，而快照只在内存里，
+    # 进程一退就永久丢失。审查方实测：一条畸形事件能让投影从 1 变 0，而 FTS 仍指旧。
+    #
+    # 恢复手段本身不能变成破坏手段。所以先做一遍**只读预检**：所有
+    # `memory.recorded` 事件必须能解析成 dict 且带 `code`。任一失败就在这里停，
+    # **一个字节都还没删**。这比"删了再回滚"更稳——回滚依赖连接状态，
+    # 预检不依赖任何东西。
+    bad_events = []
+    for seq, payload_s in conn.execute(
+            "SELECT seq,payload FROM events WHERE type='memory.recorded'").fetchall():
+        try:
+            p = json.loads(payload_s or "{}")
+        except Exception as exc:
+            bad_events.append((seq, f"JSON 解析失败: {type(exc).__name__}"))
+            continue
+        if not isinstance(p, dict):
+            bad_events.append((seq, "payload 不是对象"))
+        elif not p.get("code"):
+            bad_events.append((seq, "payload 缺 code"))
+    if bad_events:
+        # 抛出去而不是"跳过坏事件继续"：跳过会让投影少一条，而少的那条
+        # 看起来和"本来就没有"完全一样——静默丢数据比响亮失败糟得多。
+        raise RebuildError(
+            f"重建中止：{len(bad_events)} 条 memory.recorded 事件无法解析，"
+            f"投影**未被修改**",
+            detail={"bad_events": bad_events[:10],
+                    "hint": "先修事件或备份后用 --skip-bad 显式跳过"})
+    rep["precheck_ok"] = True
+
     conn.execute("DELETE FROM code_index")
-    conn.commit()
 
     # owner 归一所需的知识：哪些才是真公民（见 07 D-13）。
     # 库里没有公民知识时（空库 / 测试）不做归一——不凭猜测改写归属。

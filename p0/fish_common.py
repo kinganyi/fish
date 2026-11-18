@@ -219,6 +219,10 @@ CONFIG_DEFAULTS = {
     # W6（2026-11-18）：压缩接缝开关。**默认 0（关闭）**——实测 fish 自己的负载
     # （中文 markdown）压缩率 0%，唯一确定能省的是 kb_asset 这类结构化元数据。
     # 装了不用的依赖是负债，所以默认不压，需要时再打开。
+    # F-P0-3（2026-11-18 外部审查）：未归属（无凭证写入）的 lesson 默认**不进注入包**。
+    # 理由：lesson 进错题本段，等于能影响所有 AI 的行为约束；而它免凭证写入，
+    # 于是"陌生人能改教训"。改成 1 则允许进包，并在段里标记为「未认证」。
+    "inject.allow_untrusted_lessons": (0, "int", None),
     "dataplane.compress_enabled": (0, "int", None),
     "inject.budget_tokens": (1600, "int", None),
     # 注入风格：gentle 温和（只标注这是状态）/ strong 强化（要求回答前先参考）
@@ -550,13 +554,23 @@ def resolve_project_names(conn, project) -> list:
             out.append(n)
     return out or [p]
 
-def _index_one_fts(conn, code, title, tags, body):
-    """把一条记忆写进全文索引（覆盖式，幂等）。"""
+def _index_one_fts(conn, code, title, tags, body, *, commit=True):
+    """把一条记忆写进全文索引（覆盖式，幂等）。
+
+    ## 2026-11-18（外部审查 F-P0-1 修）为什么加 `commit`
+
+    旧实现**硬编码 `conn.commit()`**，于是调用方无法把"投影 + 事件 + FTS"组成
+    一个事务。`record_memory` 因此是三次独立提交：投影先落，事件和 FTS 后落——
+    后两者失败就留下"有投影、无事件、无索引"的半状态，重建与审计同时断链。
+
+    现在默认仍提交（保持既有调用方行为），调用方要单事务就传 `commit=False`。
+    """
     conn.execute("DELETE FROM memory_fts WHERE code=?", (code,))
     title_part = " ".join([code or "", title or "", " ".join(tags or [])])
     conn.execute("INSERT INTO memory_fts (code, title_idx, body_idx) VALUES (?,?,?)",
                  (code, fts_text(title_part), fts_text(body)))
-    conn.commit()
+    if commit:
+        conn.commit()
 
 def reindex_fts(conn, root) -> int:
     """全量重建全文索引；返回索引条数。可从 code_index + 正文文件完整重建。"""

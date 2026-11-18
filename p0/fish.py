@@ -1099,27 +1099,44 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
     # 2026-10-22 修 07 D-11：旧版 payload 不含 occurred_at，导致"忠实重建"在事件层面不可能。
     # 时间事实：occurred_at 已在函数开头校验归一；recorded_at 就是"现在"。
     recorded_at = now_utc()
-    conn.execute(
-        "INSERT INTO code_index (code,title,project,owner,mem_type,visibility,status,tags,"
-        "file_path,occurred_at,recorded_at,access_count,dormant,session_actor,attachments) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,0,0,?,?)",
-        (code, title, project, owner or "unknown", mem_type, visibility, "active",
-         json.dumps(tags or [], ensure_ascii=False), rel,
-         occurred_at, recorded_at, session_actor,
-         json.dumps(atts, ensure_ascii=False) if atts else None))
-    conn.commit()
-    append_event(conn, "memory.recorded",
-                 {"citizen_id": owner or "unknown", "evidence_level": "machine"},
-                 {"kind": "memory", "id": code},
-                 {"code": code, "title": title, "body_ref": rel,
-                  "mem_type": mem_type, "tags": tags or [], "visibility": visibility,
-                  "occurred_at": occurred_at,
-                  "session_actor": session_actor,
-                  # 存完整元数据（不只 name+sha256）：投影要能逐字段重建回来
-                  "attachments": atts},
-                 cause=cause)
-    # 全文索引（ADR-005）：正文/标题入 FTS，让单号与中文子串可查
-    _index_one_fts(conn, code, title, tags or [], body)
+    # ---- 投影 + 事件 + 全文索引：**一个事务**（外部审查 F-P0-1）----
+    #
+    # 旧实现是三次独立提交：code_index 先 commit，append_event 自己 commit，
+    # _index_one_fts 再自己 commit。后两者任一失败就留下
+    # "投影有、事件无、FTS 无"的半状态——重建不忠实、检索断链、审计缺一条，
+    # 而**没有任何东西会红**：query 照常返回那条记忆。
+    #
+    # 现在三件事只提交一次；异常整体回滚，并把已写下的正文文件删掉
+    # （否则留下一个没有任何索引指向的孤儿文件，比没有更糟）。
+    try:
+        conn.execute(
+            "INSERT INTO code_index (code,title,project,owner,mem_type,visibility,status,tags,"
+            "file_path,occurred_at,recorded_at,access_count,dormant,session_actor,attachments) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,0,0,?,?)",
+            (code, title, project, owner or "unknown", mem_type, visibility, "active",
+             json.dumps(tags or [], ensure_ascii=False), rel,
+             occurred_at, recorded_at, session_actor,
+             json.dumps(atts, ensure_ascii=False) if atts else None))
+        append_event(conn, "memory.recorded",
+                     {"citizen_id": owner or "unknown", "evidence_level": "machine"},
+                     {"kind": "memory", "id": code},
+                     {"code": code, "title": title, "body_ref": rel,
+                      "mem_type": mem_type, "tags": tags or [], "visibility": visibility,
+                      "occurred_at": occurred_at,
+                      "session_actor": session_actor,
+                      # 存完整元数据（不只 name+sha256）：投影要能逐字段重建回来
+                      "attachments": atts},
+                     cause=cause, commit=False)
+        # 全文索引（ADR-005）：正文/标题入 FTS，让单号与中文子串可查
+        _index_one_fts(conn, code, title, tags or [], body, commit=False)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        try:
+            (root / rel).unlink()
+        except OSError:
+            pass  # A档：删孤儿文件失败不该掩盖原始异常（原始异常在下面 re-raise）
+        raise
 
     # ---- 替代旧条目（写新的同时标记旧的）----
     # **顺序即承诺**（FB-11）：新条目已经落盘并提交，才轮到置旧条目 superseded。
@@ -6193,6 +6210,12 @@ def count_lesson_rows(conn, since_z, exclude=()):
     sql = ("SELECT COUNT(*) FROM code_index WHERE mem_type='lesson' AND status='active' "
            "AND dormant=0 AND recorded_at >= ?")
     params = [since_z]
+    # F-P0-3（2026-11-18 外部审查）：未归属 lesson **不计入**注入包。
+    # 它们免凭证可写，而错题本段会影响所有会话的 AI 行为——两者放一起就是
+    # "陌生人能改教训"。放行开关见 inject.allow_untrusted_lessons。
+    if not _allow_untrusted_lessons(conn):
+        sql += " AND owner <> ? AND owner IS NOT NULL"
+        params.append(UNATTRIBUTED)
     extra = [c for c in (exclude or ()) if c]
     if extra:
         sql += " AND code NOT IN (" + ",".join("?" * len(extra)) + ")"
@@ -6203,12 +6226,32 @@ def count_lesson_rows(conn, since_z, exclude=()):
         return None
 
 
+def _allow_untrusted_lessons(conn) -> bool:
+    """未归属 lesson 是否允许进注入包（F-P0-3，默认**不允许**）。
+
+    为什么默认关：`lesson` 按 2026-11-11 的决策**免凭证可写**（"记忆比归属重要"），
+    而它进的是注入包的错题本段——等于能影响所有会话里 AI 的行为约束。
+    两者放一起就是"陌生人能改教训"：写入成本为零，影响面是全库。
+
+    默认关不等于"lesson 一定要有主"：无凭证照写不误，只是**不自动进包**，
+    事后可用 `fish owner-fix` 补归属，那时它才进包。
+    """
+    try:
+        return bool(int(get_config(conn, "inject.allow_untrusted_lessons") or 0))
+    except Exception:      # A档：配置读不到按"不允许"处理，宁可少列不可投毒
+        return False
+
+
 def _lesson_rows(conn, since_z, limit, exclude=(), same_project=None):
     """窗口内 lesson 的 `(code, title)`：时间降序；`same_project` 给定时只取该项目。
 
     `same_project=None` = 不限项目（用于跨项目补齐阶段，也用于"当前项目未声明"）。
     """
     where, params = "recorded_at >= ?", [since_z]
+    if not _allow_untrusted_lessons(conn):
+        # F-P0-3：与 count_lesson_rows 同口径——否则段头说 2 条、列表只 1 条。
+        where += " AND owner <> ? AND owner IS NOT NULL"
+        params.append(UNATTRIBUTED)
     if same_project is not None:
         where += " AND project = ?"
         params.append(same_project)
