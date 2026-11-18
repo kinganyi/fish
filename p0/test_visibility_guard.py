@@ -195,5 +195,24 @@ class PrivateWriteGuardTest(unittest.TestCase):
 
 
 
+    def test_injection_pack_filters_private(self):
+        """**最要紧的一处**：注入包的"最近三件事"不许印出别人的私有标题。
+
+        为什么它比 search 泄露更严重：注入包**每个会话开场都跑**，
+        不需要谁去搜、也不需要谁知道编号——名字会自己出现在所有人的上下文里。
+
+        `neighbors` 那条是同一类问题的另一面（"存在"泄露），两条一起看才算补齐。
+        """
+        self._enforce(True)
+        code, _rel = self._write(title="绝密项目代号", visibility="private",
+                                 owner="C-OWNER")
+        pack = fish.build_injection_pack(self.conn, self.root, citizen_id="C-OTHER",
+                                         project="P")
+        text = str(pack)
+        self.assertNotIn("绝密项目代号", text,
+                         "注入包里出现了别人的私有标题——这比 search 泄露严重，"
+                         "因为它每个会话开场都跑")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

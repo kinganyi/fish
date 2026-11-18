@@ -109,6 +109,8 @@ from fish_attach import (AttachmentRejected, store_blob,  # F-P1-3
                          ATTACH_SENSITIVE_PATTERNS, ATTACH_DENY_ROOTS,
                          _attach_max_bytes, _attach_check_name,
                          _attach_check_root)
+from fish_visibility import (_filter_by_visibility, _visibility_enforced,
+                            _visibility_sql)  # F-P1-X：可见性执行层
 from fish_db import restore_citizen  # F-P1-7：公民还原（域函数住 fish_db）
 from fish_kb import ( # noqa: F401
  KBError, KB_ACTIONS, KB_DEFAULT_IGNORE_GLOBS, KB_DEFAULT_MAX_OPEN_BYTES,
@@ -2512,63 +2514,6 @@ def compute_session_profile(conn, *, session_actor=None, citizen_id=None,
 
 
 
-
-def _visibility_enforced(conn) -> bool:
-    """`privacy.visibility_enforced`（默认 False = 只当标签，不执行过滤）。"""
-    try:
-        return bool(get_config(conn, "privacy.visibility_enforced"))
-    except Exception:       # noqa: BLE001 —— 配置坏了就当关
-        return False
-
-
-def _visibility_sql(conn, viewer_citizen_id):
-    """返回 `(sql 片段, 参数)`，接在 WHERE 后面用于**在 SQL 里**排除 private。
-
-    ## 为什么是 SQL 级而不是拿到结果再过滤（F-P1-X / 独立评审 🟠-2）
-
-    `list_memories` / `recent_fallback` 都带 `LIMIT`。后置过滤会让"要 20 条"
-    变成"过滤后只剩 17 条"，而调用方拿到的 `limit` 数字和实际条数对不上——
-    这种不一致不会报错，只会让人怀疑数据没了。
-
-    ## 语义与 `_filter_by_visibility` 一致
-
-      · 开关关着 → 不追加任何条件（逐字节等价旧行为）
-      · 开关开着 → private 只对 owner 可见；`viewer` 为空时**一律排除**
-        （猜错方向是泄露，代价不对称）
-    """
-    if not _visibility_enforced(conn):
-        return "", []
-    return (" AND (LOWER(TRIM(COALESCE(visibility,'shared'))) <> 'private'"
-            " OR COALESCE(owner,'') = ?)",
-            [str(viewer_citizen_id or "")])
-
-
-def _filter_by_visibility(conn, found, viewer_citizen_id):
-    """按 `visibility` 过滤检索结果（**可选**；用户 2026-10-29 拍板"做成开关、不强制"）。
-
-    规则（**开关打开时**）：
-      · `visibility='private'` 且 `owner == viewer` → 保留
-      · `visibility='private'` 且无 viewer / owner 不匹配 → 剔除
-      · 其它（shared / NULL / 未知值）→ 保留
-
-    开关**关着**时原样返回（逐字节等价旧行为，这是默认状态）。
-    语义选择说明：没给 viewer 时**一律剔除 private**（宁严勿松）——猜错方向
-    是"泄露"，而猜另一个方向只是"少看见一条自己的东西"，代价不对称。
-
-    批量查询（一次 SQL）而不是逐条查：`search_memories` 是每次 recall 都走的
-    热路径，逐条查会变成 N+1（评审 🟡11 同款问题）。
-    """
-    if not found or not _visibility_enforced(conn):
-        return found
-    codes = [c for c in found if c]
-    if not codes:
-        return found
-    marks = ",".join("?" * len(codes))
-    hidden = {r[0] for r in conn.execute(
-        "SELECT code FROM code_index WHERE code IN (" + marks + ") "
-        "AND LOWER(TRIM(COALESCE(visibility,'shared')))='private' "
-        "AND COALESCE(owner,'')<>?", codes + [str(viewer_citizen_id or "")]).fetchall()}
-    return {c: r for c, r in found.items() if c not in hidden}
 
 
 def search_memories(conn, *, query=None, code=None, project=None, tags=None,
@@ -7351,9 +7296,14 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
     if proj_name:
         active_n, last_seen = _project_activity(conn, proj_name)
         l1_head = _render_project_head(proj_name, active_n, last_seen, proj_source)
+        # F-P1-X（第二轮评审 🟠-2）：注入包的"最近三件事"也必须按可见性过滤。
+        # 这是**最要紧的一处**：它每个会话开场都跑，不过滤等于把别人的私有标题
+        # 直接印进所有人的上下文——比 search 泄露严重，因为它不需要谁去搜。
+        _vis_sql, _vis_params = _visibility_sql(conn, citizen_id)
         recent = conn.execute(
             "SELECT code,title FROM code_index WHERE project=? AND dormant=0 "
-            "AND status='active' ORDER BY code DESC LIMIT 3", (proj_name,)).fetchall()
+            "AND status='active'" + _vis_sql + " ORDER BY code DESC LIMIT 3",
+            [proj_name] + _vis_params).fetchall()
     else:
         l1_head = _UNDECLARED_PROJECT_LINE
     dormant_n = conn.execute(
