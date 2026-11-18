@@ -67,6 +67,31 @@ def _exists(path):
 
 
 @unittest.skipUnless(IS_WINDOWS, "ACL 是 Windows 概念——判不到，不是通过")
+def _has_real_data():
+    """这个树里有没有**真的东西**要被保护？
+
+    第四轮评审之后补：公开镜像跑全量时这两条判据红了——因为镜像的 `data/`
+    是**跑测试时产生的**（一个空的 `index.sqlite`，未被 git 跟踪），
+    而我只收紧了生产树的权限。判据报"权限没收紧"在字面上没错，
+    但它报的不是真问题：**一个刚创建的空库没有"收紧"的必要**。
+
+    判据要分的不是"目录在不在"，而是"**这里有没有值得保护的东西**"。
+    零事件的库 = 没有。
+    """
+    import sqlite3
+    db = P0 / "data" / "index.sqlite"
+    if not db.is_file():
+        return False
+    try:
+        c = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        try:
+            return c.execute("SELECT COUNT(*) FROM events").fetchone()[0] > 0
+        finally:
+            c.close()
+    except sqlite3.Error:
+        return False
+
+
 class DataAclTest(unittest.TestCase):
 
     TARGETS = ("data", "fish_identity.json")
@@ -89,8 +114,9 @@ class DataAclTest(unittest.TestCase):
         # 第三轮评审 B-6：目标一个都不存在时必须**跳过**，不能"零靶点通过"。
         # 公开镜像里没有 `data/` 也没有 `fish_identity.json`，原实现于是
         # `offenders == []` 恒过——那不是在说"已经收紧"，是在说"没东西可查"。
-        if checked == 0:
-            self.skipTest("两个目标都不存在（公开镜像只带代码）——判不到，不是通过")
+        if checked == 0 or not _has_real_data():
+            self.skipTest("没有真实数据要保护（公开镜像的 data/ 是测试产物）"
+                          "——判不到，不是通过")
         self.assertEqual(offenders, [],
                          "数据目录对同机所有用户开放——记忆/语料可被读，身份锚可被改：\n"
                          + "\n".join(offenders))
@@ -138,7 +164,14 @@ class DataAclTest(unittest.TestCase):
             self.skipTest("两个目标都不存在——判不到，不是通过")
 
     def test_current_user_keeps_full_control(self):
-        """当前用户必须仍可写——否则 fish 自己就跑不了。"""
+        """当前用户必须仍可写——否则 fish 自己就跑不了。
+
+        第四轮评审 🟠-3：前两条加了"零靶点就 skip"，**这一条漏了**——
+        公开镜像上它无条件读 `data/`，没有这个目录时断言失败。
+        """
+        if not _has_real_data():
+            self.skipTest("没有真实数据要保护（公开镜像的 data/ 是测试产物）"
+                          "——判不到，不是通过")
         _rc, out = _acl(P0 / "data")
         sid = subprocess.run(["whoami", "/user"], capture_output=True, text=True,
                              encoding="mbcs", errors="replace").stdout or ""

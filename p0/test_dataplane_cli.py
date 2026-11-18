@@ -35,6 +35,26 @@ if str(HERE) not in sys.path:
 import fish_cli  # noqa: E402
 
 
+def _has_assets():
+    """这个树里有没有资产数据？没有就 skip（不是 fail）。
+
+    第四轮评审后补：公开镜像的 `data/` 是测试产物，没有 kb_asset。
+    判"stats 打印真实资产数"在缺数据时是**判不到**，不是失败。
+    """
+    import sqlite3
+    db = HERE / "data" / "index.sqlite"
+    if not db.is_file():
+        return False
+    try:
+        c = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        try:
+            return c.execute("SELECT COUNT(*) FROM kb_asset").fetchone()[0] > 0
+        finally:
+            c.close()
+    except sqlite3.Error:
+        return False
+
+
 def _run(*argv):
     return subprocess.run(
         [sys.executable, str(HERE / "fish.py"), *argv],
@@ -87,6 +107,8 @@ class DataplaneCliWorksTest(unittest.TestCase):
         `set_defaults` 接错函数、或 `cli()` 签名与 `main()` 的
         `rc = args.func(args)` 不匹配时，这条红（实测踩过：三参数签名）。
         """
+        if not _has_assets():
+            self.skipTest("没有资产数据可读（公开镜像/裸树）——判不到，不是通过")
         r = _run("dataplane", "stats")
         self.assertEqual(r.returncode, 0,
                          f"`fish dataplane stats` 失败：\n{(r.stderr or '')[-600:]}")

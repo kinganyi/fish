@@ -301,7 +301,11 @@ class FishProfileS1Test(unittest.TestCase):
         """判据 H：生产库只读跑真实会话 → tool_usage 非空，且等于独立复算。"""
         db = Path(os.environ.get("FISH_PROD_DB") or PROD_DB)
         if not db.exists():
-            self.fail(f"判据 H 需要真实库：{db} 不存在。可用 FISH_PROD_DB 指向只读副本。")
+            # 第四轮评审后改：**缺证据不是失败**。原写法 fail() 让公开镜像的读数
+            # 变成"有 6 条红"，而那些红说的是"这里没有生产库"，不是代码坏了。
+            # skip 才是诚实的信号：判不到。
+            self.skipTest(f"判据 H 需要真实库：{db} 不存在"
+                          "（可用 FISH_PROD_DB 指向只读副本）——判不到，不是通过")
         prod_root = db.parent
         audit = prod_root / fish.AUDIT_DIR_NAME / fish.AUDIT_TOOL_CALLS_FILE
         self.assertTrue(audit.exists(), f"判据 H 需要真实审计文件：{audit}")

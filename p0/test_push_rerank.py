@@ -435,6 +435,9 @@ class HookBudgetTest(RerankCase):
         N=3 对（off/on 交替，抵消顺序与缓存漂移），取中位差。
         """
         real = P0 / "data" / "index.sqlite"
+        # 第四轮评审后补：公开镜像没有真实库 → 判不到，不是失败
+        if not real.is_file() or real.stat().st_size < 4096:
+            self.skipTest(f"没有真实库：{real}——判不到，不是通过")
         if not real.exists():
             self.skipTest("真库 data/index.sqlite 不存在：配对增量判不到，不是通过")
         tmp = Path(tempfile.mkdtemp(prefix="fish-rerank-pair-"))

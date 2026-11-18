@@ -234,6 +234,9 @@ class FishStatusFilterTest(unittest.TestCase):
         原始实测（2026-10-24）：`similar_codes("企业智能-261022-14", body)` 返回
         `("ANYI-261022-29", 0.9292)`，而该条 status='withdrawn'。
         """
+        # 第四轮评审后补：没有生产库时判不到，不是失败
+        if not (HERE / "data" / "index.sqlite").is_file():
+            self.skipTest("没有生产库可复制——判不到，不是通过")
         conn = sqlite3.connect(str(self._copy_prod_db()))
         try:
             row = conn.execute(
