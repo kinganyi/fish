@@ -6939,6 +6939,35 @@ def injection_contains_phrase(sections) -> str:
     return "本包含 L0 身份 + " + "、".join(_TAIL_SECTION_LABELS[s] for s in ordered)
 
 
+
+# I3（2026-11-18 W5）：**被裁掉的内容怎么要回来**。
+#
+# 为什么必须有这一行：包尾原本只说"砍了什么、砍了几条"（announce_truncation），
+# 读者知道自己缺了东西，却**不知道去哪拿**——于是那段内容等于白白消失。
+# headroom 的 CCR 把"可逆"做成一等公民正是这个道理；fish 不需要额外存储
+# （原文本来就在库里），缺的只是这一句指路。
+_RETRIEVAL_HINTS = (
+    ("push", "候选", "`fish recall` / MCP `recall`"),
+    ("l2", "L2索引", "MCP `list` / `recall`"),
+    ("attention", "注意事项", "MCP `recall`"),
+    ("lessons", "错题本", "MCP `recall`"),
+    ("rules", "规矩", "MCP `recall`"),
+    ("board", "看板", "`fish board`"),
+)
+
+
+def retrieval_hint(counts) -> str:
+    """包尾第三行：把被裁的段映射成**可执行的取回入口**。
+
+    没有任何段被裁时返回空串（不印"无需取回"这种噪音——包尾已经说了"本次无截断"）。
+    """
+    c = {k: int((counts or {}).get(k) or 0) for k, _n, _h in _RETRIEVAL_HINTS}
+    parts = [f"{name}→{hint}" for key, name, hint in _RETRIEVAL_HINTS if c.get(key)]
+    if not parts:
+        return ""
+    return "要回：" + "；".join(parts)
+
+
 def injection_tail_text(counts, as_of, sections=None) -> str:
     """包尾两行：**这次砍了什么**（FB-02）+ **数据截至何时**（FB-16）。
 
@@ -6948,7 +6977,9 @@ def injection_tail_text(counts, as_of, sections=None) -> str:
     `sections` 传的是**本包实际含有的段**（见 `injection_contains_phrase`）；
     `None` = 全段（保持旧措辞，既有判据不受影响）。
     """
+    hint = retrieval_hint(counts)
     return (announce_truncation(counts) + "\n"
+            + (hint + "\n" if hint else "")
             + f"as-of {as_of}（数据截至；{injection_contains_phrase(sections)}）")
 
 

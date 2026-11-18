@@ -241,7 +241,11 @@ class G2InjectionTailTest(_TempRoot):
     def _tail(pack):
         """包尾两行（最后两行：截断声明 + as-of）。"""
         lines = [ln for ln in pack.strip().splitlines() if ln.strip()]
-        return lines[-2], lines[-1]
+        # W5（2026-11-18）：包尾现在是「截断声明 + 可选取回入口 + as-of」三行，
+        # 不能再按"倒数第二行"取——那样加一行就会把判据打红，而原因与被测行为无关。
+        return (next((ln for ln in lines
+                      if ln.startswith("本次截断") or ln.startswith("本次无截断")), ""),
+                next((ln for ln in reversed(lines) if ln.startswith("as-of")), lines[-1]))
 
     def test_G2_l2_trim_reports_truncation(self):
         """L2 被预算裁掉 → 包尾**必须**说截断，且与 `meta["truncated"]` 同源同值。"""
