@@ -2509,6 +2509,28 @@ def _visibility_enforced(conn) -> bool:
         return False
 
 
+def _visibility_sql(conn, viewer_citizen_id):
+    """返回 `(sql 片段, 参数)`，接在 WHERE 后面用于**在 SQL 里**排除 private。
+
+    ## 为什么是 SQL 级而不是拿到结果再过滤（F-P1-X / 独立评审 🟠-2）
+
+    `list_memories` / `recent_fallback` 都带 `LIMIT`。后置过滤会让"要 20 条"
+    变成"过滤后只剩 17 条"，而调用方拿到的 `limit` 数字和实际条数对不上——
+    这种不一致不会报错，只会让人怀疑数据没了。
+
+    ## 语义与 `_filter_by_visibility` 一致
+
+      · 开关关着 → 不追加任何条件（逐字节等价旧行为）
+      · 开关开着 → private 只对 owner 可见；`viewer` 为空时**一律排除**
+        （猜错方向是泄露，代价不对称）
+    """
+    if not _visibility_enforced(conn):
+        return "", []
+    return (" AND (LOWER(TRIM(COALESCE(visibility,'shared'))) <> 'private'"
+            " OR COALESCE(owner,'') = ?)",
+            [str(viewer_citizen_id or "")])
+
+
 def _filter_by_visibility(conn, found, viewer_citizen_id):
     """按 `visibility` 过滤检索结果（**可选**；用户 2026-10-29 拍板"做成开关、不强制"）。
 
@@ -2731,7 +2753,7 @@ def count_memories(conn, *, project=None, tags=None, include_superseded=False) -
 
 
 def list_memories(conn, *, project=None, tags=None, limit=LIST_DEFAULT_LIMIT,
-                  include_superseded=False):
+                  include_superseded=False, viewer_citizen_id=None):
     """**列出模式**：无 query 时按 项目（含别名展开）+ 标签 过滤，时间倒序。
 
     与 `search_memories` 的区别是"不猜"：检索要做 FTS + 排序 + 来源标注，
@@ -2748,6 +2770,17 @@ def list_memories(conn, *, project=None, tags=None, limit=LIST_DEFAULT_LIMIT,
     limit = max(1, int(limit or LIST_DEFAULT_LIMIT))
     clause, params = _list_where(conn, project=project, tags=tags,
                                  include_superseded=include_superseded)
+    # F-P1-X（评审 🟠-2）：private 必须在**列出模式**里也过滤。
+    # 只挡 search 不挡 list，等于"搜不到但列得出来"——那不是私有，是难找。
+    #
+    # **条件必须插进 WHERE 段，不能接在 SQL 末尾**：末尾已经是
+    # `ORDER BY … LIMIT ?`，接 ` AND …` 会变成 `LIMIT ? AND …`——
+    # 语法错（实测报 "no such column: visibility"）。第一版就错在这里。
+    _vis_sql, _vis_params = _visibility_sql(conn, viewer_citizen_id)
+    if _vis_sql:
+        cond = _vis_sql.strip()[4:]          # 去掉前导 "AND "
+        clause = (clause + " AND " + cond) if clause.strip() else (" WHERE " + cond)
+        params = list(params) + _vis_params
     sql = ("SELECT code,title,project,mem_type,status,file_path,dormant FROM code_index"
            + clause + " ORDER BY recorded_at DESC, code DESC LIMIT ?")
     params = list(params) + [limit]
@@ -2789,7 +2822,8 @@ def format_status_tag(mem_type, status, dormant) -> str:
     return f"[{mem_type}/{status}{'+dormant' if dormant else ''}]"
 
 
-def recent_fallback(conn, project=None, tags=None, limit=5, include_superseded=False):
+def recent_fallback(conn, project=None, tags=None, limit=5, include_superseded=False,
+                    viewer_citizen_id=None):
     """未命中时给"最近的条目"作提示——**必须遵守与检索同样的过滤**。
 
     2026-10-22 缺陷（反馈 `ANYI-261022-114` 报的面）：旧实现直接
@@ -2825,6 +2859,14 @@ def recent_fallback(conn, project=None, tags=None, limit=5, include_superseded=F
         if t:
             where.append("tags LIKE ?" + LIKE_ESCAPE_SQL)
             params.append(tag_like_pattern(t))
+    # F-P1-X（评审 🟠-2）：未命中时给的"最近条目"同样必须过滤——
+    # 否则"没找到私有条目"之后紧跟一句"最近的是这条私有条目"，等于绕过检索。
+    # 加进 `where` 列表（不是接在 sql 后面）：本函数的条件是按列表拼的，
+    # 直接 `sql + " AND …"` 会在没有 WHERE 时变成语法错误的裸 AND。
+    _vis_sql, _vis_params = _visibility_sql(conn, viewer_citizen_id)
+    if _vis_sql:
+        where.append(_vis_sql.strip()[4:])      # 去掉前导 "AND "
+        params.extend(_vis_params)
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY code DESC LIMIT ?"

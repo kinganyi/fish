@@ -147,21 +147,52 @@ class PrivateWriteGuardTest(unittest.TestCase):
                          "没有 viewer 时 private 泄露了")
 
     # ------------------------------------------------------------- 已知缺口
-    def test_list_mode_does_not_filter_yet(self):
-        """**如实记录已知缺口**：`list_memories` 目前不过滤 private。
+    def test_list_mode_filters_private(self):
+        """**缺口已补**：`list_memories` 现在也过滤 private。
 
-        这条判据不是在为缺口辩护——它是在**固定现状**：谁哪天补上了过滤，
-        这条会红，于是必须回来把注释和文档一起改掉。缺口被写进判据，
-        比缺口只写在文档里更难被忘掉。
+        这条原本叫 `test_list_mode_does_not_filter_yet`，是**刻意钉住缺口**的：
+        补上过滤它会红，逼人回来改这里和 fish.py 的注释。它红了，所以我改了。
+
+        现在它验三件事：
+          · 别人列不到我的 private
+          · 我自己列得到
+          · 不给 viewer 时一律列不到（猜错方向是泄露）
         """
         self._enforce(True)
         code, _rel = self._write(title="私有标题丙", visibility="private",
                                  owner="C-OWNER")
-        rows = fish.list_memories(self.conn, project="P", limit=50)
-        codes = {r[0] for r in rows}
-        self.assertIn(code, codes,
-                      "list_memories 居然开始过滤了——说明缺口被补上了，"
-                      "请把 fish.py 里 F-P1-2 的注释与本判据一起更新")
+
+        other = {r[0] for r in fish.list_memories(
+            self.conn, project="P", limit=50, viewer_citizen_id="C-OTHER")}
+        self.assertNotIn(code, other, "别人在列表模式里看到了我的 private")
+
+        own = {r[0] for r in fish.list_memories(
+            self.conn, project="P", limit=50, viewer_citizen_id="C-OWNER")}
+        self.assertIn(code, own, "我自己也列不到自己的 private（过滤过头）")
+
+        anon = {r[0] for r in fish.list_memories(self.conn, project="P", limit=50)}
+        self.assertNotIn(code, anon, "没有 viewer 时 private 泄露了")
+
+    def test_recent_fallback_filters_private(self):
+        """未命中时的"最近条目"同样必须过滤——否则绕过检索。"""
+        self._enforce(True)
+        code, _rel = self._write(title="私有标题丁", visibility="private",
+                                 owner="C-OWNER")
+        rows = fish.recent_fallback(self.conn, project="P", limit=50,
+                                    viewer_citizen_id="C-OTHER")
+        self.assertNotIn(code, {r[0] for r in rows},
+                         "回退列表里泄露了别人的 private")
+
+    def test_filters_are_noop_when_not_enforced(self):
+        """反向判据：开关关着时，这三处过滤**一个字节都不该改行为**。"""
+        self._enforce(False)
+        code, _rel = self._write(title="标签标题", visibility="private",
+                                 owner="C-OWNER", allow_unenforced_private=True)
+        other = {r[0] for r in fish.list_memories(
+            self.conn, project="P", limit=50, viewer_citizen_id="C-OTHER")}
+        self.assertIn(code, other,
+                      "开关关着时 list 居然过滤了——那不是等价旧行为")
+
 
 
 if __name__ == "__main__":
