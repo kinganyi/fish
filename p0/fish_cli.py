@@ -487,6 +487,13 @@ def main():
     p.add_argument("--role", default=None); p.add_argument("--host", default=None)
     p.set_defaults(func=_f.cmd_citizen_add)
 
+    # 第三轮评审：MCP 报错让人跑这个命令，而它当时不存在。
+    p = sub.add_parser("citizen-set-kind",
+                       help="给公民改 kind（主人本机操作；resident/role 可写规矩）")
+    p.add_argument("citizen_id")
+    p.add_argument("kind")
+    p.set_defaults(func=_f.cmd_citizen_set_kind)
+
     p = sub.add_parser("citizen-list")
     p.add_argument("--all", action="store_true",
                    help="连归档的公民一起列（归档是搬行，不在 citizens 里）")

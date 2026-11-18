@@ -111,7 +111,7 @@ from fish_attach import (AttachmentRejected, store_blob,  # F-P1-3
                          _attach_check_root)
 from fish_visibility import (_filter_by_visibility, _visibility_enforced,
                             _visibility_sql)  # F-P1-X：可见性执行层
-from fish_db import restore_citizen  # F-P1-7：公民还原（域函数住 fish_db）
+from fish_db import restore_citizen, set_citizen_kind  # F-P1-7：公民还原（域函数住 fish_db）
 from fish_kb import ( # noqa: F401
  KBError, KB_ACTIONS, KB_DEFAULT_IGNORE_GLOBS, KB_DEFAULT_MAX_OPEN_BYTES,
  KB_ERROR_CODES, KB_MAGIC_SIGNATURES, KB_MANDATORY_DENY, KB_MAX_CONTENT_BYTES,
@@ -8066,6 +8066,35 @@ def cmd_citizen_retire(args):
         print(f"（同时吊销 {revoked} 条活凭证）")
     print(f"已退役：{name}（{args.citizen_id}）— {args.reason or 'manual'}")
     conn.close()
+
+
+def cmd_citizen_set_kind(args):
+    """薄壳：实现住 `fish_db.set_citizen_kind`（fish.py 贴着行数窗口）。"""
+    conn = connect(Path(args.root))
+    conn.executescript(SCHEMA)
+    migrate(conn)
+    try:
+        kind = str(args.kind or "").strip().lower()
+        if kind not in KINDS:
+            print(f"错误：kind 只能是 {'/'.join(KINDS)}", file=sys.stderr)
+            raise SystemExit(2)
+        try:
+            res = set_citizen_kind(conn, args.citizen_id, kind)
+        except ValueError as exc:
+            print(f"错误：{exc}", file=sys.stderr)
+            raise SystemExit(2)
+        if res["changed"]:
+            print(f"已改：{res['citizen_id']}（{res['display_name']}）"
+                  f"{res['from']} → {res['to']}")
+            if res["to"] in ("resident", "role"):
+                print("　注意：这让它现在有权写 rule / identity"
+                      "（会进所有人的注入包）。")
+        else:
+            print(f"公民 {res['citizen_id']}（{res['display_name']}）"
+                  f"已经是 {res['to']}，无需改动")
+    finally:
+        conn.close()
+
 
 
 def cmd_citizen_list(args):

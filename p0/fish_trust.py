@@ -180,7 +180,7 @@ AUTHORIZED_CITIZEN_KINDS = ("resident", "role")
 # **一把钥匙在攻击者手里的门，不是门。**
 #
 # 所以真正的不变量是：**MCP 面只能自建 visitor**。resident / role 是"被授予"的，
-# 只能由主人在这台机器上动手（`fish citizen set-kind`），不能由调用方声明。
+# 只能由主人在这台机器上动手（`fish citizen-set-kind`），不能由调用方声明。
 SELF_ISSUABLE_KINDS = ("visitor",)
 
 

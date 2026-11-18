@@ -1326,7 +1326,7 @@ class FishServer:
 
                 "所有人的注入包；允许调用方自己声明，等于任何人与主人同等话语权。\n"
 
-                "  要获得：请主人在本机执行 `fish citizen set-kind <citizen_id> resident`。" % (kind,))
+                "  要获得：请主人在本机执行 `fish citizen-set-kind <citizen_id> resident`。" % (kind,))
         role = a.get("role")
         # host 只从入参取：FISH_ACTOR 是进程级启动参数，用它当"来源宿主"会把
         # 所有会话的公民都记成同一个宿主，等于换了个字段继续串号。
@@ -1663,7 +1663,7 @@ class FishServer:
 
                 "所有人的注入包；允许调用方自己声明，等于任何人与主人同等话语权。\n"
 
-                "  要获得：请主人在本机执行 `fish citizen set-kind <citizen_id> resident`。" % (kind,))
+                "  要获得：请主人在本机执行 `fish citizen-set-kind <citizen_id> resident`。" % (kind,))
 
         try:
             # `display_name` 不单独传：`start_session` 里它会由 `alias`（= session_name）

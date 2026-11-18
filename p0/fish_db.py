@@ -752,3 +752,44 @@ def restore_citizen(conn, citizen_id, *, dry_run=False) -> dict:
     return {"citizen_id": citizen_id, "dry_run": False,
             "restored": [citizen_id],
             "display_name": info.get("display_name")}
+
+
+def set_citizen_kind(conn, citizen_id, kind):
+    """给公民改 kind（第三轮评审）。
+
+    ## 为什么必须有它
+
+    我把 MCP 面收窄成"只能自建 visitor"，堵住了自封 resident 的洞——
+    **但同时也砍掉了正当路径**：主人再没有把某人升为 resident 的办法。
+    而 MCP 的报错文案就写着让主人跑 `fish citizen set-kind`，那个命令当时不存在。
+
+    **堵洞不该顺手砍掉正当能力；砍掉了就必须补回来，否则下一个人会绕过你的门。**
+    """
+    kinds = ("resident", "visitor", "role", "system")
+    kind = str(kind or "").strip().lower()
+    if kind not in kinds:
+        raise ValueError(f"kind 只能是 {'/'.join(kinds)}")
+    row = conn.execute(
+        "SELECT display_name,kind FROM citizens WHERE citizen_id=?",
+        (citizen_id,)).fetchone()
+    if row is None:
+        arch = conn.execute(
+            "SELECT 1 FROM citizens_archive WHERE citizen_id=?",
+            (citizen_id,)).fetchone()
+        if arch:
+            raise ValueError(
+                f"公民已归档：{citizen_id}。先 `fish citizen-restore {citizen_id}`")
+        raise ValueError(f"找不到公民 {citizen_id}（`fish citizen-list --all` 查编码）")
+    if row[1] == kind:
+        return {"citizen_id": citizen_id, "display_name": row[0],
+                "from": row[1], "to": kind, "changed": False}
+    conn.execute("UPDATE citizens SET kind=? WHERE citizen_id=?",
+                 (kind, citizen_id))
+    append_event(conn, "citizen.kind_changed",
+                 {"citizen_id": citizen_id, "evidence_level": "machine"},
+                 {"kind": "citizen", "id": citizen_id},
+                 {"display_name": row[0], "from": row[1], "to": kind,
+                  "by": "cli-owner"})
+    conn.commit()
+    return {"citizen_id": citizen_id, "display_name": row[0],
+            "from": row[1], "to": kind, "changed": True}
