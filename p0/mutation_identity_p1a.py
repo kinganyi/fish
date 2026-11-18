@@ -31,32 +31,49 @@ from pathlib import Path
 from mutation_source import SourceText
 
 HERE = Path(__file__).resolve().parent
-TARGET = HERE / "fish.py"
+# F-P1-9（2026-11-18 外部审查）：靶点分散在四个文件里，不再是单一 fish.py。
+# E-11 拆包把 schema DDL 搬进 fish_schema.py、SQL 辅助搬进 fish_common.py、
+# 视图拼装搬进 fish_db.py——而脚本还在改 fish.py，于是 9 条靶点全部 0 命中。
+TARGETS = ("fish.py", "fish_schema.py", "fish_common.py", "fish_db.py")
+
+
+def _path(name):
+    return HERE / name
+
+
+def _sha(name):
+    import hashlib
+    return hashlib.sha256(_path(name).read_bytes()).hexdigest()
 TEST_FILE = "test_identity_p1a.py"
 TEST_CLASS = "FishIdentityP1aTest"
 
-# 一条变异 = (编号, 守哪条判据, 目标用例, 原样片段, 改成什么, 说明)
+# 一条变异 = (编号, 守哪条判据, 目标用例, **目标文件**, 原样片段, 改成什么, 说明)
+# F-P1-9：第 4 项是目标文件——靶点分散在 schema/common/db 三个模块里。
 MUTATIONS = (
     (
         "M-A1", "A", "test_A_fresh_db_structure_complete",
+        "fish_schema.py",
         "_IDENTITY_TABLE_DDLS = (_CITIZENS_ARCHIVE_DDL, _AGENT_ACCOUNTS_DDL,\n",
         "_IDENTITY_TABLE_DDLS = (_CITIZENS_ARCHIVE_DDL,\n",
         "把 agent_accounts 的建表 DDL 从共用清单里删掉（新库/升级两条路径都没了）",
     ),
     (
         "M-A2", "A", "test_A_fresh_db_structure_complete",
-        '    "archived_at",\n)\n\n\ndef _citizens_all_view_ddl(',
-        ")\n\n\ndef _citizens_all_view_ddl(",
+        "fish_db.py",
+        '    "archived_at",\n)',
+        ")   # 变异：列契约少一列（与热表不再对齐）",
         "citizens_all 的列契约少一列（视图只剩 12 列，与热表不再对齐）",
     ),
     (
         "M-B", "B", "test_B_legacy_db_gains_columns",
+        "fish_schema.py",
         "_CITIZENS_NEW_COLS = (\n",
         "_CITIZENS_NEW_COLS = ()\n_DEAD_NEW_COLS = (\n",
         "摘掉 citizens 的 5 列补列清单（旧库升不上 13 列）",
     ),
     (
         "M-C", "C", "test_C_view_sees_hot_row",
+        "fish_db.py",
         'f"SELECT {cols} FROM citizens "\n'
         '            f"UNION ALL SELECT {cols} FROM citizens_archive")',
         'f"SELECT {cols} FROM citizens_archive "\n'
@@ -65,6 +82,7 @@ MUTATIONS = (
     ),
     (
         "M-D", "D", "test_D_archived_row_visible_once",
+        "fish_db.py",
         'f"UNION ALL SELECT {cols} FROM citizens_archive")',
         'f"UNION ALL SELECT {cols} FROM citizens_archive "\n'
         '            f"UNION ALL SELECT {cols} FROM citizens_archive")',
@@ -72,6 +90,7 @@ MUTATIONS = (
     ),
     (
         "M-E", "E", "test_E_open_stint_unique",
+        "fish_schema.py",
         '    "CREATE UNIQUE INDEX IF NOT EXISTS ux_stint_open "\n'
         '    "ON project_stints(citizen_id, project) WHERE to_ts IS NULL")',
         '    "SELECT 1")   # 变异：唯一索引不再建（第二个开档期不再被拒）',
@@ -79,12 +98,14 @@ MUTATIONS = (
     ),
     (
         "M-F1", "F", "test_F_session_token_checks",
+        "fish_schema.py",
         "  CHECK (channel != 'parent' OR parent_token IS NOT NULL),\n",
         "",
         "删掉「parent 必带 parent_token」那条 CHECK",
     ),
     (
         "M-F2", "F", "test_F_session_token_checks",
+        "fish_schema.py",
         "  CHECK (channel != 'parent' OR parent_token IS NOT NULL),\n"
         "  CHECK (channel != 'parent' OR evidence = 'inherited')\n",
         "  CHECK (channel != 'parent' OR parent_token IS NOT NULL)\n",
@@ -92,6 +113,7 @@ MUTATIONS = (
     ),
     (
         "M-G", "G", "test_G_existing_queries_untouched",
+        "fish_common.py",
         "\"SELECT citizen_id FROM citizens WHERE is_owner=1 AND status='active'\"",
         "\"SELECT citizen_id FROM citizens WHERE is_owner=1\"",
         "改掉一处既有查询（resolve_owner 的 owner 有效性判定）",
@@ -115,12 +137,12 @@ def run_test(test_name: str) -> tuple:
     return proc.returncode == 0, tail[:160]
 
 
-def apply_mutation(old: str, new: str) -> SourceText:
+def apply_mutation(fname: str, old: str, new: str) -> SourceText:
     """就地改源码，返回**改之前的字节句柄**（还原走 `restore()`，逐字节一致）。
 
     找不到片段/多处命中就抛错，绝不静默跳过。
     """
-    src = SourceText(TARGET)
+    src = SourceText(_path(fname))
     src.write(src.replaced(old, new))
     return src
 
@@ -132,8 +154,10 @@ def main(argv=None) -> int:
     if hasattr(sys.stdout, "reconfigure"):        # 控制台是 GBK，不让符号把输出搞崩
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    baseline = sha256(TARGET)
-    print(f"基线 fish.py：{len(TARGET.read_bytes())} 字节 / sha256 {baseline[:16]}…")
+    baselines = {name: _sha(name) for name in TARGETS}
+    for name in TARGETS:
+        print(f"基线 {name}：{len(_path(name).read_bytes())} 字节 / "
+              f"sha256 {baselines[name][:16]}…")
 
     # 环境自证：先跑一遍未变异的用例，绿了才有资格谈"变异后变红"
     passed, tail = run_test("test_A_fresh_db_structure_complete")
@@ -144,25 +168,25 @@ def main(argv=None) -> int:
 
     rows = []
     failures = []
-    for mut_id, judgment, test_name, old, new, note in MUTATIONS:
+    for mut_id, judgment, test_name, fname, old, new, note in MUTATIONS:
         if args.only and args.only != mut_id:
             continue
         original = None
         went_green = None
         tail = ""
         try:
-            original = apply_mutation(old, new)
+            original = apply_mutation(fname, old, new)
             went_green, tail = run_test(test_name)
         except Exception as exc:                   # noqa: BLE001 —— 任何异常都要先还原
             failures.append(f"{mut_id} 执行异常：{exc}")
         finally:
             if original is not None:
                 original.restore()
-            restored_ok = sha256(TARGET) == baseline
+            restored_ok = _sha(fname) == baselines[fname]
             if not restored_ok:
                 failures.append(
-                    f"{mut_id} 还原后 sha256 不一致！立即手工恢复："
-                    f"用 历史版本\\fish.py.<时间戳>.bak 覆盖 fish.py")
+                    f"{mut_id} 还原后 {fname} 的 sha256 不一致！立即手工恢复："
+                    f"用 历史版本\\{fname}.<时间戳>.bak 覆盖 {fname}")
 
         red = went_green is False and restored_ok
         if went_green is not False:
@@ -171,6 +195,7 @@ def main(argv=None) -> int:
         print(f"{mut_id} [判据 {judgment}] {'红（符合预期）' if red else '[X] 意外'}")
         print(f"   变异：{note}")
         print(f"   目标：{TEST_FILE}::{TEST_CLASS}::{test_name}")
+        print(f"   文件：{fname}")
         print(f"   结果：{tail}")
         print(f"   还原：{'sha256 与基线一致' if restored_ok else '[X] sha256 不一致'}\n")
 
@@ -179,8 +204,8 @@ def main(argv=None) -> int:
         print(f"{mut_id:<6}{judgment:<6}{'红/预期' if red else '[X]意外':<12}"
               f"{'已还原' if restored_ok else '[X]未还原':<12}{note}")
     print("=" * 78)
-    same = sha256(TARGET) == baseline
-    print(f"最终 sha256：{sha256(TARGET)[:16]}… {'（与基线一致）' if same else '（[X] 与基线不一致）'}")
+    all_same = all(_sha(n) == baselines[n] for n in TARGETS)
+    print("最终 sha256：" + ("全部与基线一致" if all_same else "[X] 有文件与基线不一致"))
     if failures:
         print("\n失败项：")
         for item in failures:
