@@ -424,6 +424,42 @@ _KB_VAULT_DDL = """CREATE TABLE IF NOT EXISTS kb_vault (
   updated_at     TEXT NOT NULL
 );"""
 
+_KB_ASSET_DDL = """CREATE TABLE IF NOT EXISTS kb_asset (
+  vault_id      TEXT NOT NULL,
+  rel_path      TEXT NOT NULL,
+  mtime         REAL,
+  size          INTEGER NOT NULL DEFAULT 0,
+  content_hash  TEXT,
+  kind          TEXT NOT NULL DEFAULT 'other'
+                CHECK (kind IN ('image','video','audio','doc','archive','other')),
+  mime          TEXT,
+  width         INTEGER,
+  height        INTEGER,
+  duration_ms   INTEGER,
+  referenced_by TEXT NOT NULL DEFAULT '[]',
+  thumb_rel     TEXT,
+  indexed_at    TEXT,
+  status        TEXT NOT NULL DEFAULT 'active'
+                CHECK (status IN ('active','missing','error')),
+  detail        TEXT,
+  PRIMARY KEY (vault_id, rel_path)
+);"""
+
+# W1（2026-11-18）：资产层。`kb_index` 只装笔记（列全是 headings/summary/excerpt 这种
+# 笔记语义，二进制没处放），所以 10.7 GB 里 2,230 个文件对 fish 完全不可见。
+#
+# 四个字段不可省：
+#   content_hash —— ①去重 ②变更检测（mtime+size 会漏：同大小改内容）③迁移校验的唯一硬证据
+#   referenced_by —— "这个 641MB 的 PV 有没有被任何笔记引用"；没人引用才可归档
+#   kind        —— 由**魔术字节**判定。实测库里 93 个 .bin/.pn 其实是 PNG，
+#                  按扩展名会把它们判成 other，缩略图/尺寸/引用解析全失效
+#   thumb_rel   —— 5,960 MB 的 PNG 平均 4.6MB/张，前端直接浏览会卡死
+_KB_ASSET_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_kb_asset_kind ON kb_asset(vault_id, kind, status);",
+    "CREATE INDEX IF NOT EXISTS idx_kb_asset_hash ON kb_asset(content_hash);",
+    "CREATE INDEX IF NOT EXISTS idx_kb_asset_status ON kb_asset(vault_id, status);",
+)
+
 _KB_ACCESS_DDL = """CREATE TABLE IF NOT EXISTS kb_access (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   vault_id    TEXT NOT NULL,
@@ -468,7 +504,9 @@ GROUP BY vault_id, path;"""
 _KB_PATH_STATS_COLUMNS = ("vault_id", "path", "hits", "last_at", "open_count",
                           "write_count", "rollback_count", "readers")
 
-_KB_SCHEMA = "\n" + "\n\n".join((_KB_VAULT_DDL, _KB_ACCESS_DDL)) + "\n"
+_KB_SCHEMA = ("\n" + "\n\n".join((_KB_VAULT_DDL, _KB_ACCESS_DDL))
+             + "\n" + _KB_ASSET_DDL
+             + "\n" + "\n".join(_KB_ASSET_INDEXES) + "\n")
 
 _KB_VAULT_COLS = ("vault_id", "name", "path", "path_key", "mode", "ignore_globs",
                   "max_open_bytes", "is_default", "last_scan_at", "last_scan_files",

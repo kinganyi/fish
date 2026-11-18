@@ -110,6 +110,9 @@ class FoundationTest(unittest.TestCase):
         self.conn.execute("DROP VIEW IF EXISTS kb_path_stats")
         self.conn.execute("DROP TABLE kb_access")
         self.conn.execute("DROP TABLE kb_vault")
+        # 2026-11-18（W1）：`kb_asset` 进了 SCHEMA，必须一并登记到这张"旧库应缺"的清单里，
+        # 否则前置条件永远不成立。新 kb 表都要加这一行——这是"迁移只加在链尾"那条纪律的镜像。
+        self.conn.execute("DROP TABLE IF EXISTS kb_asset")
         self.conn.commit()
         missing = {r[0] for r in self.conn.execute(
             "SELECT name FROM sqlite_master WHERE name LIKE 'kb_%'")}
