@@ -30,6 +30,7 @@
 import gzip
 import ast
 import builtins
+import hashlib
 import json
 import re
 import importlib.util
@@ -445,6 +446,23 @@ class SplitDependencyTest(unittest.TestCase):
 
 
 
+# ---------------------------------------------------------------- 外部锚
+#
+# 第三轮评审证伪了棘轮那 6 条判据：**哈希链由测试自己算**，算法公开、
+# 无外部参照——攻击者改完 JSON 重算一遍链就通过了。
+# 而 `test_raising_the_window_needs_a_new_entry` 的 docstring 写着
+# "重算整条链也会红"，实现却只查 max 是否出现在尾条 new 的数字里——**那句话是假的**。
+#
+# 修法：把**期望的链头与长度写死在测试里**。这样改历史要同时改两个文件
+# （JSON + 这个字面量），而改测试文件在评审里藏不住。
+#
+# 这不是密码学意义上的防篡改（人能重算并改字面量），但它把"改一个数字"
+# 变成"必须动一个看起来就不是数据文件的测试文件"。**诚实地说，这是威慑，不是证明。**
+EXPECTED_CHAIN_HEAD = "62ae7696cd821b845c27a2dd1726984f820a551792179b6c13a8fe7f279ea37b"
+EXPECTED_HISTORY_LEN = 1
+# 与上面链头同一时刻的 max。新增历史前，max 不许偏离它。
+EXPECTED_RATCHET_MAX_AT_ANCHOR = 12700
+
 class J4RatchetTest(unittest.TestCase):
     """J4 窗口的**棘轮**（F-P1-10，2026-11-18 外部审查）。
 
@@ -523,20 +541,57 @@ class J4RatchetTest(unittest.TestCase):
                 f"  记录 {h.get('sha256')}\n  实算 {want}")
             prev = want
 
-    def test_raising_the_window_needs_a_new_entry(self):
-        """抬窗必须**新增**一条历史，不能改旧的。
+    def test_chain_head_matches_the_pinned_anchor(self):
+        """**核心**：链头必须等于测试里写死的那个值。
 
-        这是上一条的语义版：即便有人重算了整条链，只要他抬了窗却**没加新记录**，
-        这条也会红——因为长度没变而值变了。
+        第三轮评审实测的绕过：改 `max` → 就地改尾条 `new` → **重算整条链** → 6 条全绿。
+        原因是链由测试自己算，没有任何外部参照。
+
+        现在链头钉在测试文件里。要绕过就得同时改 JSON 和这个字面量——
+        而后者在评审里一眼能看见（它是测试文件，不是数据文件）。
         """
         d = self._data()
-        m = re.search(r'"max":\s*(\d+)', (self.RATCHET).read_text(encoding="utf-8"))
-        self.assertIsNotNone(m)
+        prev = ""
+        for h in d["history"]:
+            raw = "|".join([prev, str(h.get("date")), str(h.get("field")),
+                            str(h.get("old")), str(h.get("new")), str(h.get("reason"))])
+            prev = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        self.assertEqual(prev, EXPECTED_CHAIN_HEAD,
+                         "history 链头与测试里钉的值不一致——历史被改过。\n"
+                         "  如果你的改动是正当的，请同时更新 EXPECTED_CHAIN_HEAD；\n"
+                         "  那次更新会在评审里被看见，这正是它存在的意义。")
+
+    def test_history_length_never_shrinks(self):
+        """历史只许变长。删条目（不是追加）会红。
+
+        与链头互补：链头防"改内容"，长度防"删记录"。
+        只抬窗不加记录的绕过会在长度这条红。
+        """
+        d = self._data()
+        self.assertGreaterEqual(
+            len(d["history"]), EXPECTED_HISTORY_LEN,
+            f"history 从 {EXPECTED_HISTORY_LEN} 条变成了 {len(d['history'])} 条——"
+            "只能追加，不能删")
+
+    def test_raising_the_window_needs_a_new_entry(self):
+        """抬窗必须**新增**一条历史记录。
+
+        第三轮评审指出原版 docstring 声称"重算整条链也会红"是**假的**：
+        实现只查 `max` 是否出现在尾条 `new` 的数字里，改尾条即通过。
+        现在改成查**长度必须增长**——改尾条不会让长度变长。
+        """
+        d = self._data()
+        last = d["history"][-1]
         recorded = sorted(int(x) for x in
-                          re.findall(r"(\d{4,})", str(d["history"][-1]["new"])))
+                          re.findall(r"(\d{4,})", str(last["new"])))
         self.assertIn(d["max"], recorded,
-                      f"当前 max={d['max']} 不在最新一条历史 {d['history'][-1]['new']} 里"
+                      f"当前 max={d['max']} 不在最新一条历史 {last['new']} 里"
                       "——抬了窗却没记新账")
+        if len(d["history"]) == EXPECTED_HISTORY_LEN:
+            self.assertEqual(
+                d["max"], EXPECTED_RATCHET_MAX_AT_ANCHOR,
+                "在**没新增历史**的情况下 max 变了——抬窗必须写一条新记录")
+
 
 
 class SplitSizeTest(unittest.TestCase):
