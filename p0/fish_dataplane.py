@@ -36,6 +36,7 @@ import fnmatch
 import hashlib
 import mimetypes
 import os
+import re
 from pathlib import Path
 
 from fish_common import now_utc, ulid
@@ -302,6 +303,211 @@ def scan_vault(conn, vault_row, *, dry_run=True, compute_hash=False,
     stats["ok"] = True
     stats["dry_run"] = bool(dry_run)
     stats["written"] = 0 if dry_run else len(rows)
+    return stats
+
+
+# ============================================================== W4：引用反查 + 缩略图
+#
+# 2026-11-18（W4）。两件事：
+#   ① `referenced_by` —— "这个 641 MB 的 PV 有没有被任何笔记用到"
+#   ② 缩略图 —— 5,960 MB 的 PNG 平均 4.6 MB/张，前端直接渲染会卡死
+#
+# ## 引用写法实测（不要凭想象）
+#
+# 对真实库 318 篇 md 全量扫描，三种写法各出现：
+#     ![alt](_media/xxx.mp4)    2,151 处   ← **主流**
+#     [[笔记名]]                   928 处   （主要指向笔记，不是资产）
+#     ![[资产]]                      0 处
+#
+# 所以解析入口必须以 **Markdown 图片/链接** 为主，wikilink 作补充。
+# 只做 wikilink 会漏掉 100% 的资产引用。
+
+_MD_REF_RE = re.compile(r"!?\[[^\]]*\]\(([^)\s]+)(?:\s+[\"'][^\"']*[\"'])?\)")
+_WIKI_EMBED_RE = re.compile(r"!\[\[([^\]\|#]+)")
+
+
+def _norm_slash(p):
+    """折叠 `a/../b` 这类路径（纯字符串层面，不碰盘符）。"""
+    parts = []
+    for seg in str(p).replace("\\", "/").split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(seg)
+    return "/".join(parts)
+
+
+def _norm_ref(raw):
+    """把引用串规范化成可比较的相对路径（去锚点/查询串/URL 解码/统一斜杠）。"""
+    from urllib.parse import unquote
+    s = str(raw or "").strip()
+    if not s or s.startswith(("http://", "https://", "mailto:", "data:")):
+        return None
+    s = s.split("#", 1)[0].split("?", 1)[0]
+    try:
+        s = unquote(s)
+    except Exception:      # A档：百分号解码失败只说明不含编码字符，原样用即可
+        pass
+    s = s.replace("\\", "/")
+    while s.startswith("./"):
+        s = s[2:]
+    s = s.lstrip("/")
+    return _norm_slash(s) or None
+
+
+def _resolve_ref(note_rel, ref, known):
+    """把笔记内的引用解析成 vault 内的资产 rel_path。
+
+    Obsidian 的解析规则很宽：相对路径、绝对路径、同名文件。这里按最常见到最宽松：
+      ① 相对笔记所在目录
+      ② 相对 vault 根
+      ③ basename 唯一时按同名匹配（不唯一就不猜，避免误连）
+    """
+    base = note_rel.rsplit("/", 1)[0] if "/" in note_rel else ""
+    if base:
+        c = _norm_slash(base + "/" + ref)
+        if c in known:
+            return c
+    c = _norm_slash(ref)
+    if c in known:
+        return c
+    name = ref.rsplit("/", 1)[-1]
+    if not name:
+        return None
+    hits = [k for k in known if k.rsplit("/", 1)[-1] == name]
+    return hits[0] if len(hits) == 1 else None
+
+
+def build_referenced_by(conn, vault_row, *, write=True) -> dict:
+    """从所有笔记反解资产引用，写入 `kb_asset.referenced_by`。
+
+    为什么这个字段不可省：10.7 GB 里最大的是 641 MB 的 PV。**没人引用的资产
+    才是可归档的**——没有这张反查表，以后瘦身无从下手。
+
+    `unreferenced` 是本函数最要紧的读数。
+    """
+    import json as _json
+    vid = vault_row["vault_id"]
+    root = Path(str(vault_row["path"]))
+    known = {r[0] for r in conn.execute(
+        "SELECT rel_path FROM kb_asset WHERE vault_id=?", (vid,))}
+    if not known:
+        return {"ok": False, "reason": "no_assets"}
+
+    refs = {}
+    notes = 0
+    unresolved = 0
+    for dirpath, _dn, fns in os.walk(root):
+        for fn in sorted(fns):
+            if not fn.lower().endswith((".md", ".markdown")):
+                continue
+            p = Path(dirpath) / fn
+            try:
+                rel = p.relative_to(root).as_posix()
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            notes += 1
+            found = set(_MD_REF_RE.findall(text)) | set(_WIKI_EMBED_RE.findall(text))
+            for raw in found:
+                ref = _norm_ref(raw)
+                if not ref:
+                    continue
+                hit = _resolve_ref(rel, ref, known)
+                if hit:
+                    refs.setdefault(hit, set()).add(rel)
+                else:
+                    unresolved += 1
+
+    if write:
+        conn.execute("UPDATE kb_asset SET referenced_by='[]' WHERE vault_id=?", (vid,))
+        for asset_rel, srcs in refs.items():
+            conn.execute(
+                "UPDATE kb_asset SET referenced_by=? WHERE vault_id=? AND rel_path=?",
+                (_json.dumps(sorted(srcs), ensure_ascii=False), vid, asset_rel))
+        conn.commit()
+
+    return {"ok": True, "notes": notes, "assets": len(known),
+            "referenced": len(refs), "unreferenced": len(known) - len(refs),
+            "refs": sum(len(v) for v in refs.values()), "unresolved": unresolved}
+
+
+# ------------------------------------------------------------------ 缩略图
+THUMB_MAX = 512
+THUMB_QUALITY = 80
+
+
+def make_thumbnails(conn, vault_row, *, data_root, limit=0, dry_run=False,
+                    kinds=("image",)) -> dict:
+    """为 image（可选 video）生成 WebP 缩略图。
+
+    ## 为什么默认只做图片
+
+    视频抽帧要 ffmpeg，fish 现在没有这条依赖。**宁可如实少做，也不假装做了**——
+    所以 `kinds` 默认只有 `image`。传了 `video` 但没有 ffmpeg 时，会**计数为 skipped**
+    并保留 `video_skipped` 读数，不静默当成成功。
+
+    ## 为什么缩略图不进资产体积
+
+    缩略图是**派生数据**，算进去会让"知识库多大"失真。所以存在
+    `<data_root>/thumb/`，`kb_asset.thumb_rel` 只记相对路径，不动 `size`。
+
+    生成失败**不阻断索引**：`thumb_rel` 留空、`status` 仍 active，只计 failed。
+    """
+    vid = vault_row["vault_id"]
+    root = Path(str(vault_row["path"]))
+    out_dir = Path(str(data_root)) / "thumb"
+    kinds = tuple(kinds or ("image",))
+    sql = ("SELECT rel_path, kind FROM kb_asset WHERE vault_id=? AND status='active' "
+           "AND kind IN (" + ",".join("?" * len(kinds)) + ")")
+    args = (vid,) + kinds
+    if limit:
+        sql += " LIMIT %d" % int(limit)
+    rows = conn.execute(sql, args).fetchall()
+
+    stats = {"ok": True, "candidates": len(rows), "made": 0, "skipped": 0,
+             "failed": 0, "video_skipped": 0,
+             "bytes_in": 0, "bytes_out": 0, "dry_run": bool(dry_run),
+             "kinds": list(kinds)}
+    if dry_run:
+        return stats
+    try:
+        from PIL import Image
+    except ImportError:
+        stats["ok"] = False
+        stats["reason"] = "pillow_missing"
+        return stats
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for rel, kind in rows:
+        src = root / rel
+        if not src.exists():
+            stats["skipped"] += 1
+            continue
+        if kind == "video":
+            stats["video_skipped"] += 1
+            stats["skipped"] += 1
+            continue
+        try:
+            stem = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16]
+            dst = out_dir / (stem + ".webp")
+            with Image.open(src) as im:
+                if im.mode not in ("RGB", "RGBA"):
+                    im = im.convert("RGB")
+                im.thumbnail((THUMB_MAX, THUMB_MAX), Image.LANCZOS)
+                im.save(dst, "WEBP", quality=THUMB_QUALITY, method=4)
+            stats["made"] += 1
+            stats["bytes_in"] += src.stat().st_size
+            stats["bytes_out"] += dst.stat().st_size
+            conn.execute(
+                "UPDATE kb_asset SET thumb_rel=? WHERE vault_id=? AND rel_path=?",
+                (dst.relative_to(out_dir).as_posix(), vid, rel))
+        except Exception:
+            stats["failed"] += 1
+    conn.commit()
     return stats
 
 
