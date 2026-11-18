@@ -41,6 +41,20 @@ if str(HERE) not in sys.path:
 import fish  # noqa: E402
 
 
+
+def _all_domain_src():
+    """`fish.py` + 拆分出去的模块的源码拼接。
+
+    第四轮评审 🟠-4 指出清单只扫 `fish.py`——F-P1-10 把 `_lesson_rows` /
+    `_rule_rows` 搬到 `fish_inject.py` 之后，这条范围问题被暴露出来了。
+    """
+    out = []
+    for name in ("fish.py", "fish_inject.py"):
+        p = HERE / name
+        if p.is_file():
+            out.append(p.read_text(encoding="utf-8"))
+    return "\n".join(out)
+
 class PrivateWriteGuardTest(unittest.TestCase):
 
     def setUp(self):
@@ -446,7 +460,7 @@ class VisibilityReadPathInventoryTest(unittest.TestCase):
 
     def _querying_title_funcs(self):
         import re as _re
-        src = (HERE / "fish.py").read_text(encoding="utf-8")
+        src = _all_domain_src()
         lines = src.split("\n")
         out = set()
         for i, ln in enumerate(lines):
@@ -476,7 +490,7 @@ class VisibilityReadPathInventoryTest(unittest.TestCase):
 
     def test_declared_funcs_still_exist(self):
         """反向判据：名单里点名的函数必须还在（改名/删除要同步）。"""
-        src = (HERE / "fish.py").read_text(encoding="utf-8")
+        src = _all_domain_src()
         import re as _re
         defs = set(_re.findall(r"^def ([A-Za-z_][A-Za-z0-9_]*)", src, _re.M))
         missing = sorted((set(FILTERED) | set(BY_EXACT_CODE)) - defs)
@@ -488,7 +502,7 @@ class VisibilityReadPathInventoryTest(unittest.TestCase):
 
         否则名单会退化成"我说它过滤了"——正是这一路踩过的坑。
         """
-        src = (HERE / "fish.py").read_text(encoding="utf-8")
+        src = _all_domain_src()
         lines = src.split("\n")
         callers = set()
         for i, ln in enumerate(lines):
