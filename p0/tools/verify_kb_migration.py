@@ -23,6 +23,16 @@ import os
 import sqlite3
 import sys
 
+# 第三轮评审：本文件打印 ✓ / ✗ / ⚠ 这类符号，而 Windows 控制台默认是 GBK，
+# 直接 print 会抛 UnicodeEncodeError → **退出码 1**，看起来像"检查失败"。
+# 这是本项目反复踩的坑：修了 fish.py，没修 tools/*.py。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass  # A档：拿不到可重配的流就按原样
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 P0 = os.path.dirname(HERE)
 DB = os.path.join(P0, "data", "index.sqlite")

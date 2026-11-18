@@ -166,15 +166,30 @@ class AttachmentGuardTest(unittest.TestCase):
         self.assertEqual(stored, payload, "落盘内容与源不一致")
 
     def test_no_temp_leftovers(self):
-        """**流式的可观测证据**：`.tmp` 目录必须被清空。
+        """**流式的可观测证据**：`.tmp` 目录必须存在过、且现在是空的。
 
-        整份读的旧实现根本不会创建 `.tmp`，所以"有 .tmp 且为空"证明走的是
-        分块 + 原子 rename 那条路径。
+        ## 第三轮评审：这条判据原来是假的
+
+        原写法是：
+
+            leftovers = list(tmp_dir.glob("*.part")) if tmp_dir.is_dir() else []
+            self.assertEqual(leftovers, [])
+
+        `.tmp` **不存在**时 `glob` 走 `else []`，`assertEqual([], [])` 恒过。
+        于是把实现换回 `read_bytes()`（根本不建 `.tmp`）它照样绿——
+        评审官实测：这**不是**"改坏了会红"的判据。
+
+        而且它的 docstring 自己写着"**有** .tmp 且为空"才算证据——
+        **代码从不断言"有"**。陈述与实现不一致的判据最危险：
+        读的人以为这里有检查。
         """
-        p = self._mk("t.txt", b"z" * 100)
+        p = self._mk("stream.txt", b"z" * 100)
         A.store_blob(self.root, p, conn=self.conn)
         tmp_dir = self.root / "blobs" / ".tmp"
-        leftovers = list(tmp_dir.glob("*.part")) if tmp_dir.is_dir() else []
+        self.assertTrue(tmp_dir.is_dir(),
+                        "`.tmp` 目录不存在——说明走的不是分块+原子 rename 那条路径，"
+                        "本判据失去靶点（判不到，不是通过）")
+        leftovers = list(tmp_dir.glob("*.part"))
         self.assertEqual(leftovers, [], f"留下了半个文件：{leftovers}")
 
     def test_dedup_stores_once(self):

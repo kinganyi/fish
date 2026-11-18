@@ -46,6 +46,19 @@ import os
 import subprocess
 import sys
 
+# 第三轮评审：本文件打印 ✓ / ✗ 这些符号，而 Windows 控制台默认是 GBK，
+# 直接 print 会抛 UnicodeEncodeError → **退出码 1**。
+# 这是本项目已经踩过的坑（`fish.py` 与几个 mutation 脚本都修过），
+# 但当时只修了那两个脚本，没扩到 `tools/*.py`——于是这条红在第三轮评审时
+# 是"今天唯一失败的判据"。教训：修一个坑时要问"这个坑还在哪些同族文件里"。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass  # A档：拿不到可重配的流（如已被重定向到 StringIO）就按原样
+
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 P0 = os.path.dirname(HERE)
 

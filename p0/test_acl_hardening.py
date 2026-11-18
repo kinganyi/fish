@@ -148,5 +148,43 @@ class DataAclTest(unittest.TestCase):
                          f"复查工具报不合规：\n{(r.stdout or '')[-600:]}")
 
 
+class ToolsConsoleEncodingTest(unittest.TestCase):
+    """第三轮评审：`tools/*.py` 在 GBK 控制台打印非 ASCII 会崩。
+
+    实测：`python tools/acl_harden.py --verify` 在**不带** `PYTHONIOENCODING`
+    的环境下抛 `UnicodeEncodeError: 'gbk' codec can't encode character '\u2713'`
+    → **退出码 1**，成为第三轮评审那一刻唯一失败的判据。
+
+    这个坑本项目修过（`fish.py` 与几个 mutation 脚本），但**没扩到 `tools/*.py`**。
+    所以这条判据不针对 acl_harden，而是扫**整个 tools 目录**：
+    凡打印非 ASCII 符号的脚本，必须自己处理编码。
+    """
+
+    def test_tools_do_not_crash_on_gbk_console(self):
+        import os as _os
+        import subprocess as _sp
+        tools = sorted(p for p in (HERE / "tools").glob("*.py"))
+        self.assertTrue(tools, "tools 目录下没有 py 文件——判据失去靶点")
+        offenders = []
+        for p in tools:
+            src = p.read_text(encoding="utf-8", errors="replace")
+            # 只查"会打印非 ASCII"的脚本：没有这些符号就没有编码风险
+            if not any(ch in src for ch in ("✓", "✗", "⚠", "─")):
+                continue
+            if "reconfigure" in src:
+                continue          # 自己处理了编码
+            offenders.append(p.name)
+        # 反向判据：必须有脚本打印非 ASCII，否则这条判据扫了个空
+        printing = [p.name for p in tools
+                    if any(ch in p.read_text(encoding="utf-8", errors="replace")
+                           for ch in ("✓", "✗", "⚠", "─"))]
+        self.assertTrue(printing,
+                        "tools 里没有脚本打印非 ASCII 符号——判据失去靶点，"
+                        "不是通过")
+        self.assertEqual(offenders, [],
+                         f"这些脚本打印非 ASCII 却没处理编码，"
+                         f"在 GBK 控制台会崩：{offenders}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
