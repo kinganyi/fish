@@ -2108,6 +2108,21 @@ class FishServer:
             for row in res.get("unmapped_cwds") or []:
                 lines.append(f"⚠ 未归属 cwd：{row['workspace']}（{row['sessions']} 会话）")
             return "\n".join(lines) + "\n"
+        # ---- F-P0-4（2026-11-18 外部审查）：语料按公民隔离 ----
+        #
+        # 审查方实测：用 VIEWER-OTHER 这个公民能读到另一个公民 496 字符的段落。
+        # 根因是 citizen_id 一直只被传给访问日志，从没参与过滤。
+        #   无凭证 → 明确拒绝并指引取 token（用户拍板：不静默降级成只看未归属，
+        #             那会让「查不到」看起来像「没有」）。
+        #   有凭证 → 强制 citizen 过滤，只能读自己。
+        # stats 不设门：只给聚合读数，不含正文也不按公民切分（有意保留）。
+        if action in ("search", "read") and not citizen:
+            raise ValueError(
+                "语料检索需要有效凭证（会话 token）：\n"
+                "　· MCP：调用参数加 `token=<fsh_…>`\n"
+                "　· CLI：`fish session start --project <前缀>` 后导出 FISH_SESSION_TOKEN\n"
+                "　为什么：语料是会话逐字稿，不按公民隔离等于任何调用方都能读到别人的整段对话。")
+        
         if action == "search":
             query = (a.get("query") or "").strip()
             if not query:
@@ -2123,6 +2138,9 @@ class FishServer:
                 if key != "project" and value == "":
                     continue
                 filters[key] = [str(value)]
+            # F-P0-4：强制按公民过滤。调用方给的 filters 里即使有 citizen
+            # 也一律以凭证为准——否则「参数覆盖」就是新的绕过口。
+            filters["citizen"] = [str(citizen)]
             res = fish_corpus.search(
                 query, filters=filters or None,
                 limit=self._kb_int_arg(a, "limit", default=8, lo=1,
@@ -2158,6 +2176,14 @@ class FishServer:
                              + (f"（候选：{', '.join(exc.candidates)}）"
                                 if exc.candidates else ""))
         # P0-2/D12：读了正文 = 接受了那条推送（精确 code，不用前缀）
+        # F-P0-4：pointer 是「任意公民的任意段」的地址，读之前必须校验归属。
+        # 比「能读到再算」少泄露一次存在性。
+        seg_citizen = str(res.get("citizen_id") or "")
+        if seg_citizen != str(citizen):
+            raise ValueError(
+                "这个 pointer 指向的段落不属于当前公民，拒绝读取。\n"
+                "　（未归属的段落也不给读：它们同样可能是别人的会话。）")
+        
         try:
             if ident.status == IDENTITY_VALID:
                 fish.mark_push_accepted(self.conn, [res["code"]],
