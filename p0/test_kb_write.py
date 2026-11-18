@@ -148,10 +148,75 @@ class KBWriteTest(unittest.TestCase):
             self._write(content="---\ntags: x\n---\n\n正文\n")
         self.assertEqual(ctx.exception.code, "bad_frontmatter")
 
-    def test_non_scalar_frontmatter_is_rejected(self):
-        with self.assertRaises(fish.KBError) as ctx:
-            self._write(frontmatter={"tags": ["a", "b"]})
-        self.assertEqual(ctx.exception.code, "bad_frontmatter")
+    # ============================================================ W0 · frontmatter 列表支持
+    #
+    # 2026-11-18：契约变更（用户授权技术决策，选方案 B）。
+    # 旧契约是"frontmatter 只接受标量，列表一律拒绝"——那条规则在实测面前站不住：
+    # 安逸知识库 318 篇里 **287 篇（90%）** 用 YAML 列表写 tags，拒绝它们等于
+    # "安全地什么也做不了"，而更糟的是旧实现**不拒绝而是写坏**（只换首行，留下孤儿列表项）。
+
+    def test_nested_frontmatter_is_still_rejected(self):
+        """嵌套结构仍然拒绝——支持列表不等于支持任意 YAML。
+
+        不引入 PyYAML 的代价是"只覆盖两种形态"，这个边界必须被钉住，
+        否则以后有人以为"既然支持列表了，那字典也行"。
+        """
+        for bad in ({"a": 1}, [["x"], ["y"]]):
+            with self.assertRaises(fish.KBError) as ctx:
+                self._write(frontmatter={"tags": bad})
+            self.assertEqual(ctx.exception.code, "bad_frontmatter", f"{bad!r} 应被拒绝")
+
+    def _fm_of(self, rel):
+        """读回落盘文件的 frontmatter 段（含 --- 定界），用真 YAML 解析验证合法性。"""
+        import yaml
+        text = (self.vault_dir / rel).read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---"), f"文件不以 frontmatter 开头：{text[:40]!r}")
+        parts = text.split("---", 2)
+        self.assertGreaterEqual(len(parts), 3, "frontmatter 未闭合")
+        return yaml.safe_load(parts[1])
+
+    def test_frontmatter_list_roundtrip_is_parseable(self):
+        """写入列表后，**真 YAML 解析器**必须能解析，且值仍是 list。
+
+        为什么必须用真解析器而不是正则：旧实现"看着像对的"——
+        `tags: 新标签` 单独看完全正常，错的是它后面的孤儿项。正则抓不到这种错。
+        """
+        self._write(frontmatter={"tags": ["入口", "自我"]})
+        fm = self._fm_of("20-PPT/新笔记.md")
+        self.assertEqual(fm.get("tags"), ["入口", "自我"],
+                         f"tags 不是列表（可能被写成字符串）：{fm.get('tags')!r}")
+
+    def test_frontmatter_list_to_scalar_leaves_no_orphan(self):
+        """**这条是 2026-11-18 那个缺陷的直接探针。**
+
+        旧实现：对 `tags:` 列表写标量 → 只替换 `tags:` 那一行，后面 `- 入口`
+        变成孤儿，YAML 解析报错。实测影响 287/318 篇（90%）。
+
+        现在：块感知替换，连列表项一起换掉。
+        """
+        import yaml
+        target = self.vault_dir / "20-PPT" / "新笔记.md"
+        target.write_text("---\ntags:\n  - 入口\n  - 自我\n---\n\n正文\n", encoding="utf-8")
+        head = ["---", "tags:", "  - 入口", "  - 自我", "---"]
+        out = fish._kb_merge_frontmatter(head, {"tags": "单一"})
+        text = "\n".join(out)
+        parts = text.split("---", 2)
+        fm = yaml.safe_load(parts[1])   # 有孤儿项时这里会抛 YAMLError
+        self.assertEqual(fm.get("tags"), "单一",
+                         f"标量替换后 tags 应为 '单一'，实际 {fm.get('tags')!r}")
+        self.assertNotIn("- 入口", text, "旧列表项没被清掉（孤儿）")
+
+    def test_frontmatter_unknown_keys_untouched(self):
+        """R7 边界不变：未知键、注释、空行一字不动。"""
+        head = ["---", "# 注释", "tags:", "  - 入口", "cssclasses:", "  - wide",
+                "", "custom: 保留我", "---"]
+        out = fish._kb_merge_frontmatter(head, {"tags": ["新"]})
+        self.assertIn("# 注释", out)
+        self.assertIn("", out)
+        self.assertIn("custom: 保留我", out)
+        self.assertIn("  - wide", out)
+        self.assertIn("  - 新", out)
+        self.assertNotIn("  - 入口", out)
 
     def test_content_too_large_is_rejected(self):
         big = "字" * (fish.KB_MAX_CONTENT_BYTES // 3 + 10)

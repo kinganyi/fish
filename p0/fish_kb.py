@@ -2254,8 +2254,66 @@ def _kb_split_frontmatter(text) -> dict:
     return {"head": [], "body": norm, "ok": False, "has": True}
 
 
+def _kb_render_fm_value(key, value) -> list:
+    """把一个 frontmatter 值渲染成 1..N 行（标量一行，列表多行）。
+
+    ## 2026-11-18（W0）为什么必须支持列表
+
+    实测：安逸知识库 318 篇里 **287 篇（90%）** 用 YAML 列表写 tags：
+
+        tags:
+          - 入口
+          - 自我
+
+    旧实现只处理单行标量，遇到这种文件改写 `tags` 时**只替换 `tags:` 那一行**，
+    下面的 `- 入口` / `- 自我` 变成孤儿：
+
+        tags: 新标签        ← 标量
+          - 入口             ← 孤儿，YAML 解析报错
+          - 自我
+
+    根因不是"没支持列表"，是**按行替换没有"块"的概念**。所以这里连同
+    `_kb_merge_frontmatter` 一起改成**块感知**。
+
+    仍然不引入 PyYAML：只覆盖 `key: value` 与 `key:` + `  - item` 两种形态，
+    嵌套/锚点/多行字符串一律不碰（未知键原样保留，R7 的边界不变）。
+    """
+    if isinstance(value, (list, tuple)):
+        items = list(value)
+        if not items:
+            return [f"{key}: []"]
+        out = [f"{key}:"]
+        for item in items:
+            if isinstance(item, (list, tuple, dict)):
+                raise KBError("bad_frontmatter",
+                              f"frontmatter 列表项只能是标量：{key!r}",
+                              hint="嵌套结构不被支持；要放复杂数据请写进正文")
+            rendered = _kb_quote(_kb_scalar(item))
+            out.append(f"  - {rendered}")
+        return out
+    return [f"{key}: {_kb_quote(_kb_scalar(value))}"]
+
+
+def _kb_is_fm_continuation(line) -> bool:
+    """这一行是不是上一个键的续行（缩进行 或 列表项）。"""
+    t = str(line)
+    if not t.strip():
+        return False
+    if t.startswith((" ", "\t")):
+        return True
+    return t.lstrip().startswith("- ")
+
+
 def _kb_merge_frontmatter(head, updates) -> list:
     """在已有 head 上**只增改给定键**：未知键、注释、空行一字不动（R7）。
+
+    ## 2026-11-18（W0）块感知替换
+
+    旧实现按行匹配 `_KB_FM_KEY_RE`，命中 `tags:` 就只换那一行，后面的列表项
+    原样留下 → 产生孤儿，写坏文件（实测 287/318 篇受影响）。
+
+    现在：命中一个键后，**连同它后面的续行一起替换/跳过**。这样标量↔列表互相
+    转换也是安全的（旧值是列表、新值是标量时会连列表项一起换掉）。
 
     新键追加在末尾并按名字排序（确定性：同一输入两次写出的字节一样）。
     """
@@ -2266,29 +2324,38 @@ def _kb_merge_frontmatter(head, updates) -> list:
         k = str(key or "").strip()
         if not k or ":" in k or "\n" in k or k.startswith("-"):
             raise KBError("bad_frontmatter", f"frontmatter 键非法：{key!r}")
-    rendered = {str(k).strip(): _kb_quote(_kb_scalar(v)) for k, v in updates.items()}
-    # R12：渲染结果再做一次"单行断言"（纵深防御：`_kb_scalar` 是唯一入口，
-    # 但这里是最终拼进文件头的地方——真出了洞，宁可抛错也不写出坏头）。
-    for key, text in rendered.items():
-        if "\n" in text or "\r" in text:
-            raise KBError("bad_frontmatter",
-                          f"frontmatter 渲染结果不是单行：{key!r}",
-                          hint="值里含换行；本批只接受单行标量")
+    rendered = {str(k).strip(): _kb_render_fm_value(str(k).strip(), v)
+                for k, v in updates.items()}
+    # R12 纵深防御：渲染结果逐行断言，任一含换行即拒绝（真出了洞宁可抛错不写坏头）
+    for key, lines in rendered.items():
+        for line in lines:
+            if "\n" in line or "\r" in line:
+                raise KBError("bad_frontmatter",
+                              f"frontmatter 渲染结果含换行：{key!r}",
+                              hint="值里含换行；frontmatter 只接受单行标量")
     out, seen = [], set()
-    for line in head:
+    i, n = 0, len(head)
+    while i < n:
+        line = head[i]
         m = _KB_FM_KEY_RE.match(str(line))
         if not m:
-            out.append(line)               # 注释 / 空行 / 无法识别的行：保留
+            out.append(line)
+            i += 1
             continue
         key = m.group(1).strip()
         if key in rendered and key not in seen:
-            out.append(f"{key}: {rendered[key]}")
+            out.extend(rendered[key])
             seen.add(key)
+            i += 1
+            # 跳过该键的续行（旧值可能是列表/多行）——**这是修缺陷的关键**
+            while i < n and _kb_is_fm_continuation(head[i]):
+                i += 1
         else:
             out.append(line)
+            i += 1
     for key in sorted(rendered):
         if key not in seen:
-            out.append(f"{key}: {rendered[key]}")
+            out.extend(rendered[key])
     return out
 
 
