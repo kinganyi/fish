@@ -1052,30 +1052,10 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
     if visibility not in ("shared", "private"):
         raise ValueError(
             f"未知 visibility={visibility!r}（可用值：shared / private）")
-    # ---- F-P1-2（2026-11-18 外部审查）：`private` 不许变成一个骗人的标签 ----
-    #
-    # 审查方实测：默认配置下写进去 `visibility='private'` 之后，没有读路径按它过滤，
-    # 于是它只是一个字符串——而写入方**收不到任何提示**。
-    #
-    # 核实后的准确现状（我第一版注释写"零调用点"，那是 grep 名字拼错导致的误判，已改正）：
-    #   · `_filter_by_visibility` **确实接在** `search_memories`（L2621）上，实现正确；
-    #   · 但它只在 `privacy.visibility_enforced` 打开时生效，而该键**默认关**；
-    #   · `list_memories` / `neighbors` / `recent_fallback` / 注入各段**不过滤**。
-    # 所以缺的不是过滤器，是"默认关着时写入方以为它生效了"这一层谎。
-    #
-    # 修法取审查方给的两个选项里的**第二个**（拒绝写入），理由是可验证性：
-    # 补 17 处读路径，漏一处就是"以为私有了其实没有"，而这个错误**不会报错**；
-    # 拒绝写入只有一个判定点，它错不了。
-    #
-    # 为什么不全补：`_filter_by_visibility` 已经能过滤，但"全部读路径"包含
-    # search / list / recent / inject / neighbors / distill —— **实际补了 6 处**。
-    # 第三轮评审指出：注释当时写「17 处」，把清单当成了已完成的工作量。剩下那些
-    # 靠各自的自带 SQL，不会被这个清单覆盖——所以数字要写**已经补了几处**，不是"应该补几处"。
-    # 每一处都要传 viewer 且顺序正确。这个工作量不该和"先堵住谎言"挤在同一批里。
-    # 开关打开（privacy.visibility_enforced=1）时仍然放行写入——那时过滤是真的。
-    #
-    # 用户 2026-10-29 的"做成开关、不强制"决定**没有被推翻**：开关还在，
-    # 只是它现在必须真的有效才允许写 private。
+    # ---- F-P1-2：`private` 不许变成骗人的标签 ----
+    # 默认档写 private 不生效、且写入方收不到提示。取审查方的"拒绝写入"
+    # （一个判定点，补读路径漏一处就是安静泄露）。开关打开时放行——那时过滤是真的。
+    # 用户 2026-10-29「做成开关、不强制」的决定没被推翻：开关还在，只是必须真有效。
     if visibility == "private" and not allow_unenforced_private:
         try:
             enforced = _visibility_enforced(conn)
@@ -6083,7 +6063,8 @@ _ATTENTION_LABELS = {"open": "未闭合", "lesson": "最近的坑", "gap": "别�
 
 
 
-def _rule_rows(conn, *, project=None, limit=RULES_PER_SOURCE_LIMIT, exclude=()):
+def _rule_rows(conn, *, project=None, limit=RULES_PER_SOURCE_LIMIT, exclude=(),
+                viewer_citizen_id=None):
     """取某一栏规矩的 `(code, title)`：`mem_type='rule'`、active、未休眠，按时间降序。
 
     分栏口径见本节开头：**按适用范围，不按作者**（`owner` 是作者，不是适用范围）。
@@ -6100,6 +6081,11 @@ def _rule_rows(conn, *, project=None, limit=RULES_PER_SOURCE_LIMIT, exclude=()):
         clause, where_params = "project IS NULL", []
     else:
         clause, where_params = "project = ?", [key]
+    # 第四轮评审 🔴-2：rule 进注入包「规矩」段，同上——必须过滤。
+    _rv, _rp = _visibility_sql(conn, viewer_citizen_id)
+    if _rv:
+        clause = clause + _rv
+        where_params = list(where_params) + _rp
     sql = ("SELECT code,title FROM code_index WHERE mem_type='rule' "
            "AND status='active' AND dormant=0 AND " + clause +
            " ORDER BY recorded_at DESC, code DESC LIMIT ?")
@@ -6302,12 +6288,18 @@ def _allow_untrusted_lessons(conn) -> bool:
         return False
 
 
-def _lesson_rows(conn, since_z, limit, exclude=(), same_project=None):
+def _lesson_rows(conn, since_z, limit, exclude=(), same_project=None,
+                 viewer_citizen_id=None):
     """窗口内 lesson 的 `(code, title)`：时间降序；`same_project` 给定时只取该项目。
 
     `same_project=None` = 不限项目（用于跨项目补齐阶段，也用于"当前项目未声明"）。
     """
     where, params = "recorded_at >= ?", [since_z]
+    # 第四轮评审 🔴-2：lesson 进注入包「错题本」段，**每个会话开场打印**。
+    _lv, _lp = _visibility_sql(conn, viewer_citizen_id)
+    if _lv:
+        where += _lv
+        params.extend(_lp)
     if not _allow_untrusted_lessons(conn):
         # F-P0-3：与 count_lesson_rows 同口径——否则段头说 2 条、列表只 1 条。
         where += " AND owner <> ? AND owner IS NOT NULL"

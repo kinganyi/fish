@@ -317,6 +317,31 @@ class PrivateWriteGuardTest(unittest.TestCase):
                       "主人自己的私有素材也聚不到了（过滤过头）")
 
 
+    def test_lesson_and_rule_do_not_leak(self):
+        """**第四轮评审 🔴-2**：lesson / rule 的私有标题也进注入包。
+
+        `_lesson_rows` 喂「错题本」段、`_rule_rows` 喂「规矩」段——两段
+        **每个会话开场都打印**。它们的 SQL 原来没有任何可见性谓词，
+        于是别人的私有标题出现在所有人的上下文里。
+
+        我第三轮给 distill 定的就是这个级别的问题，而这两处**正是我列在
+        `FILTERED` 名单里、并写了"不是 visibility 语义"理由豁免掉的**——
+        **分类写对了名字，理由是错的。**
+        """
+        self._enforce(True)
+        self._write(title="ZZ私有lessonZZ", visibility="private",
+                    owner="C-OWNER", mem_type="lesson")
+        self._write(title="ZZ私有ruleZZ", visibility="private",
+                    owner="C-OWNER", mem_type="rule")
+        pack = fish.build_injection_pack(self.conn, self.root,
+                                         citizen_id="C-OTHER", project="P")
+        text = str(pack)
+        self.assertNotIn("ZZ私有lessonZZ", text,
+                         "注入包「错题本」段泄露了别人的私有 lesson 标题")
+        self.assertNotIn("ZZ私有ruleZZ", text,
+                         "注入包「规矩」段泄露了别人的私有 rule 标题")
+
+
 # ---------------------------------------------------------------- 读路径清单
 #
 # **F-P1-X（第三轮评审后的自查）**：我补私有过滤时，是按"我记得的那几条"补的。
@@ -424,7 +449,6 @@ class VisibilityReadPathInventoryTest(unittest.TestCase):
         liars = sorted(declared_sql - callers)
         self.assertEqual(liars, [],
                          f"名单说这些函数用 _visibility_sql，但源码里没调用：{liars}")
-
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
