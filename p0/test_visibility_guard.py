@@ -290,5 +290,32 @@ class PrivateWriteGuardTest(unittest.TestCase):
                       "开关关着时 neighbors 居然过滤了——那不是等价旧行为")
 
 
+    def test_distill_filters_private(self):
+        """**最后一处泄露**：`distill_clusters` 自带 SQL，返回 episode 的 `title`。
+
+        第三轮评审实测：`enforced=1` 时 list/search 对 C-OTHER 返回 0，
+        而 distill 打印出 2 条 private 标题。
+
+        为什么它最容易被漏：它不经过 `_list_where`、也不在"补读路径"那轮的清单里——
+        **自带 SQL 的读路径需要被单独数一遍**，而我是按"我记得的几条"去补的。
+        """
+        self._enforce(True)
+        for i in range(3):
+            self._write(title=f"公开素材{i}", visibility="shared",
+                        mem_type="episode", tags=["主题甲"])
+        self._write(title="绝密素材", visibility="private", owner="C-OWNER",
+                    mem_type="episode", tags=["主题甲"])
+
+        res = fish.distill_clusters(self.conn, project="P", min_group=1,
+                                    viewer_citizen_id="C-OTHER")
+        self.assertNotIn("绝密素材", str(res),
+                         "distill 里印出了别人的私有 episode 标题")
+
+        own = fish.distill_clusters(self.conn, project="P", min_group=1,
+                                    viewer_citizen_id="C-OWNER")
+        self.assertIn("绝密素材", str(own),
+                      "主人自己的私有素材也聚不到了（过滤过头）")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

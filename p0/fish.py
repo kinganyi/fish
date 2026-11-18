@@ -1068,7 +1068,9 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
     # 拒绝写入只有一个判定点，它错不了。
     #
     # 为什么不全补：`_filter_by_visibility` 已经能过滤，但"全部读路径"包含
-    # search / list / neighbors / inject 各段 / push / similar / distill 等 17 处，
+    # search / list / recent / inject / neighbors / distill —— **实际补了 6 处**。
+    # 第三轮评审指出：注释当时写「17 处」，把清单当成了已完成的工作量。剩下那些
+    # 靠各自的自带 SQL，不会被这个清单覆盖——所以数字要写**已经补了几处**，不是"应该补几处"。
     # 每一处都要传 viewer 且顺序正确。这个工作量不该和"先堵住谎言"挤在同一批里。
     # 开关打开（privacy.visibility_enforced=1）时仍然放行写入——那时过滤是真的。
     #
@@ -2902,7 +2904,8 @@ def parse_tags_column(raw) -> list:
 
 def distill_clusters(conn, *, project, days=DISTILL_DEFAULT_DAYS,
                      min_group=DISTILL_MIN_GROUP,
-                     max_groups=DISTILL_MAX_GROUPS, now=None) -> dict:
+                     max_groups=DISTILL_MAX_GROUPS, now=None,
+                     viewer_citizen_id=None) -> dict:
     """把窗口内的 episode 按 tag 聚成"同主题候选组"——**只读，不写任何东西**。
 
     口径（与 `list_memories` 同一条）：
@@ -2939,11 +2942,15 @@ def distill_clusters(conn, *, project, days=DISTILL_DEFAULT_DAYS,
     cutoff = (parse_utc(now_z) - datetime.timedelta(days=days)).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
     pnames = resolve_project_names(conn, p) or [p]
+    # F-P1-X（第三轮评审）：聚类也返回 `title`，所以它同样必须过滤 private。
+    # 这是"补读路径"那轮漏掉的最后一处——`fish.py` 注释当时写"17 处"，
+    # 实际只补了 6 处；`distill` 自带 SQL，最容易被这种清单漏掉。
+    _dvis_sql, _dvis_params = _visibility_sql(conn, viewer_citizen_id)
     sql = ("SELECT code, title, tags, recorded_at FROM code_index "
            "WHERE mem_type='episode' AND status='active' AND recorded_at IS NOT NULL "
            "AND recorded_at >= ? AND project IN ("
-           + ",".join("?" * len(pnames)) + ") ORDER BY code")
-    rows = conn.execute(sql, [cutoff] + list(pnames)).fetchall()
+           + ",".join("?" * len(pnames)) + ")" + _dvis_sql + " ORDER BY code")
+    rows = conn.execute(sql, [cutoff] + list(pnames) + _dvis_params).fetchall()
 
     groups = {}
     for code, title, tags, recorded_at in rows:
