@@ -100,6 +100,11 @@ from fish_corpus import CorpusError, CorpusNotReady  # noqa: F401
 # 全部继续可用，且与 `fish_kb.<name>` 是**同一个对象**。
 # 为什么不用 `import *`：漏名是静默的，而这里每个名字都被判据 J1 逐个查对象同一性。
 # 生成/校验：`python tools/gen_reexport.py --check`
+from fish_attach import (AttachmentRejected, store_blob,  # F-P1-3
+                         ATTACH_MAX_BYTES_KEY, ATTACH_MAX_MB_DEFAULT,
+                         ATTACH_SENSITIVE_PATTERNS, ATTACH_DENY_ROOTS,
+                         _attach_max_bytes, _attach_check_name,
+                         _attach_check_root)
 from fish_db import restore_citizen  # F-P1-7：公民还原（域函数住 fish_db）
 from fish_kb import ( # noqa: F401
  KBError, KB_ACTIONS, KB_DEFAULT_IGNORE_GLOBS, KB_DEFAULT_MAX_OPEN_BYTES,
@@ -1013,23 +1018,10 @@ def next_code(conn: sqlite3.Connection, prefix: str) -> str:
 
 # ------------------------------------------------------------------ 遗忘
 
-def store_blob(root: Path, src: Path) -> dict:
-    """把文件按内容寻址存进 blobs/，重复内容只存一份。返回附件元数据。"""
-    data = src.read_bytes()
-    h = hashlib.sha256(data).hexdigest()
-    ext = src.suffix.lower()
-    bdir = root / "blobs" / h[:2]
-    bdir.mkdir(parents=True, exist_ok=True)
-    bpath = bdir / f"{h}{ext}"
-    if not bpath.exists():          # 去重：同一内容只写一次
-        bpath.write_bytes(data)
-    return {"name": src.name, "blob": f"blobs/{h[:2]}/{h}{ext}",
-            "size": len(data), "sha256": h, "mime": ext.lstrip(".")}
-
-
 def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
                   mem_type: str = "fact", tags=None, visibility: str = "shared",
                   owner=None, session_actor=None, attachments=None,
+                  allow_sensitive_attachments=False,
                   occurred_at=None, supersedes=None, cause=None, hints=None,
                   supersede_notes=None) -> tuple:
     """**唯一的记忆写入入口** —— CLI 与 MCP 都必须走这里。
@@ -1077,7 +1069,8 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
             src, cap = Path(item), ""
         if not src.exists():
             raise FileNotFoundError(f"附件不存在：{src}")
-        meta = store_blob(root, src)
+        meta = store_blob(root, src, conn=conn,
+                          allow_sensitive=bool(allow_sensitive_attachments))
         meta["caption"] = cap
         atts.append(meta)
 
@@ -5385,7 +5378,8 @@ def cmd_remember(args):
         project=args.project, title=args.title, body=args.body or "",
         mem_type=args.type, tags=args.tags or [], visibility=args.visibility,
         owner=owner, session_actor=args.session_actor,
-        attachments=args.attach or [], occurred_at=occurred_at, cause=args.cause,
+        attachments=args.attach or [],
+                       allow_sensitive_attachments=getattr(args, "allow_sensitive_attach", False), occurred_at=occurred_at, cause=args.cause,
         supersedes=getattr(args, "supersedes", None) or None,
         hints=hints, supersede_notes=supersede_notes)
     try:

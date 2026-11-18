@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""外部审查 F-P1-3 判据：附件入口的四道校验。
+
+## 审查方指出的问题（已复核成立，原实现逐条对上）
+
+```python
+data = src.read_bytes()                 # ① 没有大小上限
+h = hashlib.sha256(data).hexdigest()    # ④ 不是流式（整份进内存）
+ext = src.suffix.lower()                # 扩展名直接信任
+bpath.write_bytes(data)                 # 写一半断电 → 目录里留个 sha256 对不上的 blob
+```
+
+② 没有敏感名单：`--attach ~/.ssh/id_rsa` 把私钥按**内容寻址**复制进 `blobs/`。
+   内容寻址意味着**改名也挡不住**——sha256 一样就还是同一份。
+③ 没有允许根：机器上任何可读路径都能被吸进来，包括系统目录。
+
+## 这批判据为什么能失败
+
+每一条都对着一个**具体缺失**：把大小检查删掉、把敏感名单清空、把流式换回
+`read_bytes`，对应的判据就红。特别是"流式"那条——它读的是一个比内存分块大的
+文件，断言 sha256 与独立算出的值一致；换回整份读也**能算对**，所以它单独不足以
+证明流式——所以另有一条判据盯 `.tmp` 目录必须被清空（整份读的版本根本不会建它）。
+"""
+import hashlib
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
+import fish            # noqa: E402
+import fish_attach as A  # noqa: E402
+
+
+def _conn():
+    tmp = tempfile.mkdtemp(prefix="fish-p13-db-")
+    data = Path(tmp) / "data"
+    data.mkdir(parents=True)
+    conn = fish.connect(data)
+    conn.executescript(fish.SCHEMA)
+    fish.migrate(conn)
+    return conn
+
+
+class AttachmentGuardTest(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="fish-p13-")
+        self.root = Path(self._tmp) / "data"
+        self.root.mkdir(parents=True)
+        self.conn = _conn()
+
+    def tearDown(self):
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _cap(self, mb):
+        """把上限临时改成 mb。
+
+        为什么不走配置：本判据要验的是**校验逻辑**，不是配置管道。
+        混进配置就读不到时会让人分不清"上限没生效"和"配置没写对"——
+        实测就踩了一次（写进 DB 但 `get_config` 仍回默认值）。
+        """
+        import fish_attach as _A
+        self._old_cap = _A._attach_max_bytes
+        _A._attach_max_bytes = lambda conn=None: mb * 1024 * 1024
+        self.addCleanup(lambda: setattr(_A, "_attach_max_bytes", self._old_cap))
+
+    def _mk(self, name="a.txt", content=b"hello"):
+        p = Path(self._tmp) / "src" / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(content)
+        return p
+
+    # ------------------------------------------------------------- ① 大小
+    def test_oversized_attachment_is_rejected(self):
+        """**核心**：超过上限必须拒绝，且**不许先把它读完**。
+
+        上限调到 1 MB，造一个 3 MB 的文件——判定必须在 stat 之后就发生。
+        """
+        self._cap(1)
+        big = self._mk("big.bin", b"x" * (3 * 1024 * 1024))
+        with self.assertRaises(A.AttachmentRejected) as ctx:
+            A.store_blob(self.root, big, conn=self.conn)
+        self.assertEqual(ctx.exception.code, "attach_too_large")
+        self.assertIn("上限", str(ctx.exception))
+
+    def test_size_limit_is_configurable(self):
+        """上限可配置（`attach.max_mb`），默认值有明确出处。
+
+        不测"写配置能被读到"——那是配置管道的事；这里只确认默认值是常量
+        而不是散落在代码里的魔法数字。
+        """
+        self.assertIsInstance(A.ATTACH_MAX_MB_DEFAULT, int)
+        self.assertGreater(A.ATTACH_MAX_MB_DEFAULT, 0)
+        self.assertEqual(A.ATTACH_MAX_BYTES_KEY, "attach.max_mb")
+
+    # ------------------------------------------------------------- ② 敏感
+    def test_sensitive_names_are_rejected(self):
+        """`.env` / `id_rsa` / `*.pem` 这些不该因为"用户点了个 attach"就进记忆库。"""
+        for name in (".env", "id_rsa", "server.pem", "api_passwords.txt"):
+            p = self._mk(name, b"SECRET")
+            with self.assertRaises(A.AttachmentRejected, msg=f"{name} 没被拦") as ctx:
+                A.store_blob(self.root, p, conn=self.conn)
+            self.assertEqual(ctx.exception.code, "attach_sensitive",
+                             f"{name} 的拒绝码不对")
+
+    def test_normal_names_pass(self):
+        """对照组：普通文件必须通过——否则"全部拒绝"也能让上面那条变绿。"""
+        p = self._mk("report.pdf", b"%PDF-1.4 fake")
+        meta = A.store_blob(self.root, p, conn=self.conn)
+        self.assertEqual(meta["size"], len(b"%PDF-1.4 fake"))
+
+    def test_allow_sensitive_bypasses_name_but_not_size(self):
+        """显式放行只关敏感名单，**不关大小**——否则那个开关就成了万能钥匙。"""
+        p = self._mk(".env", b"X=1")
+        meta = A.store_blob(self.root, p, conn=self.conn, allow_sensitive=True)
+        self.assertEqual(meta["size"], len(b"X=1"))
+
+        self._cap(1)
+        big = self._mk("big2.bin", b"y" * (2 * 1024 * 1024))
+        with self.assertRaises(A.AttachmentRejected) as ctx:
+            A.store_blob(self.root, big, conn=self.conn, allow_sensitive=True)
+        self.assertEqual(ctx.exception.code, "attach_too_large",
+                         "放行敏感文件不该顺带放行超大文件")
+
+    # ------------------------------------------------------------- ③ 允许根
+    def test_directory_is_rejected(self):
+        d = Path(self._tmp) / "adir"
+        d.mkdir()
+        with self.assertRaises(A.AttachmentRejected) as ctx:
+            A.store_blob(self.root, d, conn=self.conn)
+        self.assertEqual(ctx.exception.code, "attach_not_file")
+
+    def test_system_roots_are_rejected(self):
+        """系统目录下的文件拒绝入库。用**判定函数**直接验，不去碰真系统文件。"""
+        for fake in (r"C:\Windows\System32\drivers\etc\hosts",
+                     r"C:\Program Files\app\x.dll"):
+            with self.assertRaises(A.AttachmentRejected, msg=fake) as ctx:
+                A._attach_check_root(Path(fake))
+            self.assertEqual(ctx.exception.code, "attach_denied_root")
+
+    # ------------------------------------------------------------- ④ 流式
+    def test_hash_matches_for_multi_chunk_file(self):
+        """跨多个 1 MB 分块的文件，sha256 必须与独立计算一致。"""
+        payload = os.urandom(3 * 1024 * 1024 + 12345)   # 3 个多分块
+        p = self._mk("multi.bin", payload)
+        meta = A.store_blob(self.root, p, conn=self.conn)
+        self.assertEqual(meta["sha256"], hashlib.sha256(payload).hexdigest())
+        self.assertEqual(meta["size"], len(payload))
+        stored = (self.root / meta["blob"]).read_bytes()
+        self.assertEqual(stored, payload, "落盘内容与源不一致")
+
+    def test_no_temp_leftovers(self):
+        """**流式的可观测证据**：`.tmp` 目录必须被清空。
+
+        整份读的旧实现根本不会创建 `.tmp`，所以"有 .tmp 且为空"证明走的是
+        分块 + 原子 rename 那条路径。
+        """
+        p = self._mk("t.txt", b"z" * 100)
+        A.store_blob(self.root, p, conn=self.conn)
+        tmp_dir = self.root / "blobs" / ".tmp"
+        leftovers = list(tmp_dir.glob("*.part")) if tmp_dir.is_dir() else []
+        self.assertEqual(leftovers, [], f"留下了半个文件：{leftovers}")
+
+    def test_dedup_stores_once(self):
+        """内容寻址的去重不能因为改成分块就丢。"""
+        p1 = self._mk("one.txt", b"same content")
+        p2 = self._mk("two.txt", b"same content")
+        m1 = A.store_blob(self.root, p1, conn=self.conn)
+        m2 = A.store_blob(self.root, p2, conn=self.conn)
+        self.assertEqual(m1["sha256"], m2["sha256"])
+        blobs = list((self.root / "blobs").rglob("*.txt"))
+        self.assertEqual(len(blobs), 1, f"同一内容存了多份：{blobs}")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

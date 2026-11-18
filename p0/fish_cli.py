@@ -399,6 +399,11 @@ def main():
                         "缺省=现在。用于补记过去的事，与 recorded_at 区分")
     p.add_argument("--attach", action="append", default=[],
                    help="附件路径，可重复（图片/文档等，按内容寻址存入 blobs/）")
+    # F-P1-3：附件默认受四道校验（大小/敏感名单/系统目录/流式哈希）；
+    # 这个开关只关掉"敏感名单 + 系统目录"两条，大小上限与流式始终生效。
+    p.add_argument("--allow-sensitive-attach", dest="allow_sensitive_attach",
+                   action="store_true",
+                   help="允许附件命中敏感名单/系统目录（默认拒绝）")
     p.add_argument("--session-actor", dest="session_actor", default=None,
                    help="会话级身份（如 anyi-dev），用于区分同一宿主下的不同会话")
     # FB-11：CLI 侧的“写新的同时置旧的”。可重复给（一条新记忆替代多条旧条目）。

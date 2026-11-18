@@ -177,6 +177,10 @@ def warn_derived(conn, what, exc=None) -> None:
 
 
 CONFIG_DEFAULTS = {
+    # F-P1-3：附件大小上限（MB）。**必须是 (默认, 类型, 可选值) 三元组**——
+    # `_key_type` 会 `default, typ, _ = CONFIG_DEFAULTS[key]`，写成裸整数会在
+    # 每次 get_config 时抛 "cannot unpack non-iterable int object"。
+    "attach.max_mb": (64, "int", None),
     "neighbors.strategy": ("mixed", "enum", ["code", "time", "tag", "type", "mixed"]),
     "neighbors.n": (3, "int", None),
     "neighbors.cross_project": (False, "bool", None),
