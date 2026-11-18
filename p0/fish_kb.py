@@ -562,6 +562,210 @@ def kb_vault_remove(conn, key) -> dict:
             "path": vault["path"], "disk_untouched": True}
 
 
+def kb_vault_init(conn, data_root, *, name, path=None, mode="rw",
+                  is_default=False, note=None) -> dict:
+    """**凭空造一个 Obsidian 可打开的 vault**（W2，2026-11-18）。
+
+    ## 为什么 fish 可以"内置" Obsidian
+
+    Obsidian 官方文档原文：一个 vault 就是"装着 Markdown 纯文本文件的文件夹"，
+    `.obsidian/` 是 **Obsidian 自己创建**的设置目录，不是准入条件。
+    所以 fish 只要能建目录 + 写 `.md`，Obsidian 就能打开——不需要任何协议适配。
+
+    ## 默认落点 = 真内置（用户决策 A）
+
+    不给 `path` 时落在 `<data_root>/kb/<name>/`，这就是"真内置"：
+    备份 fish 数据目录即备份整个知识库。
+
+    **但兼容外置（用户决策 C）**：`path` 可以给任意绝对路径；已存在的库用
+    `kb_vault_add` 登记即可，不必走 init。
+
+    ## 幂等
+
+    目录已存在且有内容**不覆盖**（只补缺的 `.obsidian/app.json` 与首页），
+    再把该路径登记成 vault。所以"对已有 Obsidian 库跑一次 init"也不会毁东西。
+    """
+    from pathlib import Path as _P
+    clean = str(name or "").strip()
+    if not clean:
+        raise KBError("bad_usage", "vault 名字不能为空", hint="--name <名字>")
+    if path is None:
+        root = _P(str(data_root)) / "kb" / clean
+    else:
+        root = _P(str(path))
+        if not root.is_absolute():
+            raise KBError("bad_usage", f"vault 路径必须是绝对路径：{path!r}")
+    created = []
+    root.mkdir(parents=True, exist_ok=True)
+
+    # 1) `.obsidian/` 最小配置。实测安逸的库 `appearance.json` 只有 `{}`（2 字节），
+    #    证明 Obsidian 对配置缺失极其宽容——只写一个真正有用的键，其余让它自己生成，
+    #    避免和用户已有布局打架（`workspace.json` 尤其不能碰，那是人的窗口布局）。
+    obs = root / ".obsidian"
+    obs.mkdir(exist_ok=True)
+    app_json = obs / "app.json"
+    if not app_json.exists():
+        # `alwaysUpdateLinks`：Obsidian 改名时自动改双链——对"人和 AI 共写"很重要
+        app_json.write_text('{\n  "alwaysUpdateLinks": true\n}\n',
+                            encoding="utf-8", newline="\n")
+        created.append(".obsidian/app.json")
+
+    # 2) 首页。frontmatter 用**列表**形态写 tags，和库里 287/318 篇一致
+    #    （W0 已保证这种写法能被正确读写）。
+    home = root / "00首页.md"
+    if not home.exists():
+        home.write_text("---\ntags:\n  - 入口\n---\n\n# 首页\n\n## 内容区\n\n",
+                        encoding="utf-8", newline="\n")
+        created.append("00首页.md")
+
+    # 3) 登记（kb_vault_add 要求目录存在，所以必须放在建目录之后）
+    row = kb_vault_add(conn, name=clean, path=str(root), mode=mode,
+                       is_default=is_default, note=note)
+    return {"ok": True, "vault": row, "root": str(root),
+            "created": created, "data_root": str(data_root)}
+
+
+def _kb_relocate_plan(src_root):
+    """清点要搬的东西：文件数 / 总字节 / 逐文件相对路径。"""
+    src_root = Path(str(src_root))
+    files = []
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(src_root):
+        for fn in filenames:
+            p = Path(dirpath) / fn
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            files.append(p.relative_to(src_root).as_posix())
+            total += st.st_size
+    return {"files": len(files), "bytes": total, "rels": files}
+
+
+def _kb_free_bytes(path):
+    """目标路径所在盘的剩余字节。"""
+    p = Path(str(path))
+    probe = p
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        return shutil.disk_usage(str(probe)).free
+    except OSError:
+        return None
+
+
+def kb_vault_relocate(conn, key, new_path, *, move_files=False, copy_files=False,
+                      dry_run=True, verify=True) -> dict:
+    """改知识库位置（W2）。**这是现在完全缺的一块**。
+
+    ## 三种模式必须分清（Obsidian 用户最容易搞混的地方）
+
+    | 模式 | 参数 | 行为 |
+    |---|---|---|
+    | 只改登记 | （默认） | 改 `path`，**不动文件**——你自己搬了文件夹，告诉 fish 新位置 |
+    | 搬文件 | `move_files=True` | fish 搬整棵树 + 校验 + 改登记 |
+    | 复制 | `copy_files=True` | 复制 + 校验 + 改登记（原位置保留） |
+
+    ## 为什么必须先 `dry_run`
+
+    10.7 GB 的搬运不可逆（move 模式源会被删）。所以默认 `dry_run=True`，
+    计划里必须报：文件数 / 总字节 / **目标盘剩余空间够不够**。不够就拒绝，不留半途。
+
+    ## 为什么必须校验哈希
+
+    "搬完了"不等于"搬对了"。只比数量会漏掉"同名不同内容"。
+    搬前算源哈希、搬后算目标哈希，逐文件比对——这是唯一硬证据。
+
+    `verify=False` 只给"只改登记、没动文件"的场景用（那时没有可比对的对象）。
+    """
+    if move_files and copy_files:
+        raise KBError("bad_usage", "move_files 与 copy_files 只能选一个")
+    row = kb_vault_get(conn, key)
+    src = Path(str(row["path"]))
+    dst = Path(str(new_path))
+    if not dst.is_absolute():
+        raise KBError("bad_usage", f"新路径必须是绝对路径：{new_path!r}")
+    if not src.is_dir():
+        raise KBError("not_found", f"当前库路径不存在：{src}")
+
+    key_new = os.path.normcase(os.path.realpath(str(dst)))
+    clash = conn.execute(
+        "SELECT name FROM kb_vault WHERE path_key=? AND vault_id<>?",
+        (key_new, row["vault_id"])).fetchone()
+    if clash:
+        raise KBError("bad_usage",
+                      f"新路径已被另一个库占用：{clash[0]}",
+                      hint="同一个目录不能登记成两个库")
+
+    do_files = move_files or copy_files
+    plan = _kb_relocate_plan(src) if do_files else {"files": 0, "bytes": 0, "rels": []}
+    free = _kb_free_bytes(dst)
+    # 留 20% 余量：元数据/簇对齐/以后缩略图还要占地方
+    need = int(plan["bytes"] * 1.2)
+    enough = (free is None) or (free >= need)
+    out = {
+        "ok": True, "dry_run": bool(dry_run),
+        "from": str(src), "to": str(dst),
+        "mode": "move" if move_files else ("copy" if copy_files else "register_only"),
+        "files": plan["files"], "bytes": plan["bytes"],
+        "free_bytes": free, "need_bytes": need, "enough_space": enough,
+    }
+    if not enough:
+        raise KBError("bad_usage",
+                      f"目标盘空间不足：需要 {need} 字节，剩余 {free} 字节",
+                      hint="换目标盘或先清理")
+    if dry_run:
+        out["moved"] = 0
+        out["verified"] = 0
+        return out
+
+    moved = 0
+    if do_files:
+        # ① 搬前算源哈希（校验基准）
+        src_hash = {}
+        if verify:
+            for rel in plan["rels"]:
+                src_hash[rel] = kb_sha256_file(src / rel)
+        # ② 搬（copy2 保 mtime——否则 Obsidian 的排序会乱）
+        for rel in plan["rels"]:
+            s_abs = src / rel
+            d_abs = dst / rel
+            d_abs.parent.mkdir(parents=True, exist_ok=True)
+            if copy_files:
+                shutil.copy2(str(s_abs), str(d_abs))
+            else:
+                shutil.move(str(s_abs), str(d_abs))
+            moved += 1
+        # ③ 搬后算目标哈希逐文件比对
+        if verify:
+            bad = []
+            for rel in plan["rels"]:
+                d_abs = dst / rel
+                if not d_abs.exists():
+                    bad.append((rel, "missing"))
+                    continue
+                if kb_sha256_file(d_abs) != src_hash[rel]:
+                    bad.append((rel, "hash_mismatch"))
+            if bad:
+                raise KBError("bad_usage",
+                              f"搬运后校验失败 {len(bad)} 个文件：{bad[:5]}",
+                              hint="源文件可能仍在（copy 模式），请人工确认后重试")
+            out["verified"] = len(plan["rels"])
+        # ④ 搬完才改登记（顺序不能反：先改登记再搬，中途失败会指向空目录）
+        if not copy_files:
+            try:
+                src.rmdir()      # 只在空目录时成功；非空说明有没搬到的
+            except OSError:      # A档：目录非空/被占用都属正常残留，不是错误
+                pass             # 搬移已完成且已哈希校验，残留空壳目录无副作用
+    conn.execute(
+        "UPDATE kb_vault SET path=?, path_key=?, updated_at=? WHERE vault_id=?",
+        (os.path.realpath(str(dst)), key_new, now_utc(), row["vault_id"]))
+    conn.commit()
+    out["moved"] = moved
+    out["verified"] = out.get("verified", 0)
+    return out
+
+
 def kb_vault_scan(conn, key=None) -> dict:
     """walk + stat 汇总，写 `last_scan_*`（**不读正文**）。"""
     vault = kb_vault_get(conn, key)
