@@ -161,18 +161,39 @@ class RebuildAtomicityTest(unittest.TestCase):
     def test_precheck_types_cover_every_replayed_type(self):
         """**判据要和实现一样长**：预检清单必须覆盖重放解析的每一类事件。
 
-        逐个扫源码里 `json.loads` 前面出现的事件类型，断言都在 PRECHECK_TYPES 里。
-        谁哪天新增一类重放却忘了加进预检，这条就红。
+        ## 这条判据自己坏过一次，必须记下来
+
+        第一版正则只认双引号：`type="memory.x"`。而 `fish_rebuild.py` 里
+        **全是单引号** `type='memory.x'`。于是它只看见 `type IN (...)` 那一处，
+        拿到的类型恰好都在 `_PRECHECK_TYPES` 里 —— **永远绿**。
+
+        第二轮评审官用变异证明了这一点：新增一类重放 `memory.anonymized`
+        却不加进预检，6 条判据**全绿**。
+
+        一条永远绿的判据比没有判据更糟：它占据了"这里有人看着"的位置。
+
+        ## 所以有两条自检
+
+          ① 单双引号都认；
+          ② **找不到靶点必须红**——如果扫出来的类型少于 3 个，说明正则又坏了，
+             这条判据要喊出来，而不是安静地通过。
         """
         import re as _re
         src = (HERE / "fish_rebuild.py").read_text(encoding="utf-8")
-        # 重放阶段按类型查询的地方
-        used = set(_re.findall(r"type=\"(memory\.[a-z_]+)\"", src))
-        used |= set(_re.findall(r"type IN \(([^)]*)\)", src) and
-                    [t for grp in _re.findall(r"type IN \(([^)]*)\)", src)
-                     for t in _re.findall(r"'(memory\.[a-z_]+)'", grp)])
-        # owner_fixed 自带 try/except，不强制进预检
+        used = set()
+        # 单双引号都认（第一版只认双引号 = 永远绿，见 docstring）
+        used |= set(_re.findall(r"""type\s*=\s*['"](memory\.[a-z_]+)['"]""", src))
+        for grp in _re.findall(r"type\s+IN\s*\(([^)]*)\)", src):
+            used |= set(_re.findall(r"""['"](memory\.[a-z_]+)['"]""", grp))
+        # owner_fixed 自带 try/except（会跳过），不强制进预检
         used.discard("memory.owner_fixed")
+
+        # ② 自检：扫不到靶点就是判据自己坏了，必须红
+        self.assertGreaterEqual(
+            len(used), 3,
+            f"只扫到 {sorted(used)} 这些类型——正则大概率又坏了（本文件用了单引号）。\n"
+            "判据扫不到靶点时必须红，不能安静通过。")
+
         declared = set(fish_rebuild._PRECHECK_TYPES)
         missing = sorted(used - declared)
         self.assertEqual(missing, [],

@@ -5016,7 +5016,7 @@ def score_candidate(base, cand) -> float:
 
 
 def neighbors(conn, code, n=3, strategy="mixed", cross_project=False,
-              include_dormant=False):
+              include_dormant=False, viewer_citizen_id=None):
     row = conn.execute(
         "SELECT code,title,project,mem_type,tags,occurred_at,status,dormant "
         "FROM code_index WHERE code=?", (code,)
@@ -5030,6 +5030,12 @@ def neighbors(conn, code, n=3, strategy="mixed", cross_project=False,
     if not cross_project:
         sql += " AND project=?"
         params.append(base["project"])
+    # 第二轮评审 🟠-2：邻接也按可见性过滤——否则"搜不到私有笔记"与
+    # "邻居给了我它的标题"同时成立，私有只藏了正文、没藏住存在。
+    _vis_sql, _vis_params = _visibility_sql(conn, viewer_citizen_id)
+    if _vis_sql:
+        sql += _vis_sql
+        params.extend(_vis_params)
     if not include_dormant:
         sql += " AND dormant=0"
     cands = [_row_dict(r) for r in conn.execute(sql, params).fetchall()]
