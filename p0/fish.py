@@ -7147,6 +7147,20 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
         l0_full = l0_full + "\n" + _profile_text + "\n"
         l0_min = l0_min + _profile_text + "\n"
 
+    # ---- 画像提问（R1-4，2026-11-18 接线）----
+    #
+    # **这个函数写了一周没接线**：`render_questions_block` 11-11 就实现了、也有单测，
+    # 但从来没人从 `build_injection_pack` 调它 → 注入包里永远没有提问段。
+    # 实测证据：`profile.docs_since_ask` 攒到 **73**（阈值 10），
+    # 即"该问了"这个状态成立了 63 次，一次都没出现在包面上。
+    #
+    # 教训写在这里：**判据测了零件、没测装配**。单测 `render_questions_block()`
+    # 返回正确内容，不等于注入包里会出现它。所以补的判据必须查**真实的包文本**。
+    _ask_text = fish_profile.render_questions_block(conn) if "profile" in want else ""
+    if _ask_text:
+        l0_full = l0_full + "\n" + _ask_text + "\n"
+        l0_min = l0_min + _ask_text + "\n"
+
     # ---- L1 状态 ----
     # 2026-10-24 修（EVAL 外部评估 R1 + 自查），同一处两个问题：
     #   ① 当前项目不再靠"谁最近更新"猜：改走四档证据链（_resolve_injection_project），

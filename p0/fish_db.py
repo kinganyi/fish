@@ -664,7 +664,15 @@ def append_event(conn, etype, actor, subject, payload, cause=None, *,
 # 下沉之后 `fish_profile`（画像）才能合法地读写自己的配置键（提问节律等）。
 # ============================================================
 
-def set_config(conn, key, value):
+def set_config(conn, key, value, *, emit_event=True):
+    """写配置。`emit_event=False` 用于**游标**（见下）。
+
+    2026-11-18：加 `emit_event`。起因是实测发现 `profile.docs_since_ask`
+    每 +1 就写一条 `config.changed`——7 天里 **73 条事件只为记一个计数器**。
+    事件溯源的价值是"可重放的事实"，而**游标不是事实**，是运行期状态；
+    把它写进事件流既污染日志，又让"配置变过几次"这个问题的答案失真。
+    同类游标（`code_registry.last_seq`）本来就不进事件，这里对齐。
+    """
     default, typ, allowed = _key_type(key)
     if typ == "int":
         value = int(value)
@@ -681,8 +689,9 @@ def set_config(conn, key, value):
         (key, str(value).lower() if isinstance(value, bool) else str(value), typ, now_utc()),
     )
     conn.commit()
-    append_event(conn, "config.changed",
-                 {"citizen_id": "system", "evidence_level": "signed"},
-                 {"kind": "config", "id": key},
-                 {"key": key, "old_value": old, "new_value": value})
+    if emit_event:
+        append_event(conn, "config.changed",
+                     {"citizen_id": "system", "evidence_level": "signed"},
+                     {"kind": "config", "id": key},
+                     {"key": key, "old_value": old, "new_value": value})
     return value

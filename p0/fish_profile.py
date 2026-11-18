@@ -377,7 +377,8 @@ def bump_question_counter(conn, n=1):
     重建时不该被事件覆盖——和 `code_registry.last_seq` 同类。
     """
     cur = int(get_config(conn, "profile.docs_since_ask") or 0)
-    return set_config(conn, "profile.docs_since_ask", cur + int(n))
+    # `emit_event=False`：游标不是事实，不该进事件流（见 `set_config` 的 docstring）。
+    return set_config(conn, "profile.docs_since_ask", cur + int(n), emit_event=False)
 
 
 def question_due(conn):

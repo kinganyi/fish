@@ -352,6 +352,50 @@ class QuestionCadenceTest(_ProfileBase):
         self.assertEqual(len(evs), 1, "**本轮不回答也要留痕**（用户原话允许不回答）")
         self.assertEqual(json.loads(evs[0][0])["trigger_count"], 10)
 
+    def test_P1_9d_question_block_reaches_the_real_injection_pack(self):
+        """**判据必须查真实注入包**——这是 11-18 发现的漏洞的探针。
+
+        2026-11-11 我实现了 `render_questions_block()`，也给它写了单测，
+        但**从来没从 `build_injection_pack` 调它**。于是：
+
+          · `question_due()` 返回 True          ✅ 对
+          · `render_questions_block()` 有内容    ✅ 对
+          · 注入包里含「画像提问」               ❌ **假**
+
+        实测攒到 73 篇（阈值 10），"该问了"成立了 63 次，一次都没出现在包面上。
+
+        教训：**单测测了零件，不等于装配好了**。所以这条查的是
+        `fish.build_injection_pack()` 的真实输出，不是那个函数自己。
+        """
+        self.conn.execute(
+            "INSERT INTO citizens (citizen_id,display_name,kind,status,created_at,is_owner)"
+            " VALUES ('Q1','问的人','resident','active',?,'0')", (fish.now_utc(),))
+        self.conn.commit()
+        for _ in range(fish_profile.PROFILE_STABLE_EXTRA + 10):
+            fish_profile.bump_question_counter(self.conn)
+        self.assertTrue(fish_profile.question_due(self.conn), "前置：必须到点")
+        pack, _meta = fish.build_injection_pack(
+            self.conn, self.root, "Q1", project="QJ")
+        self.assertIn("画像提问", pack,
+                      "**注入包里没有提问段**——`render_questions_block` 没接线"
+                      "（这正是 11-18 抓到的漏洞）")
+        self.assertIn("不回答", pack, "提问段里必须保留「可以不回答」这一句")
+
+    def test_P1_9e_counter_does_not_pollute_event_log(self):
+        """游标推进**不许**写 `config.changed` 事件。
+
+        实测成因：`bump_question_counter` 走 `set_config()`，而后者无条件写事件。
+        7 天里 73 条事件只为记一个计数器，把"配置改过几次"这个问题彻底污染。
+
+        游标不是事实，是运行期状态——同类游标 `code_registry.last_seq` 本来就不进事件。
+        """
+        before = len(self.events_of("config.changed"))
+        for _ in range(5):
+            fish_profile.bump_question_counter(self.conn)
+        after = len(self.events_of("config.changed"))
+        self.assertEqual(after, before,
+                         f"推进游标写了 {after - before} 条 config.changed 事件")
+
     def test_P1_9_block_mentions_not_answering(self):
         for _ in range(10):
             fish_profile.bump_question_counter(self.conn)
