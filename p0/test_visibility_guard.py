@@ -214,5 +214,42 @@ class PrivateWriteGuardTest(unittest.TestCase):
                          "因为它每个会话开场都跑")
 
 
+    def test_count_matches_list_for_owner(self):
+        """**计数必须和列表同口径**。
+
+        第二轮评审指出：MCP 列出模式没传 viewer，而 `_visibility_sql` 对
+        "没有 viewer"的处理是**一律剔除 private**。于是主人自己的私有笔记
+        从列表里消失了，而 `count_memories` 不过滤、照数——回执写"共 2 条"
+        却只列 1 条。
+
+        评审的话很准：**这不是泄露，是列表在说谎。**
+        """
+        self._enforce(True)
+        pub_code, _ = self._write(title="公开标题", visibility="shared")
+        pri_code, _ = self._write(title="私有标题", visibility="private",
+                                  owner="C-OWNER")
+        rows = fish.list_memories(self.conn, project="P", limit=50,
+                                  viewer_citizen_id="C-OWNER")
+        total = fish.count_memories(self.conn, project="P",
+                                    viewer_citizen_id="C-OWNER")
+        codes = {r[0] for r in rows}
+        self.assertIn(pub_code, codes)
+        self.assertIn(pri_code, codes, "主人看不到自己的私有笔记")
+        self.assertEqual(total, len(rows),
+                         f"回执说共 {total} 条，实际列了 {len(rows)} 条——列表在说谎")
+
+    def test_other_viewer_count_excludes_private(self):
+        """反向：别人看到的条数也不该把私有算进去。"""
+        self._enforce(True)
+        self._write(title="公开标题乙", visibility="shared")
+        self._write(title="私有标题乙", visibility="private", owner="C-OWNER")
+        rows = fish.list_memories(self.conn, project="P", limit=50,
+                                  viewer_citizen_id="C-OTHER")
+        total = fish.count_memories(self.conn, project="P",
+                                    viewer_citizen_id="C-OTHER")
+        self.assertEqual(total, len(rows),
+                         f"别人那边也出现了 {total} vs {len(rows)} 的不一致")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

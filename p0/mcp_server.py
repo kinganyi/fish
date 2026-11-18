@@ -936,11 +936,17 @@ class FishServer:
             # 列出模式的 limit 默认 20（比检索的 10 宽）：没有关键词时
             # "多看几条"本身就是这次调用的目的。
             limit = int(a.get("limit") or fish.LIST_DEFAULT_LIMIT)
+            # F-P1-X（第二轮评审）：**必须传 viewer**。不传的话 `_visibility_sql`
+            # 按"没有 viewer 一律剔除 private"处理——于是主人自己的私有笔记
+            # 从列表里消失，而计数照数，回执变成"共 2 条"却只列 1 条。
+            _viewer = ident.citizen_id
             rows = fish.list_memories(self.conn, project=project, tags=tags,
                                       limit=limit,
-                                      include_superseded=include_superseded)
+                                      include_superseded=include_superseded,
+                                      viewer_citizen_id=_viewer)
             total = fish.count_memories(self.conn, project=project, tags=tags,
-                                        include_superseded=include_superseded)
+                                        include_superseded=include_superseded,
+                                        viewer_citizen_id=_viewer)
             head = fish.format_list_declaration(project=project, tags=tags,
                                                 shown=len(rows), total=total)
             if not rows:

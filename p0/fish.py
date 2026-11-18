@@ -2698,10 +2698,18 @@ def _list_where(conn, *, project=None, tags=None, include_superseded=False):
     return ((" WHERE " + " AND ".join(where)) if where else ""), params
 
 
-def count_memories(conn, *, project=None, tags=None, include_superseded=False) -> int:
+def count_memories(conn, *, project=None, tags=None, include_superseded=False,
+                    viewer_citizen_id=None) -> int:
     """列出模式命中多少条（**不含** limit）——回包首行的"共 N 条"用它，不用 len(rows)。"""
     clause, params = _list_where(conn, project=project, tags=tags,
                                  include_superseded=include_superseded)
+    # F-P1-X（第二轮评审）：计数必须和列表**同口径**。
+    # 否则回执写"共 2 条"却只列 1 条——不是泄露，是回执在说谎。
+    _cvis_sql, _cvis_params = _visibility_sql(conn, viewer_citizen_id)
+    if _cvis_sql:
+        _ccond = _cvis_sql.strip()[4:]
+        clause = (clause + " AND " + _ccond) if clause.strip() else (" WHERE " + _ccond)
+        params = list(params) + _cvis_params
     try:
         return int(conn.execute("SELECT COUNT(*) FROM code_index" + clause,
                                 params).fetchone()[0])
