@@ -50,6 +50,17 @@ class RebuildError(Exception):
 # F-P1-X（评审 🟠-1）：预检覆盖的事件类型。
 # 判据 `test_precheck_types_cover_every_replayed_type` 会扫源码里的重放类型，
 # 断言它们全在这里——谁新增一类重放却忘了加进来，那条就红。
+# 第二轮评审 🟠-1 剩余：**形状对不等于类型对**。`{"codes": 123}` 虽然能解析成
+# dict，重放时会抛 TypeError——而且是在 DELETE 之后。这和 🟠-1 当初是同一个
+# 失败形状（只修了表面）。所以按事件类型声明字段契约：重放怎么用它，预检就怎么验它。
+_PRECHECK_FIELD_TYPES = {
+    "memory.recorded": {"code": (str,)},
+    "memory.superseded": {"old": (str,), "new": (str,)},
+    "memory.retired": {"code": (str,), "status": (str,)},
+    "memory.accessed": {"codes": (list, tuple)},
+    "memory.dormant": {"codes": (list, tuple)},
+}
+
 _PRECHECK_TYPES = ("memory.recorded", "memory.superseded", "memory.retired",
                    "memory.accessed", "memory.dormant")
 
@@ -179,8 +190,23 @@ def rebuild_projection(conn, root: Path) -> dict:
             continue
         if not isinstance(p, dict):
             bad_events.append((seq, ev_type, "payload 不是对象"))
-        elif ev_type in NEEDS_CODE and not p.get("code"):
+            continue
+        if ev_type in NEEDS_CODE and not p.get("code"):
             bad_events.append((seq, ev_type, "payload 缺 code"))
+            continue
+        # 字段类型：重放会怎么用它，这里就怎么验它（见 _PRECHECK_FIELD_TYPES 注释）
+        _bad_field = None
+        for _field, _types in _PRECHECK_FIELD_TYPES.get(ev_type, {}).items():
+            if _field not in p:
+                continue
+            if not isinstance(p[_field], _types):
+                _bad_field = (_field, type(p[_field]).__name__,
+                              "/".join(t.__name__ for t in _types))
+                break
+        if _bad_field:
+            bad_events.append(
+                (seq, ev_type,
+                 f"字段 {_bad_field[0]} 类型是 {_bad_field[1]}，应为 {_bad_field[2]}"))
     if bad_events:
         # 抛出去而不是"跳过坏事件继续"：跳过会让投影少一条，而少的那条
         # 看起来和"本来就没有"完全一样——静默丢数据比响亮失败糟得多。

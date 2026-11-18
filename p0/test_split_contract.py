@@ -149,7 +149,10 @@ FISH_REBUILD_LINES_MIN = 380
 # F-P1-X（独立评审 🟠-1）：520 → 521。预检从「只扫 memory.recorded」扩到
 # 五类事件（superseded/retired/accessed/dormant），多了类型清单与按类型分解
 # 的报错。**这是安全修复不是功能膨胀**，且只 +1 行。
-FISH_REBUILD_LINES_MAX = 521
+# F-P1-X（第二轮评审 🟠-1 剩余）：521 → 554。
+# 预检从"只验能解析成 dict"扩到**按事件类型验字段类型**（5 类事件 × 字段契约）。
+# 这是评审点名要的修复，不是功能膨胀；注释已压到最短，余量留 8 行。
+FISH_REBUILD_LINES_MAX = 554
 # 2026-11-11 新模块 · 数据库 DDL 常量 + `SCHEMA` 拼装 + `connect`（纯数据 + 8 行连接）。
 # 第三刀把知识库表结构与主库拼装也归到这里——所以窗口随之上抬到 700。
 FISH_SCHEMA_LINES_MIN = 480

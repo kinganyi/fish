@@ -200,5 +200,41 @@ class RebuildAtomicityTest(unittest.TestCase):
                          f"这些事件类型被重放解析但不在预检清单里：{missing}")
 
 
+    def test_field_type_corruption_is_caught_by_precheck(self):
+        """**形状对不等于类型对**：`{"codes": 123}` 必须在预检就被拦。
+
+        第二轮评审指出：预检原来只验"能解析成 dict"，于是这类**形状合法、类型非法**
+        的 payload 照样过关，然后在 `DELETE FROM code_index` **之后**才炸
+        `TypeError: 'int' object is not iterable`。
+
+        **这和 🟠-1 当初是完全同一个失败形状**——我以为修好了，其实只修了表面一层。
+        所以这条判据盯的不是"能不能解析"，是"字段类型对不对"。
+        """
+        before = self.conn.execute("SELECT COUNT(*) FROM code_index").fetchone()[0]
+        cases = [
+            ("memory.accessed", '{"codes": 123}'),
+            ("memory.superseded", '{"old": {}, "new": "P-1"}'),
+            ("memory.retired", '{"code": {}}'),
+        ]
+        for ev_type, payload in cases:
+            with self.subTest(event_type=ev_type):
+                self.conn.execute(
+                    "INSERT INTO events (event_id,ts,type,actor,subject,payload,"
+                    "cause,refs,schema) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (f"badtype-{ev_type}", fish.now_utc(), ev_type, "{}",
+                     "mem:P-1", payload, None, None, "evt@1"))
+                self.conn.commit()
+                with self.assertRaises(fish_rebuild.RebuildError) as ctx:
+                    fish_rebuild.rebuild_projection(self.conn, self.data)
+                detail = ctx.exception.detail or {}
+                whys = " ".join(str(b[2]) for b in detail.get("bad_events", []))
+                self.assertIn("类型", whys,
+                              f"{ev_type} 的类型错误没被预检抓到：{detail}")
+                after = self.conn.execute(
+                    "SELECT COUNT(*) FROM code_index").fetchone()[0]
+                self.assertEqual(after, before,
+                                 f"{ev_type} 类型畸形时投影被改了：{before}→{after}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
