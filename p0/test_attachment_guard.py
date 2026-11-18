@@ -54,6 +54,11 @@ class AttachmentGuardTest(unittest.TestCase):
         self.root = Path(self._tmp) / "data"
         self.root.mkdir(parents=True)
         self.conn = _conn()
+        # record_memory 要分配编码，必须先在 code_registry 登记前缀
+        self.conn.execute(
+            "INSERT INTO code_registry (prefix, namespace, last_date, last_seq)"
+            " VALUES ('P','P','2026-11-18',0)")
+        self.conn.commit()
 
     def tearDown(self):
         try:
@@ -181,6 +186,43 @@ class AttachmentGuardTest(unittest.TestCase):
         self.assertEqual(m1["sha256"], m2["sha256"])
         blobs = list((self.root / "blobs").rglob("*.txt"))
         self.assertEqual(len(blobs), 1, f"同一内容存了多份：{blobs}")
+
+
+    # --------------------------------------------------- 🟠-6 不许烧编码号
+    def test_rejected_attachment_does_not_burn_a_code(self):
+        """**核心**：附件被拒时，编码号不能已经被分配掉。
+
+        旧顺序是 `next_code()` → 校验附件，于是被拒的附件烧掉一个号，
+        下一条记忆从 -02 开始。而 `record_memory` 上方自己写着
+        「编码一经分配不可回收」——**一条违反自己不变量、却不报错的路径，
+        比没有这条不变量更糟**：它让人以为它成立。
+
+        实测方式：拒绝一次，然后断言 `last_seq` 没动、下一条仍是 -01。
+        """
+        self._cap(1)          # 让大小检查生效，用敏感名也行
+        bad = self._mk(".env", b"SECRET=1")
+        with self.assertRaises(A.AttachmentRejected):
+            fish.record_memory(
+                self.conn, self.root, project="P", title="带敏感附件", body="x\n",
+                attachments=[str(bad)])
+        seq = self.conn.execute(
+            "SELECT last_seq FROM code_registry WHERE prefix='P'").fetchone()[0]
+        self.assertEqual(seq, 0, f"被拒的附件烧掉了编码号：last_seq={seq}")
+        code, _rel = fish.record_memory(
+            self.conn, self.root, project="P", title="正常一条", body="y\n")
+        self.assertTrue(code.endswith("-01"), f"下一条应该是 -01，实际 {code}")
+
+    def test_validation_happens_before_coding(self):
+        """结构判据：`validate_attachment` 的调用点必须在 `next_code` **之前**。
+
+        行为判据（上面那条）能验结果，但说不清"如果下次有人调换顺序会怎样"。
+        这条直接钉顺序。
+        """
+        src = (HERE / "fish.py").read_text(encoding="utf-8")
+        i_val = src.index("validate_attachment(_ap")
+        i_code = src.index("    code = next_code(conn, project)")
+        self.assertLess(i_val, i_code,
+                        "附件校验排在了 next_code 之后——被拒时会烧编码号")
 
 
 if __name__ == "__main__":

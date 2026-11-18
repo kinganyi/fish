@@ -178,8 +178,14 @@ FROZEN_CITIZENS_SQL = {
             "UPDATE citizens SET status='retired' WHERE citizen_id=?",
         ),
         "cmd_citizen_list": (
-            "SELECT citizen_id,display_name,kind,host,status,is_owner,created_at "
+            # F-P1-X（独立评审 🟠-4b）：`--all` 需要一列 `archived_at`，非 --all 时
+            # 补 NULL 占位，好让两条分支共用同一套行解包。**这是有意的契约变更**：
+            # 起因是 `restore_citizen` 的提示让用户跑 `citizen-list --all`，而当时没有它。
+            "SELECT citizen_id,display_name,kind,host,status,is_owner,created_at,NULL "
             "FROM citizens ORDER BY status='retired', created_at",
+            # --all 分支走视图（归档是搬行，归档公民不在 citizens 里）
+            "SELECT citizen_id,display_name,kind,host,status,is_owner,created_at,archived_at "
+            "FROM citizens_all ORDER BY (archived_at IS NULL) DESC, created_at",
         ),
         "cmd_report": (
             "SELECT display_name,kind,status FROM citizens WHERE status='active' "
@@ -777,7 +783,11 @@ class FishIdentityP1aTest(unittest.TestCase):
         """判据 G：本轮改动前那 28 条引用 citizens 的 SQL，逐条仍在原函数里、一字未改。"""
         counts = {name: sum(len(v) for v in frozen.values())
                   for name, frozen in FROZEN_CITIZENS_SQL.items()}
-        self.assertEqual(counts, {"fish.py": 21, "fish_common.py": 4,
+        self.assertEqual(counts, {# F-P1-X（评审 🟠-4b）：21 → 22。`cmd_citizen_list` 多了一条走 citizens_all 的
+                        # 查询（--all 要列归档公民，而归档是搬行、不在 citizens 里）。
+                        # **这是本轮唯一一处有意的 SQL 变更**，已在上面的冻结元组里
+                        # 逐条写明；其余 21 条一个字未动。
+                        "fish.py": 22, "fish_common.py": 4,
                                   "fish_rebuild.py": 0,
                                   "mcp_server.py": 2, "daily_report.py": 1},
                          f"基线自检：fish 21 / common 4 / rebuild 0 / mcp 2 / daily 1（总数 28）"

@@ -193,7 +193,9 @@ def rebuild_projection(conn, root: Path) -> dict:
             f"投影**未被修改**",
             detail={"bad_events": bad_events[:10],
                     "checked_types": list(PRECHECK_TYPES),
-                    "hint": "先修这几条事件再重建；坏事件不修就重建会把它们静默丢掉"})
+                    "hint": "这几条事件不修就不能重建——跳过它们会让投影少行，"
+                            "而少的那行与「本来就没有」看起来完全一样。\n"
+                            "先按 bad_events 里的 seq 定位并修好 payload。"})
     rep["precheck_ok"] = True
 
     conn.execute("DELETE FROM code_index")

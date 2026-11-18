@@ -104,6 +104,7 @@ from fish_corpus import CorpusError, CorpusNotReady  # noqa: F401
 # F-P1-5：数据面 CLI 入口（实现住 fish_dataplane，这里只做 re-export）
 from fish_dataplane import cli as dataplane_cli  # noqa: F401
 from fish_attach import (AttachmentRejected, store_blob,  # F-P1-3
+                         validate_attachment,
                          ATTACH_MAX_BYTES_KEY, ATTACH_MAX_MB_DEFAULT,
                          ATTACH_SENSITIVE_PATTERNS, ATTACH_DENY_ROOTS,
                          _attach_max_bytes, _attach_check_name,
@@ -1090,6 +1091,17 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
     _ok, _why = project_writable(conn, project)
     if not _ok:
         raise ValueError(_why)
+    # F-P1-X（独立评审 🟠-6）：**附件校验必须在分配编码之前**。
+    # 旧顺序是 next_code -> 校验附件，于是被拒的附件把一个编码号烧掉了，
+    # 下一条记忆从 -02 开始。而本函数上方自己写着「编码一经分配不可回收」——
+    # 一条违反自己不变量的路径，比没有这条不变量更糟：它让人以为它成立。
+    # 这里只**校验**不落盘；落盘仍在 next_code 之后（避免留下更多孤儿 blob）。
+    for item in attachments or []:
+        _ap = Path(item["path"]) if isinstance(item, dict) else Path(item)
+        if not _ap.exists():
+            raise FileNotFoundError(f"附件不存在：{_ap}")
+        validate_attachment(_ap, conn=conn,
+                           allow_sensitive=bool(allow_sensitive_attachments))
     code = next_code(conn, project)
     # 正文路径统一走 `body_relpath`（编码 + 标题缩写）。
     # 为什么不在这里直接拼：`rebuild_projection` 也要算同一个路径，两处各拼一次
@@ -8098,9 +8110,19 @@ def cmd_citizen_list(args):
     conn.executescript(SCHEMA)
     migrate(conn)
 
-    rows = conn.execute(
-        "SELECT citizen_id,display_name,kind,host,status,is_owner,created_at "
-        "FROM citizens ORDER BY status='retired', created_at").fetchall()
+    # F-P1-X（独立评审 🟠-4b）：补 `--all`。
+    # 起因：`restore_citizen` 的报错写着「先用 `fish citizen-list --all` 确认编码」，
+    # 而 `citizen-list` **一个参数都没有**——提示指向不存在的东西。
+    # 这和 F-P1-7 修的是同一个病：把"我做不到"伪装成"你少做了一步"。
+    # 归档的公民在 `citizens` 里根本不存在（归档是搬行），所以查归档必须走视图。
+    if getattr(args, "all", False):
+        rows = conn.execute(
+            "SELECT citizen_id,display_name,kind,host,status,is_owner,created_at,archived_at "
+            "FROM citizens_all ORDER BY (archived_at IS NULL) DESC, created_at").fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT citizen_id,display_name,kind,host,status,is_owner,created_at,NULL "
+            "FROM citizens ORDER BY status='retired', created_at").fetchall()
     if not rows:
         print("还没有任何公民。用 citizen-add 或让 AI 调 register 登记。")
         conn.close()
@@ -8108,7 +8130,7 @@ def cmd_citizen_list(args):
 
     print(f"{'名字':<18}{'形态':<10}{'宿主':<10}{'状态':<10}{'记忆':>4}  创建时间")
     print("─" * 76)
-    for cid, name, kind, host, status, is_owner, created in rows:
+    for cid, name, kind, host, status, is_owner, created, _archived in rows:
         n = conn.execute("SELECT COUNT(*) FROM code_index WHERE owner=?", (cid,)).fetchone()[0]
         mark = "★" if is_owner else " "
         print(f"{name:<18}{kind or '-':<10}{host or '-':<10}{status or '-':<10}{n:>4}  {created} {mark}")

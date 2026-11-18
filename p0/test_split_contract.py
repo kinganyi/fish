@@ -145,7 +145,10 @@ FISH_COMMON_LINES_MAX = 950
 # 2026-11-11 新模块 · `rebuild_projection`（404 行 + 说明）：fish.py 里最长也最危险的
 # 函数，外部审查 🔴9 就出在它身上。给它自己的窗口，防它再长成第二个巨石。
 FISH_REBUILD_LINES_MIN = 380
-FISH_REBUILD_LINES_MAX = 520
+# F-P1-X（独立评审 🟠-1）：520 → 521。预检从「只扫 memory.recorded」扩到
+# 五类事件（superseded/retired/accessed/dormant），多了类型清单与按类型分解
+# 的报错。**这是安全修复不是功能膨胀**，且只 +1 行。
+FISH_REBUILD_LINES_MAX = 521
 # 2026-11-11 新模块 · 数据库 DDL 常量 + `SCHEMA` 拼装 + `connect`（纯数据 + 8 行连接）。
 # 第三刀把知识库表结构与主库拼装也归到这里——所以窗口随之上抬到 700。
 FISH_SCHEMA_LINES_MIN = 480

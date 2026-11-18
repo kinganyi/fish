@@ -488,6 +488,8 @@ def main():
     p.set_defaults(func=_f.cmd_citizen_add)
 
     p = sub.add_parser("citizen-list")
+    p.add_argument("--all", action="store_true",
+                   help="连归档的公民一起列（归档是搬行，不在 citizens 里）")
     p.set_defaults(func=_f.cmd_citizen_list)
 
     p = sub.add_parser("citizen-merge",

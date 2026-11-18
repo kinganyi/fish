@@ -110,11 +110,19 @@ def _attach_check_root(src: Path) -> None:
                 hint="把要存的文件复制到工作目录再 attach")
 
 
-def store_blob(root: Path, src: Path, *, conn=None, allow_sensitive=False) -> dict:
-    """把文件按内容寻址存进 blobs/，重复内容只存一份。返回附件元数据。
+def validate_attachment(src, *, conn=None, allow_sensitive=False):
+    """**只校验，不写任何东西**（F-P1-X / 独立评审 🟠-6）。
 
-    安全策略（F-P1-3）：大小上限 / 敏感名单 / 系统目录 / 流式哈希 + 原子落盘。
-    四者都在**读第一个字节之前**判定——先把 10 GB 读进内存再检查就晚了。
+    ## 为什么要把校验单独拆出来
+
+    `store_blob` 原来把"校验 + 落盘"做在一起，而 `record_memory` 在它**之前**
+    已经 `next_code()` 分配了编码。于是：一条被拒的附件 → 抛异常 → 编码**已经烧掉**，
+    下一条记忆从 -02 开始。本文件上级（fish.py）自己写着「编码一经分配不可回收」，
+    这条路径正好违反它。
+
+    拆开之后：`validate_attachment` 在 `next_code` **之前**跑，`store_blob` 在之后。
+    被拒的附件一个编码都不烧；而落盘仍然发生在分配之后，
+    不会因为"先写了 blob 再失败"留下更多孤儿文件。
     """
     src = Path(src)
     if not src.is_file():
@@ -124,7 +132,6 @@ def store_blob(root: Path, src: Path, *, conn=None, allow_sensitive=False) -> di
     if not allow_sensitive:
         _attach_check_name(src)
         _attach_check_root(src)
-
     size = src.stat().st_size
     cap = _attach_max_bytes(conn)
     if size > cap:
@@ -133,6 +140,20 @@ def store_blob(root: Path, src: Path, *, conn=None, allow_sensitive=False) -> di
             f"附件 {size / 1024 / 1024:.1f} MB 超过上限 {cap / 1024 / 1024:.0f} MB：{src.name}",
             hint=f"提高上限：fish config set {ATTACH_MAX_BYTES_KEY} <MB>；"
                  "或先把文件压小")
+    return size
+
+
+def store_blob(root: Path, src: Path, *, conn=None, allow_sensitive=False) -> dict:
+    """把文件按内容寻址存进 blobs/，重复内容只存一份。返回附件元数据。
+
+    安全策略（F-P1-3）：大小上限 / 敏感名单 / 系统目录 / 流式哈希 + 原子落盘。
+    四者都在**读第一个字节之前**判定——先把 10 GB 读进内存再检查就晚了。
+    """
+    src = Path(src)
+    # 校验与 store_blob 共用一份（`record_memory` 会在 next_code **之前**
+    # 先单独调 validate_attachment，所以这里再跑一遍是幂等的、也必须跑：
+    # 直接调 store_blob 的其它调用方不该绕过校验）。
+    size = validate_attachment(src, conn=conn, allow_sensitive=allow_sensitive)
 
     ext = src.suffix.lower()
     # 流式：分块读 → 边算 sha256 边写 temp。**不整份进内存**。

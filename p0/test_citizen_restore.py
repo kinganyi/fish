@@ -139,5 +139,43 @@ class HintPointsAtRealCommandTest(unittest.TestCase):
                          f"这些提示指向不存在的命令：{missing}（注册的有 {sorted(registered)[:8]}…）")
 
 
+    def test_no_hint_names_a_missing_flag(self):
+        """**回归钉**：错误提示里提到的东西必须真的存在。
+
+        外部审查 🟠-4 找到两处假路标：
+          · `RebuildError` 的 hint 让人用 `--skip-bad`（全仓不存在）
+          · `restore_citizen` 的提示让人跑 `citizen-list --all`（当时没这个参数）
+
+        同类的病本项目已出现过一次（F-P1-7 的 `citizen-restore`）。
+
+        ## 为什么是"钉住两处"而不是"扫全仓"
+
+        第一版扫全仓所有反引号包着的 `--xxx`，结果 6 处**全是误报**：
+        文档里举例（`--long`）、叙述评审结论的句子、以及脚本自己注册的选项
+        （`collect-activity` 在 fish_push_hook.py 里确实有）。
+        想用一条正则区分「给用户的建议」和「文档里的举例」是做不到的——
+        做到的那条正则会又长又脆，而它自己坏掉时也会**安静地**失去判别力。
+
+        所以退一步钉具体的两处，加一条结构断言：`hint=` 里出现的 `--skip-bad` 必须为 0。
+        这不是最好，但它**现在真的能红**——比一条看着通用、实际全是误报的判据强。
+        """
+        # ① 不许再出现 --skip-bad（它从未存在过）
+        for name in ("fish.py", "fish_cli.py", "fish_rebuild.py", "fish_attach.py",
+                     "fish_kb.py", "fish_dataplane.py", "mcp_server.py"):
+            fp = HERE / name
+            if not fp.exists():
+                continue
+            txt = fp.read_text(encoding="utf-8", errors="replace")
+            self.assertNotIn("--skip-bad", txt,
+                             f"{name} 里仍有 --skip-bad —— 这个选项从来没被注册过")
+
+        # ② citizen-list 必须支持 --all（提示里让用户跑的那个）
+        cli = (HERE / "fish_cli.py").read_text(encoding="utf-8")
+        i2 = cli.index('add_parser("citizen-list")')
+        j2 = cli.index("set_defaults", i2)
+        self.assertIn('add_argument("--all"', cli[i2:j2],
+                      "citizen-list 不支持 --all，而 restore_citizen 的提示让用户去跑它")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
