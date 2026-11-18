@@ -158,7 +158,38 @@ def resolve_merged(merge_map, citizen_id, *, max_hops=MAX_MERGE_HOPS):
 AUTH_REQUIRED_MEM_TYPES = frozenset({"rule", "identity"})
 
 
-def enforce_mem_type_auth(mem_type, *, has_credential):
+# F-P1-X（2026-11-18 独立评审 🔴-1）：**有凭证 != 有授权**。
+#
+# 实测：生产库 71 条 rule 里有 10 条作者是 kind=visitor 的公民；而 MCP 的
+# `session_start` 对任何调用方无门槛签发 visitor 公民 + token。完整链路：
+#   session_start -> 拿 token -> remember(mem_type="rule") -> 成功 -> 该规矩
+#   进入所有人的注入包（无 untrusted 标记）
+# 旧实现只问 `has_credential`，把「你登记过身份」当成了「你有资格改 AI 的约束」。
+#
+# 为什么是这两个 kind：resident（长期公民）与 role（项目级角色）是**被授予**的；
+# visitor 是**自助登记**的，任何人一次 session_start 就有。
+AUTHORIZED_CITIZEN_KINDS = ("resident", "role")
+
+
+def citizen_kind_of(conn, citizen_id):
+    """查一个公民的 kind（visitor / role / resident）。查不到返回 None。
+
+    **不猜**：查不到就是 None，而 `enforce_mem_type_auth` 把 None 当"不放行"。
+    为什么不在这里做"查不到就当 resident"这种兜底——那正好是这条缺陷的成因：
+    把一个判不到的事实当成有利结论。
+    """
+    cid = str(citizen_id or "").strip()
+    if not cid:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT kind FROM citizens WHERE citizen_id=?", (cid,)).fetchone()
+    except Exception:      # noqa: BLE001 —— 库结构异常时不猜
+        return None
+    return (row[0] if row else None)
+
+
+def enforce_mem_type_auth(mem_type, *, has_credential, citizen_kind=None):
     """分级写入鉴权的**唯一实现**（CLI `cmd_remember` 与 MCP `tool_remember` 都调这里）。
 
     为什么落点在"入口"而不是 `record_memory`：凭证是**调用路径**的属性，不是写入函数的
@@ -177,6 +208,22 @@ def enforce_mem_type_auth(mem_type, *, has_credential):
         还会把规矩错误归属给主人。
     """
     kind = str(mem_type or "fact").strip().lower()
+    # 授权门：凭证有效但只是 visitor 时，仍然不许写约束类记忆。
+    # citizen_kind=None 表示调用方判不到——按**不放行**处理（宁严勿松）：
+    # 放行错了是陌生人能改所有人的 AI 行为；拦住错了只是少写一条规矩。
+    if (kind in AUTH_REQUIRED_MEM_TYPES and has_credential
+            and str(citizen_kind or "").strip().lower()
+            not in AUTHORIZED_CITIZEN_KINDS):
+        raise ValueError(
+            "写入 mem_type=%r 需要**被授予**的凭证，当前为 %r"
+            "（允许的 kind：%s）。\n"
+            "  为什么：rule/identity 会进所有人的注入包，而 visitor 是"
+            "**自助登记**的身份（任何人一次 session_start 就有）；\n"
+            "  把「自助登记」当成「有资格」，等于陌生人能改 AI 的行为约束。\n"
+            "  要写：由主人把该公民升为 resident，或改用 "
+            "fact / episode / lesson / artifact。"
+            % (kind, citizen_kind or "(判不到)",
+               "/".join(AUTHORIZED_CITIZEN_KINDS)))
     if kind in AUTH_REQUIRED_MEM_TYPES and not has_credential:
         raise ValueError(
             f"写入 mem_type={kind!r} 需要有效凭证：`rule`/`identity` 会进注入包的"

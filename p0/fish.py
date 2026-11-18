@@ -42,7 +42,8 @@ import fish_naming
 import fish_surface
 from fish_surface import normalize_surface, surface_hit  # noqa: F401 —— 对外仍是 fish 的名字
 # 外部审查 🔴5/🔴6/🔴9 的修法（2026-11-11 抽出成模块，避免 fish.py 继续膨胀 · J4/E-11）
-from fish_trust import (AUTH_REQUIRED_MEM_TYPES, enforce_mem_type_auth,  # noqa: F401
+from fish_trust import (AUTH_REQUIRED_MEM_TYPES, AUTHORIZED_CITIZEN_KINDS,
+                        citizen_kind_of, enforce_mem_type_auth,  # noqa: F401
                         identity_anchor_grants, load_ownership_merge_map, resolve_merged)
 # 2026-11-11（E-11 拆包）：`rebuild_projection`（404 行，fish.py 里最长最危险的函数）
 # 搬到 `fish_rebuild`。它不 import fish，用的是下层 fish_common + fish_trust（J2）。
@@ -5400,8 +5401,11 @@ def cmd_remember(args):
         # （一个合法 citizen_id），按它判会把"无凭证写规矩"误判成有凭证，
         # 且会把规矩错误归属给主人。CLI 没有 `--token` 是有意为之
         # （明文进 shell 历史），凭证走环境变量 `FISH_SESSION_TOKEN`。
-        enforce_mem_type_auth(getattr(args, "type", "fact"),
-                              has_credential=bool(token_actor_citizen_id(conn)))
+        _cid = token_actor_citizen_id(conn)
+        enforce_mem_type_auth(
+            getattr(args, "type", "fact"),
+            has_credential=bool(_cid),
+            citizen_kind=citizen_kind_of(conn, _cid))
     except ValueError as e:
         conn.close()
         print(f"错误：{e}", file=sys.stderr)

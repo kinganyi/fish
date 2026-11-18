@@ -49,11 +49,18 @@ class MemTypeAuthPolicyTest(unittest.TestCase):
                 fish.enforce_mem_type_auth(kind, has_credential=False)
 
     def test_A4_with_credential_rule_passes(self):
-        fish.enforce_mem_type_auth("rule", has_credential=True)
-        fish.enforce_mem_type_auth("identity", has_credential=True)
+        fish.enforce_mem_type_auth("rule", has_credential=True,
+                                 citizen_kind="resident")
+        fish.enforce_mem_type_auth("identity", has_credential=True,
+                                 citizen_kind="resident")
 
     def test_A5_normalizes_case_and_space(self):
         """` RULE ` 与 `Rule` 都不能绕过（归一后再判）。"""
+        # F-P1-X（2026-11-18 独立评审 🔴-1）：**有凭证 != 有授权**。
+        # 本判据原先断言「有凭证就能写 rule」，而会话级 session_start
+        # 对任何人无门槛签发 visitor 凭证——实测生产库 71 条 rule 里
+        # 10 条作者是 visitor。所以这里补上授权档位：
+        # 断言的是「被授予的公民 + 凭证」能写，而不是「凭证能写」。
         for raw in ("RULE", " Rule ", "Rule", "IDENTITY", " Identity\t"):
             with self.subTest(raw=raw):
                 with self.assertRaises(ValueError):
@@ -75,7 +82,7 @@ class MemTypeAuthMCPTest(unittest.TestCase):
         fish.migrate(self.conn)
         # 起一条 token 备用（模拟"有凭证"的调用方）。
         # 注意先建 MCP 客户端前就把库准备好，子进程会读到同一个文件。
-        sess = fish.start_session(self.conn, alias="auth-probe", kind="visitor",
+        sess = fish.start_session(self.conn, alias="auth-probe", kind="resident",   # F-P1-X：原本是 visitor——那正是缺陷（见 test_rule_authorization.py）
                                   environ={})
         self.token = sess["token"]
         self.citizen = sess["citizen_id"]

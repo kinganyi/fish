@@ -153,11 +153,17 @@ FISH_SCHEMA_LINES_MAX = 700
 # 2026-11-11 新模块 · 建表/补列/迁移辅助（20 个 ensure 函数 + 2 个数据常量）。
 # 注意 `migrate` **不在**这里：它是编排者，要调 KB 专属的 ensure，搬走会成上行依赖。
 # F-P1-10（2026-11-18 外部审查）：窗口数字不再写死在测试里，改从
-# `_audit/j4_ratchet.json` 读。数字写两处必然漂——这不是理论，是这个仓库
+# `j4_ratchet.json` 读。数字写两处必然漂——这不是理论，是这个仓库
 # 已经发生过的事（README 徽章 1,647 vs 实际 1,737）。单一出处在 JSON，
 # 每次改动必须在 history 里写理由；没有理由的改动在评审时无处可藏。
+# **F-P1-X（2026-11-18 独立评审 🟠-3）：从 `_audit/` 搬到顶层。**
+# `_audit/` 按 .gitignore 的注释是"临时产物，每批重建，不是真相"，
+# 而这个是**真相**（窗口数字的唯一出处）。放在被忽略的目录里 →
+# 公开镜像里根本没有这个文件 → `pytest` 在**导入期**就 FileNotFoundError →
+# "Interrupted: 1 error during collection" → 整个会话中止。
+# 实测：公开树复制时全量测试跑不起来。文件位置错，代价是"别人无法验证结论"。
 _RATCHET = json.loads(
-    (Path(__file__).resolve().parent / "_audit" / "j4_ratchet.json").read_text(encoding="utf-8"))
+    (Path(__file__).resolve().parent / "j4_ratchet.json").read_text(encoding="utf-8"))
 FISH_LINES_MIN = int(_RATCHET["min"])
 FISH_LINES_MAX = int(_RATCHET["max"])
 
@@ -439,12 +445,12 @@ class J4RatchetTest(unittest.TestCase):
     也就是说：真正的门是**没有人会去抬窗**这个约定，而约定不是判据。
 
     这里把约定变成三条能红的东西：
-      ① 数字只有一个出处（`_audit/j4_ratchet.json`），测试里不再写死；
+      ① 数字只有一个出处（`j4_ratchet.json`），测试里不再写死；
       ② 每一次改动都必须在 history 里留下**非空理由**——抬窗可以，但必须留话；
       ③ 最新一条历史的 `new` 必须与当前值一致——不许改数字不改历史。
     """
 
-    RATCHET = Path(__file__).resolve().parent / "_audit" / "j4_ratchet.json"
+    RATCHET = Path(__file__).resolve().parent / "j4_ratchet.json"   # 见上方 🟠-3 说明
 
     def _data(self):
         return json.loads(self.RATCHET.read_text(encoding="utf-8"))

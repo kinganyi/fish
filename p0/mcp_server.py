@@ -850,7 +850,9 @@ class FishServer:
         # 策略本体在 `fish.enforce_mem_type_auth`（CLI 与 MCP 共用一份，避免两份实现漂）。
         # `ident.citizen_id` 只在 token **有效**时才非空（`_resolve_identity` 失效时给 None）。
         fish.enforce_mem_type_auth(
-            a.get("mem_type", "fact"), has_credential=bool(ident.citizen_id))
+            a.get("mem_type", "fact"),
+                has_credential=bool(ident.citizen_id),
+                citizen_kind=fish.citizen_kind_of(self.conn, ident.citizen_id))
         # 查重提示的出口（2026-10-25 · 阶段 C）：传一个空 list 进去，写入后由
         # `record_memory` 把相似项填进来。**不传（None）= 零开销**，所以这是一个
         # 纯增量参数——旧调用路径一个字都不变。
