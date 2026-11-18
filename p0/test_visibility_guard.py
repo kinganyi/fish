@@ -251,5 +251,44 @@ class PrivateWriteGuardTest(unittest.TestCase):
                          f"别人那边也出现了 {total} vs {len(rows)} 的不一致")
 
 
+    def test_neighbors_filters_private(self):
+        """**第三轮评审：这处修复原本零判据。**
+
+        评审官把 `fish.py` 里 neighbors 的可见性过滤整段删掉，
+        `test_visibility_guard` 12 passed、`test_visibility` 5 passed、
+        `test_p1a` 32 passed——**全绿**。
+
+        也就是说：上一轮我报告"给 neighbors 补了过滤并验过"，
+        而实际上没有任何判据盯着它。**删掉它和留着它，测试读数一样。**
+
+        这条补上那个洞：别人看不到私有条目的标题，自己看得到，
+        开关关着时两边都能看到（等价旧行为）。
+        """
+        self._enforce(True)
+        anchor, _ = self._write(title="锚点", visibility="shared")
+        pri, _ = self._write(title="私密邻居标题", visibility="private",
+                             owner="C-OWNER")
+
+        other = fish.neighbors(self.conn, anchor, n=3, viewer_citizen_id="C-OTHER")
+        titles_other = str(other)
+        self.assertNotIn("私密邻居标题", titles_other,
+                         "别人在 neighbors 里看到了私有条目的标题——"
+                         "私有藏了正文却没藏住存在")
+
+        own = fish.neighbors(self.conn, anchor, n=3, viewer_citizen_id="C-OWNER")
+        self.assertIn("私密邻居标题", str(own),
+                      "主人自己也看不到自己的私有邻居（过滤过头）")
+
+    def test_neighbors_is_noop_when_not_enforced(self):
+        """反向判据：开关关着时 neighbors 不该过滤（等价旧行为）。"""
+        self._enforce(False)
+        anchor, _ = self._write(title="锚点乙", visibility="shared")
+        pri, _ = self._write(title="标签邻居", visibility="private",
+                             owner="C-OWNER", allow_unenforced_private=True)
+        other = fish.neighbors(self.conn, anchor, n=3, viewer_citizen_id="C-OTHER")
+        self.assertIn("标签邻居", str(other),
+                      "开关关着时 neighbors 居然过滤了——那不是等价旧行为")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
