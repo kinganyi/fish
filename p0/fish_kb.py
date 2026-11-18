@@ -654,6 +654,44 @@ def _kb_free_bytes(path):
         return None
 
 
+def _relocate_state(vault_row) -> str:
+    """从 `note` 的 relocate 段读出迁移状态：`moving` / `done` / `rolled_back` / ""`.
+
+    读不出来（note 为空、不是 JSON、没有 relocate 段）一律返回 ""——**不猜**。
+    "没有迁移记录"和"迁移完成了"是两种不同的事实，混在一起会让守卫失去意义。
+    """
+    import json as _json
+    raw = (vault_row or {}).get("note")
+    if not raw:
+        return ""
+    try:
+        data = _json.loads(raw)
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    seg = data.get("relocate")
+    if not isinstance(seg, dict):
+        return ""
+    return str(seg.get("state") or "")
+
+
+def _relocate_journal(src, dst, moved, total, state) -> str:
+    """迁移进度日志（存进 `kb_vault.note`）。
+
+    为什么用 `note` 而不是新表：这是一次性运维状态，不是需要查询的业务数据；
+    为它加一张表等于让 schema 变复杂去服务一个临时字段。需要查的时候
+    `SELECT note FROM kb_vault` 就够了。
+
+    内容固定四项 + 状态字：崩了之后能一眼看出"从哪到哪、搬到第几个、卡在哪一步"。
+    """
+    import json as _json
+    return _json.dumps({"relocate": {"from": str(src), "to": str(dst),
+                                     "moved": int(moved), "total": int(total),
+                                     "state": state}},
+                       ensure_ascii=False)
+
+
 def kb_vault_relocate(conn, key, new_path, *, move_files=False, copy_files=False,
                       dry_run=True, verify=True) -> dict:
     """改知识库位置（W2）。**这是现在完全缺的一块**。
@@ -681,6 +719,18 @@ def kb_vault_relocate(conn, key, new_path, *, move_files=False, copy_files=False
     if move_files and copy_files:
         raise KBError("bad_usage", "move_files 与 copy_files 只能选一个")
     row = kb_vault_get(conn, key)
+    # F-P1-4：正在搬家时不许并发搬第二次，也不许沿用上一次的残缺现场。
+    #
+    # **为什么用 note 里的 journal 状态而不是 status 列**：`kb_vault_get` 在
+    # `status != 'active'` 时会抛 `vault_missing`，所以拿 status 当锁的话，
+    # 一旦崩在中途这个库就从**所有**查询里消失了——比"文件搬一半"更难救。
+    # status 是用户面的启用/停用开关，不该被运维过程占用。
+    _st = _relocate_state(row)
+    if _st == "moving":
+        raise KBError(
+            "bad_usage",
+            f"库「{row['name']}」上次迁移没有收尾——先确认现场再重试。",
+            hint=f"看 note 字段的 relocate 段：{row.get('note') or '（空）'}")
     src = Path(str(row["path"]))
     dst = Path(str(new_path))
     if not dst.is_absolute():
@@ -720,22 +770,67 @@ def kb_vault_relocate(conn, key, new_path, *, move_files=False, copy_files=False
         return out
 
     moved = 0
+    journal_written = False
     if do_files:
         # ① 搬前算源哈希（校验基准）
         src_hash = {}
         if verify:
             for rel in plan["rels"]:
                 src_hash[rel] = kb_sha256_file(src / rel)
-        # ② 搬（copy2 保 mtime——否则 Obsidian 的排序会乱）
-        for rel in plan["rels"]:
-            s_abs = src / rel
-            d_abs = dst / rel
-            d_abs.parent.mkdir(parents=True, exist_ok=True)
-            if copy_files:
-                shutil.copy2(str(s_abs), str(d_abs))
-            else:
-                shutil.move(str(s_abs), str(d_abs))
-            moved += 1
+        # ② 上锁 + 写进度日志（F-P1-4）：崩了之后能回答"搬到哪了"
+        conn.execute(
+            "UPDATE kb_vault SET note=?, updated_at=? WHERE vault_id=?",
+            (_relocate_journal(src, dst, 0, len(plan["rels"]), "moving"),
+             now_utc(), row["vault_id"]))
+        conn.commit()
+        journal_written = True
+        moved_rels = []
+        try:
+            # ③ 搬（copy2 保 mtime——否则 Obsidian 的排序会乱）
+            for idx, rel in enumerate(plan["rels"], 1):
+                s_abs = src / rel
+                d_abs = dst / rel
+                d_abs.parent.mkdir(parents=True, exist_ok=True)
+                if copy_files:
+                    shutil.copy2(str(s_abs), str(d_abs))
+                else:
+                    shutil.move(str(s_abs), str(d_abs))
+                moved_rels.append(rel)
+                moved += 1
+                # 每 100 个刷一次日志：太频繁会拖慢 2,526 文件的搬移，
+                # 不刷又等于崩了以后毫无线索。100 是两者之间的折中。
+                if idx % 100 == 0:
+                    conn.execute(
+                        "UPDATE kb_vault SET note=?, updated_at=? WHERE vault_id=?",
+                        (_relocate_journal(src, dst, idx, len(plan["rels"]), "moving"),
+                         now_utc(), row["vault_id"]))
+                    conn.commit()
+        except BaseException as exc:
+            # ④ 回滚：把已搬的按相反顺序搬回。**不掩盖原始异常。**
+            back_ok, back_fail = 0, []
+            for rel in reversed(moved_rels):
+                try:
+                    d_abs = dst / rel
+                    s_abs = src / rel
+                    s_abs.parent.mkdir(parents=True, exist_ok=True)
+                    if d_abs.exists():
+                        shutil.move(str(d_abs), str(s_abs))
+                    back_ok += 1
+                except OSError:
+                    back_fail.append(rel)
+            conn.execute(
+                "UPDATE kb_vault SET note=?, updated_at=? WHERE vault_id=?",
+                (_relocate_journal(src, dst, moved, len(plan["rels"]),
+                                   f"rolled_back ok={back_ok} fail={len(back_fail)}"),
+                 now_utc(), row["vault_id"]))
+            conn.commit()
+            if back_fail:
+                raise KBError(
+                    "bad_usage",
+                    f"迁移中断且回滚**不完全**：{len(back_fail)} 个文件没搬回去"
+                    f"（例：{back_fail[:3]}）。原始异常：{type(exc).__name__}: {exc}",
+                    hint="按 note 字段记录的 from/to 手工核对两侧") from exc
+            raise
         # ③ 搬后算目标哈希逐文件比对
         if verify:
             bad = []
@@ -757,9 +852,14 @@ def kb_vault_relocate(conn, key, new_path, *, move_files=False, copy_files=False
                 src.rmdir()      # 只在空目录时成功；非空说明有没搬到的
             except OSError:      # A档：目录非空/被占用都属正常残留，不是错误
                 pass             # 搬移已完成且已哈希校验，残留空壳目录无副作用
+    # F-P1-4：成功时同时把 status 复位、note 记成完成（不是直接抹掉——
+    # 留着"上次搬到哪"对后续排障有用）
     conn.execute(
-        "UPDATE kb_vault SET path=?, path_key=?, updated_at=? WHERE vault_id=?",
-        (os.path.realpath(str(dst)), key_new, now_utc(), row["vault_id"]))
+        "UPDATE kb_vault SET path=?, path_key=?, note=?, updated_at=? "
+        "WHERE vault_id=?",
+        (os.path.realpath(str(dst)), key_new,
+         _relocate_journal(src, dst, moved, len(plan["rels"]), "done"),
+         now_utc(), row["vault_id"]))
     conn.commit()
     out["moved"] = moved
     out["verified"] = out.get("verified", 0)
@@ -2718,6 +2818,14 @@ def _kb_write_impl(conn, data_root, vault_row, rel, *, action, content,
     allow_sensitive = _strict_bool(allow_sensitive, "allow_sensitive")
     if action not in ("create", "append", "update"):
         raise KBError("bad_action", f"未知写动作：{action!r}（只能 create / append / update）")
+    # F-P1-4：正在搬家时拒绝写入。
+    # 搬到一半还能写 → 新内容只落在目标侧，而源侧仍是旧快照，两边都不完整，
+    # 且回滚会把这次写入一起搬回去（写了个寂寞）。所以这一步必须先拦住。
+    if _relocate_state(vault_row) == "moving":
+        raise KBError(
+            "bad_usage",
+            f"知识库 `{vault_row.get('name')}` 迁移进行中，拒绝写入。",
+            hint="等迁移收尾（note 的 relocate.state 变成 done）或按日志手工处理现场")
     if vault_row.get("mode") != "rw":
         raise KBError("mode_ro", f"知识库 `{vault_row.get('name')}` 是 mode=ro，拒绝写入",
                       hint=f"fish kb vault set-mode {vault_row.get('name')} rw（需人显式授权）")

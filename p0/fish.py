@@ -130,7 +130,8 @@ from fish_kb import ( # noqa: F401
  kb_detect_text, kb_doctor, kb_log_access, kb_open, kb_read_text, kb_resolve_target,
  kb_rollback, kb_search, kb_sha256_bytes, kb_sha256_file, kb_stats, kb_toc, kb_tree,
  kb_vault_add, kb_vault_get, kb_vault_list, kb_vault_remove, kb_vault_scan,
-    _kb_free_bytes, _kb_relocate_plan, kb_vault_init, kb_vault_relocate,  # W2 (2026-11-18) vault init / relocate
+    _kb_free_bytes, _kb_relocate_plan, _relocate_journal, _relocate_state,  # F-P1-4
+    kb_vault_init, kb_vault_relocate,  # W2 (2026-11-18) vault init / relocate
  kb_vault_set_default, kb_vault_set_mode, kb_write)
 
 # T02：下沉到 fish_common 的基础层 + push 领域（re-export，判据 J1）
