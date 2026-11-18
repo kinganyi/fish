@@ -317,5 +317,114 @@ class PrivateWriteGuardTest(unittest.TestCase):
                       "主人自己的私有素材也聚不到了（过滤过头）")
 
 
+# ---------------------------------------------------------------- 读路径清单
+#
+# **F-P1-X（第三轮评审后的自查）**：我补私有过滤时，是按"我记得的那几条"补的。
+# 结果漏了 `neighbors`（零判据，删掉全绿）和 `distill`（自带 SQL，最后一处泄露）。
+#
+# 数一遍才发现：**19 个函数查 `code_index` 的 `title`，只有 6 个调用过滤**。
+#
+# 所以这里不写"应该过滤几处"，而是**把每一个都点名**，分成两类：
+#   · FILTERED：调 `_visibility_sql` / `_filter_by_visibility`（或从已过滤结果渲染）；
+#   · BY_EXACT_CODE：按精确 code 取单条，调用方已经拿到了那条的编号——
+#     "知道编号就能读"是设计如此（编号不是枚举出来的）。
+#
+# 判据要求：源码里每个查 title 的函数都必须在两张名单之一。
+# **新加一个读路径忘了过滤 → 它自己会红**，不用等评审。
+FILTERED = {
+    "search_memories":        "调 _filter_by_visibility（后置过滤，含 FTS 结果）",
+    "list_memories":          "_visibility_sql 插进 WHERE",
+    "count_memories":         "_visibility_sql（与 list 同口径）",
+    "recent_fallback":        "_visibility_sql",
+    "neighbors":              "_visibility_sql",
+    "distill_clusters":       "_visibility_sql（自带 SQL，第三轮评审补的）",
+    "build_injection_pack":   "_visibility_sql（最近三件事）",
+    "cmd_list":               "只是渲染 list_memories 的结果，不自己查",
+    "cmd_report":             "只渲染聚合计数，不返回标题",
+    "render_memory_index":    "渲染器，输入已过滤",
+    "render_memory_recent":   "渲染器，输入已过滤",
+    "_lesson_rows":           "lesson 免凭证可写但不进 private 语义（见 F-P0-3 的信任门）",
+    "_rule_rows":             "rule 有授权门（见 fish_trust），不是 visibility 语义",
+    "find_similar_memories":  "按精确 code 排除自身后取相似；结果仍走 search 口径",
+}
+BY_EXACT_CODE = {
+    "_titles_of":        "按精确 code 批量取标题——编号不是枚举出来的",
+    "archive_body":      "按精确 code 取正文",
+    "read_body_path":    "按精确 code 取正文路径",
+    "supersede_memory":  "按精确 code 改状态",
+    "withdraw_memory":   "按精确 code 改状态",
+    "search_by_relevance": "push 用：按精确 code 集合取相关性",
+}
+
+
+class VisibilityReadPathInventoryTest(unittest.TestCase):
+    """**别靠记忆数读路径**——让判据替你数。
+
+    这条判据不证明过滤逻辑对（那由其它 15 条行为判据负责），
+    它证明的是：**每一个查标题的地方都被显式分过类**。
+    """
+
+    def _querying_title_funcs(self):
+        import re as _re
+        src = (HERE / "fish.py").read_text(encoding="utf-8")
+        lines = src.split("\n")
+        out = set()
+        for i, ln in enumerate(lines):
+            if not _re.search(r"SELECT .*\btitle\b", ln):
+                continue
+            for k in range(i, -1, -1):
+                m = _re.match(r"^def ([A-Za-z_][A-Za-z0-9_]*)", lines[k])
+                if m:
+                    out.add(m.group(1))
+                    break
+        return out
+
+    def test_every_title_query_func_is_classified(self):
+        found = self._querying_title_funcs()
+        # 失靶守卫：扫不到就说明正则坏了，必须红而不是通过
+        self.assertGreaterEqual(
+            len(found), 10,
+            f"只扫到 {sorted(found)} 这些函数——判据大概率失去靶点，不是通过")
+        declared = set(FILTERED) | set(BY_EXACT_CODE)
+        undeclared = sorted(found - declared)
+        self.assertEqual(
+            undeclared, [],
+            f"这些函数查 `code_index.title` 却没被分类：{undeclared}\n"
+            "  新加读路径时请决定它归哪一类并写进 test_visibility_guard.py：\n"
+            "    · 返回用户可见标题 → 必须过滤，加进 FILTERED 并接 _visibility_sql\n"
+            "    · 按精确 code 取单条 → 加进 BY_EXACT_CODE 并写明为什么安全")
+
+    def test_declared_funcs_still_exist(self):
+        """反向判据：名单里点名的函数必须还在（改名/删除要同步）。"""
+        src = (HERE / "fish.py").read_text(encoding="utf-8")
+        import re as _re
+        defs = set(_re.findall(r"^def ([A-Za-z_][A-Za-z0-9_]*)", src, _re.M))
+        missing = sorted((set(FILTERED) | set(BY_EXACT_CODE)) - defs)
+        self.assertEqual(missing, [],
+                         f"名单里这些函数在 fish.py 里找不到了：{missing}")
+
+    def test_filtered_list_matches_reality(self):
+        """**名单不许撒谎**：声称用了 `_visibility_sql` 的必须真的调了它。
+
+        否则名单会退化成"我说它过滤了"——正是这一路踩过的坑。
+        """
+        src = (HERE / "fish.py").read_text(encoding="utf-8")
+        lines = src.split("\n")
+        callers = set()
+        for i, ln in enumerate(lines):
+            if "_visibility_sql(" not in ln or ln.lstrip().startswith("def "):
+                continue
+            for k in range(i, -1, -1):
+                import re as _re
+                m = _re.match(r"^def ([A-Za-z_][A-Za-z0-9_]*)", lines[k])
+                if m:
+                    callers.add(m.group(1))
+                    break
+        declared_sql = {k for k, v in FILTERED.items() if "_visibility_sql" in v}
+        liars = sorted(declared_sql - callers)
+        self.assertEqual(liars, [],
+                         f"名单说这些函数用 _visibility_sql，但源码里没调用：{liars}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
