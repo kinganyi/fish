@@ -17,6 +17,16 @@ import hashlib
 import shutil
 import subprocess
 import sys
+
+# 第四轮评审：本文件打印 ✓ / ✅ / 🟠 这类符号，Windows 控制台默认 GBK 会崩
+# （UnicodeEncodeError → 退出码 1，看起来像"变异失败"）。fish.py 与 tools/*.py
+# 早修过，但根目录的 mutation_*.py 一直没修——同族文件要一起看。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass  # A档：拿不到可重配的流就按原样
 from pathlib import Path
 
 from mutation_source import SourceText

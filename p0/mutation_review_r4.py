@@ -22,6 +22,15 @@ from __future__ import annotations
 
 import shutil
 import sys
+
+# 第四轮评审：打印 ✓/✅/🟠 这类符号时 Windows 控制台（GBK）会崩，
+# 而崩掉的退出码 1 看起来像"变异失败"。所有 mutation 脚本统一加这一段。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass  # A档：拿不到可重配的流就按原样
 from pathlib import Path
 
 from mutation_review_r3 import AUDIT, run_tests, sha256, verdict_text

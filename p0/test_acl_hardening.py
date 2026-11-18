@@ -193,41 +193,94 @@ class DataAclTest(unittest.TestCase):
 
 
 class ToolsConsoleEncodingTest(unittest.TestCase):
-    """第三轮评审：`tools/*.py` 在 GBK 控制台打印非 ASCII 会崩。
+    """**第四轮评审 🟠-6**：这条判据原来是"读源码找 reconfigure 这个词"。
 
-    实测：`python tools/acl_harden.py --verify` 在**不带** `PYTHONIOENCODING`
-    的环境下抛 `UnicodeEncodeError: 'gbk' codec can't encode character '\u2713'`
-    → **退出码 1**，成为第三轮评审那一刻唯一失败的判据。
+    评审官的变异矩阵拆穿了它两次：
+      · 保留 "reconfigure" 字样、把调用改成 `pass` → 判据绿，`--verify` 实跑仍崩；
+      · 新增一个打印 ✅ 的脚本 → 判据绿（只认 4 个字符），实跑崩。
+    而且它只扫 `tools/*.py`，根目录 `mutation_*.py` 一直崩在 print 上没被发现。
 
-    这个坑本项目修过（`fish.py` 与几个 mutation 脚本），但**没扩到 `tools/*.py`**。
-    所以这条判据不针对 acl_harden，而是扫**整个 tools 目录**：
-    凡打印非 ASCII 符号的脚本，必须自己处理编码。
+    **改成行为判据**：在 **GBK 环境**里真跑一遍 `--help`，断言 stderr 里
+    没有 `UnicodeEncodeError`。跑 `--help` 是安全的——它不会改任何东西。
+
+    三态分明：脚本不支持 `--help`（exit 2）不算失败，只要**没有编码崩溃**。
     """
 
-    def test_tools_do_not_crash_on_gbk_console(self):
+    # 会打印出来的非 ASCII 记号（只是**挑选**候选，不是判据本身）
+    _MARKERS = ("✓", "✗", "⚠", "─", "✅", "❌", "🟠", "🟡", "🔴", "⚪")
+
+    def _candidates(self):
+        """**实跑**的候选：`tools/*.py` 与普通脚本。
+
+        **排除 `mutation_*.py`**：它们收到 `--help` 会**忽略未知参数直接跑变异**——
+        实测 `mutation_b2b3_selfcheck.py --help` 跑了 120 秒超时，期间真的在改树。
+        一个判据**不许为了检查而做破坏性动作**。它们改用 AST 查（见下一条）。
+        """
+        out = []
+        for p in sorted(HERE.glob("*.py")) + sorted((HERE / "tools").glob("*.py")):
+            if p.name.startswith("test_") or p.name.startswith("mutation_"):
+                continue
+            src = p.read_text(encoding="utf-8", errors="replace")
+            if any(m in src for m in self._MARKERS):
+                out.append(p)
+        return out
+
+    def test_console_scripts_survive_gbk(self):
+        """在 GBK 环境下每个打印非 ASCII 的脚本都不许编码崩溃。"""
         import os as _os
         import subprocess as _sp
-        tools = sorted(p for p in (HERE / "tools").glob("*.py"))
-        self.assertTrue(tools, "tools 目录下没有 py 文件——判据失去靶点")
+        cands = self._candidates()
+        # 失靶守卫：一个候选都没有说明挑法坏了，必须红
+        self.assertGreaterEqual(len(cands), 5,
+                                f"只找到 {len(cands)} 个候选——判据失去靶点，不是通过")
+        env = dict(_os.environ)
+        env["PYTHONIOENCODING"] = "gbk"       # 关键：模拟 Windows 默认控制台
+        env.pop("PYTHONUTF8", None)
+        # **每个脚本要跑它真的会打印记号的那条命令**。
+        # `acl_harden.py` 的 `--help` 只有纯 ASCII，崩发生在 `--verify`——
+        # 第一版对所有脚本都跑 `--help`，于是"保留字样、调用改 pass"的变异仍然绿。
+        # `--verify` 是只读的（只读 ACL，不改）。
+        ARGS = {"acl_harden.py": ["--verify"]}
+        crashes = []
+        for p in cands:
+            r = _sp.run([sys.executable, str(p)] + ARGS.get(p.name, ["--help"]),
+                        capture_output=True, text=True, encoding="utf-8",
+                        errors="replace", env=env, cwd=str(HERE), timeout=120)
+            blob = (r.stdout or "") + (r.stderr or "")
+            if "UnicodeEncodeError" in blob:
+                crashes.append(f"{p.name}: {blob.strip().splitlines()[-1][:100]}")
+        self.assertEqual(crashes, [],
+                         "这些脚本在 GBK 控制台会编码崩溃（看起来像\"脚本失败\"）：\n  "
+                         + "\n  ".join(crashes))
+
+    def test_mutation_scripts_install_utf8_by_calling_it(self):
+        """`mutation_*.py` 用 **AST** 验，不实跑（实跑会改树）。
+
+        等价的"调用真的存在"：ast 里必须有对 `reconfigure` 的 **Call**，
+        不是"文件里出现过这个词"。评审官的变异（保留字样、把调用改成 pass）
+        在这条下会红，而在子串判据下是绿的。
+        """
+        import ast
+        # 只有**可执行**的 mutation 脚本需要装 stdout 编码；
+        # `mutation_source.py` 是共享库（没有 `__main__` 块、不打印符号），
+        # 把它算进来是判据的假阳性。
+        need = [p for p in sorted(HERE.glob("mutation_*.py"))
+                if '__name__ == "__main__"' in p.read_text(encoding="utf-8",
+                                                           errors="replace")]
+        self.assertGreaterEqual(len(need), 3,
+                                f"只找到 {len(need)} 个 mutation 脚本——判据失去靶点")
         offenders = []
-        for p in tools:
-            src = p.read_text(encoding="utf-8", errors="replace")
-            # 只查"会打印非 ASCII"的脚本：没有这些符号就没有编码风险
-            if not any(ch in src for ch in ("✓", "✗", "⚠", "─")):
-                continue
-            if "reconfigure" in src:
-                continue          # 自己处理了编码
-            offenders.append(p.name)
-        # 反向判据：必须有脚本打印非 ASCII，否则这条判据扫了个空
-        printing = [p.name for p in tools
-                    if any(ch in p.read_text(encoding="utf-8", errors="replace")
-                           for ch in ("✓", "✗", "⚠", "─"))]
-        self.assertTrue(printing,
-                        "tools 里没有脚本打印非 ASCII 符号——判据失去靶点，"
-                        "不是通过")
+        for p in need:
+            tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"))
+            calls = [n for n in ast.walk(tree)
+                     if isinstance(n, ast.Call)
+                     and isinstance(n.func, ast.Attribute)
+                     and n.func.attr == "reconfigure"]
+            if not calls:
+                offenders.append(p.name)
         self.assertEqual(offenders, [],
-                         f"这些脚本打印非 ASCII 却没处理编码，"
-                         f"在 GBK 控制台会崩：{offenders}")
+                         f"这些号本没有**真正调用** reconfigure"
+                         f"（只是文件里出现过这个词不算）：{offenders}")
 
 
 if __name__ == "__main__":
