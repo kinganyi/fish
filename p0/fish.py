@@ -1702,7 +1702,7 @@ def similar_codes(conn, code, body, *, title="", limit=3, min_sim=SIM_MIN_SIM,
 
 def find_similar_memories(conn, *, title="", body="", limit=3,
                           min_sim=SIM_MIN_SIM, min_tokens=SIM_MIN_TOKENS,
-                          exclude=()) -> list:
+                          exclude=(), viewer_citizen_id=None) -> list:
     """写入**前**查重：给定标题/正文，找出库里已有的相似记忆。
 
     返回 `[{"code","title","similarity"}]`，按相似度降序。
@@ -1725,8 +1725,13 @@ def find_similar_memories(conn, *, title="", body="", limit=3,
         if code in skip:
             continue
         row = conn.execute(
-            "SELECT title, status FROM code_index WHERE code=?", (code,)).fetchone()
+            "SELECT title, status, visibility, owner FROM code_index WHERE code=?",
+            (code,)).fetchone()
         if not row or row[1] != "active":
+            continue
+        # 🟠-4：查重提示会显示标题 → 它也是泄露渠道，必须过滤。
+        if (str(row[2] or "shared").strip().lower() == "private" and _visibility_enforced(conn)
+                and str(row[3] or "") != str(viewer_citizen_id or "")):
             continue
         out.append({"code": code, "title": row[0] or "",
                     "similarity": round(float(sim), 3)})
@@ -6257,7 +6262,9 @@ def build_attention_block(conn, root, *, citizen_id=None, session_actor=None,
 
     bags = {"open": [], "gap": []}
     seen = set()
-    for code, title in _open_loop_rows(conn, open_since, per_type):
+    # 第四轮评审 🟠-4：传 viewer，否则开关打开后主人自己也看不到自己的未闭合事项。
+    for code, title in _open_loop_rows(conn, open_since, per_type,
+                                       viewer_citizen_id=citizen_id):
         if not code or code in seen:
             continue
         seen.add(code)

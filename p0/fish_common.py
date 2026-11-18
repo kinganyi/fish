@@ -682,7 +682,8 @@ def _open_loop_predicate():
     return ("status='active' AND dormant=0 AND recorded_at >= ? AND (" + cond + ")",
             [k.lower() for k in ATTENTION_OPEN_KEYWORDS])
 
-def _open_loop_rows(conn, since_z, limit, exclude=(), *, project=None):
+def _open_loop_rows(conn, since_z, limit, exclude=(), *, project=None,
+                    viewer_citizen_id=None):
     """A 类「未闭合事项」：标题命中开放词表的 active 记忆（窗口内，时间降序）。
 
     `project=None`（默认）= 旧行为，**跨项目**（注入包一直这么用，判据
@@ -694,8 +695,11 @@ def _open_loop_rows(conn, since_z, limit, exclude=(), *, project=None):
     谓词；`project` 仍是**仅关键字**参数（既有调用全是位置调用）。
     """
     where, keywords = _open_loop_predicate()
+    # 第四轮评审 🟠-4：这段进注入包「未闭合」段，会打印标题 → 必须过滤。
+    _olv, _olp = _visibility_sql(conn, viewer_citizen_id)
+    where += _olv
     sql = "SELECT code,title FROM code_index WHERE " + where
-    params = [since_z] + list(keywords)
+    params = [since_z] + list(keywords) + _olp
     if project is not None:
         sql += " AND project = ? "
         params.append(str(project))
@@ -911,3 +915,35 @@ def citizen_ids_known(conn):
     except Exception as exc:          # noqa: BLE001 —— 视图缺失时退到热表
         warn_ignored("fish_common.citizen_ids_known", exc)
         return {r[0] for r in conn.execute("SELECT citizen_id FROM citizens")}
+
+# ---------------------------------------------------------------- 可见性执行层
+#
+# **2026-11-19 从 `fish_visibility.py` 搬来。** 为什么搬：`_open_loop_rows`
+# （注入包「未闭合」段）就在本模块里，而它需要可见性谓词；`fish_push` 也只要
+# `fish_common`。让它们 import `fish_visibility` 会变成循环（后者依赖前者）。
+#
+# 这两个函数**只依赖 `get_config`**，放在最底层是它们的真实依赖位置。
+# `fish_visibility` 现在从这里 re-export，调用方一行都不用改。
+def _visibility_enforced(conn) -> bool:
+    """`privacy.visibility_enforced`（默认 False = 只当标签，不执行过滤）。"""
+    try:
+        return bool(get_config(conn, "privacy.visibility_enforced"))
+    except Exception:       # noqa: BLE001 —— 配置坏了就当关
+        return False
+
+
+def _visibility_sql(conn, viewer_citizen_id):
+    """返回 `(sql 片段, 参数)`，接在 WHERE 后面用于**在 SQL 里**排除 private。
+
+    · 开关关着 → 不追加任何条件（逐字节等价旧行为）
+    · 开关开着 → private 只对 owner 可见；`viewer` 为空时**一律排除**
+      （猜错方向是泄露，代价不对称）
+
+    为什么 SQL 级而不是取回来再过滤：带 `LIMIT` 的查询后置过滤会让
+    "要 20 条"变成"过滤后 17 条"，而数字对不上**不会报错**。
+    """
+    if not _visibility_enforced(conn):
+        return "", []
+    return (" AND (LOWER(TRIM(COALESCE(visibility,'shared'))) <> 'private'"
+            " OR COALESCE(owner,'') = ?)",
+            [str(viewer_citizen_id or "")])

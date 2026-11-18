@@ -39,6 +39,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import fish  # noqa: E402
+import fish_common  # noqa: E402  —— _open_loop_rows 在链底
 
 
 
@@ -410,6 +411,46 @@ class PrivateWriteGuardTest(unittest.TestCase):
         self.assertEqual(info3["state"], "forbidden",
                          "没有身份时 private 正文泄露了")
 
+
+
+    def test_find_similar_hides_private(self):
+        """**第四轮评审 🟠-4**：写入前的查重提示会显示标题 → 它也是泄露渠道。
+
+        评审官实测：`find_similar_memories` 零过滤，返回别人的私有 title。
+        这处我上一轮确认过、也写出了修法，但 `fish.py` 只剩 1 行窗口挤不动，
+        整条回退了。F-P1-10 拆分腾出空间后才补上。
+        """
+        self._enforce(True)
+        self._write(title="ZZ查重私有ZZ", visibility="private", owner="C-OWNER")
+        res = fish.find_similar_memories(self.conn, title="ZZ查重私有ZZ")
+        self.assertNotIn("ZZ查重私有ZZ", str(res),
+                         "查重提示里出现了别人的私有标题")
+        own = fish.find_similar_memories(self.conn, title="ZZ查重私有ZZ",
+                                         viewer_citizen_id="C-OWNER")
+        self.assertIn("ZZ查重私有ZZ", str(own),
+                      "主人自己查重也看不到自己的私有条目（过滤过头）")
+
+
+    def test_open_loop_rows_hides_private(self):
+        """**第四轮评审 🟠-4**：`_open_loop_rows` 喂注入包「未闭合」段，会打印标题。
+
+        它在 `fish_common.py`（J2 链底），原来没法 import `fish_visibility`
+        ——后者依赖前者，会成环。所以第 39 轮把 `_visibility_sql` /
+        `_visibility_enforced` **搬到 `fish_common`**，`fish_visibility` 改成
+        re-export。位置跟着依赖走，不是跟着"看起来该在哪"走。
+        """
+        import datetime
+        self._enforce(True)
+        self._write(title="ZZ未闭合私有ZZ", visibility="private", owner="C-OWNER")
+        since = (datetime.datetime.now(datetime.timezone.utc)
+                 - datetime.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rows = fish_common._open_loop_rows(self.conn, since, 10)
+        self.assertNotIn("ZZ未闭合私有ZZ", str(rows),
+                         "「未闭合」段打印了别人的私有标题")
+        own = fish_common._open_loop_rows(self.conn, since, 10,
+                                          viewer_citizen_id="C-OWNER")
+        self.assertIn("ZZ未闭合私有ZZ", str(own),
+                      "主人自己也看不到自己的私有未闭合事项（过滤过头）")
 
 # ---------------------------------------------------------------- 读路径清单
 #
