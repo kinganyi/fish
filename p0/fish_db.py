@@ -695,3 +695,60 @@ def set_config(conn, key, value, *, emit_event=True):
                      {"kind": "config", "id": key},
                      {"key": key, "old_value": old, "new_value": value})
     return value
+
+
+def restore_citizen(conn, citizen_id, *, dry_run=False) -> dict:
+    """把归档的公民搬回热表（**F-P1-7，2026-11-18 外部审查**）。
+
+    ## 为什么必须补这个命令
+
+    `resolve_owner_arg` 报错时写的是「指定的公民已归档：X（先 citizen-restore 再绑）」，
+    但 `fish` 从来没有 `citizen-restore`——**提示指向一个不存在的命令**。
+    归档是搬行（INSERT 冷表 + DELETE 热表），没有还原入口就等于"不可逆"，
+    而错误提示还让人以为自己能做点什么。
+
+    ## 与 `archive_citizens` 严格对称
+
+    归档做三件事：写冷表、删热表、记 `citizen.archived`。还原做它们的逆：
+    写热表（`archived_at` 清空——它不再是"已归档"）、删冷表、记 `citizen.restored`。
+
+    **不复活凭证**：归档时 token 已被判定失效，还原后它们**仍然是失效的**。
+    要重新拿凭证就重新签发一次——"还原身份"和"恢复权限"是两件事，混在一起会
+    让一条旧 token 在还原瞬间复活，而没人预期到这一点。
+    """
+    cols = ", ".join(_CITIZENS_ALL_COLUMNS)
+    row = conn.execute(f"SELECT {cols} FROM citizens_archive WHERE citizen_id=?",
+                       (citizen_id,)).fetchone()
+    if row is None:
+        hot = conn.execute("SELECT 1 FROM citizens WHERE citizen_id=?",
+                           (citizen_id,)).fetchone()
+        if hot:
+            raise ValueError(f"公民 {citizen_id} 本来就在热表里，无需还原")
+        raise ValueError(
+            f"找不到公民 {citizen_id}：热表与归档表都没有。"
+            "先用 `fish citizen-list --all` 确认编码")
+    info = dict(zip(_CITIZENS_ALL_COLUMNS, row))
+    if dry_run:
+        return {"citizen_id": citizen_id, "dry_run": True, "restored": [],
+                "will_restore": {"display_name": info.get("display_name"),
+                                 "kind": info.get("kind"),
+                                 "archived_at": info.get("archived_at")}}
+    # `archived_at` 清空：还原之后它不再是"已归档"的记录，留着会让下游误判
+    info["archived_at"] = None
+    marks = ", ".join("?" for _ in _CITIZENS_ALL_COLUMNS)
+    conn.execute(f"INSERT INTO citizens ({cols}) VALUES ({marks})",
+                 tuple(info[c] for c in _CITIZENS_ALL_COLUMNS))
+    conn.execute("DELETE FROM citizens_archive WHERE citizen_id=?", (citizen_id,))
+    append_event(
+        conn, "citizen.restored",
+        {"citizen_id": citizen_id, "evidence_level": "machine"},
+        {"kind": "citizen", "id": citizen_id},
+        {"display_name": info.get("display_name"), "kind": info.get("kind"),
+         "restored_at": now_utc(),
+         # 写明"凭证不复活"：否则事后看事件的人会以为还原把权限也带回来了
+         "note": "身份已还原；原凭证仍失效，需重新签发"},
+        cause="citizen-restore")
+    conn.commit()
+    return {"citizen_id": citizen_id, "dry_run": False,
+            "restored": [citizen_id],
+            "display_name": info.get("display_name")}

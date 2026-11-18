@@ -100,6 +100,7 @@ from fish_corpus import CorpusError, CorpusNotReady  # noqa: F401
 # 全部继续可用，且与 `fish_kb.<name>` 是**同一个对象**。
 # 为什么不用 `import *`：漏名是静默的，而这里每个名字都被判据 J1 逐个查对象同一性。
 # 生成/校验：`python tools/gen_reexport.py --check`
+from fish_db import restore_citizen  # F-P1-7：公民还原（域函数住 fish_db）
 from fish_kb import ( # noqa: F401
  KBError, KB_ACTIONS, KB_DEFAULT_IGNORE_GLOBS, KB_DEFAULT_MAX_OPEN_BYTES,
  KB_ERROR_CODES, KB_MAGIC_SIGNATURES, KB_MANDATORY_DENY, KB_MAX_CONTENT_BYTES,
@@ -4542,7 +4543,9 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
         if not row:
             raise ValueError(f"指定的公民不存在：{forced}")
         if row[3]:
-            raise ValueError(f"指定的公民已归档：{forced}（先 citizen-restore 再绑）")
+            raise ValueError(
+            f"指定的公民已归档：{forced}。先跑 `fish citizen-restore {forced}` 把它搬回热表再绑"
+            "（还原只恢复身份，不恢复凭证；要凭证请重新 `fish session start`）")
         _prove(forced)
         who = {"citizen_id": row[0], "created": False, "display_name": row[1],
                "account_id": row[2], "archived": False}
@@ -7921,6 +7924,32 @@ def cmd_citizen_merge(args):
     else:
         print("（预演模式：加 --apply 才真的改）")
     conn.close()
+
+
+def cmd_citizen_restore(args):
+    """把归档的公民搬回热表（F-P1-7，2026-11-18 外部审查）。
+
+    为什么补这个命令：`resolve_owner_arg` 的报错一直写着「先 citizen-restore 再绑」，
+    而 `fish` 从没有这个命令——**提示指向一个不存在的东西**。归档是搬行
+    （INSERT 冷表 + DELETE 热表），没有还原入口就等于不可逆，还让人以为自己能做点什么。
+    """
+    conn = connect(Path(args.root))
+    conn.executescript(SCHEMA)
+    migrate(conn)
+    try:
+        res = restore_citizen(conn, args.citizen_id, dry_run=bool(args.dry_run))
+    except ValueError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        raise SystemExit(2)
+    finally:
+        conn.close()
+    if res["dry_run"]:
+        w = res["will_restore"]
+        print(f"（dry-run）将把 {args.citizen_id} 搬回热表："
+              f"{w.get('display_name')} / {w.get('kind')} / 归档于 {w.get('archived_at')}")
+    else:
+        print(f"已还原：{res['citizen_id']}（{res.get('display_name')}）")
+        print("　注意：**原凭证仍然失效**，要重新签发 `fish session start`。")
 
 
 def cmd_citizen_retire(args):
@@ -12934,6 +12963,12 @@ def main():
     p.add_argument("dst")
     p.add_argument("--apply", action="store_true")
     p.set_defaults(func=cmd_citizen_merge)
+    p = sub.add_parser("citizen-restore")
+    p.add_argument("citizen_id")
+    p.add_argument("--dry-run", dest="dry_run", action="store_true",
+                   help="只报告会发生什么，不改库")
+    p.set_defaults(func=cmd_citizen_restore)
+
     p = sub.add_parser("citizen-retire")
     p.add_argument("citizen_id")
     p.add_argument("--reason", default=None)
