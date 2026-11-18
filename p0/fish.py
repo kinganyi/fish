@@ -8917,9 +8917,17 @@ def cmd_prompt_push(args):
 
 
 def cmd_healthcheck(args):
-    conn = connect(Path(args.root))
-    conn.executescript(SCHEMA)
-    migrate(conn)
+    # F-P1-6（2026-11-18 外部审查）：体检必须是**只读**检查。
+    #
+    # 旧实现先 executescript(SCHEMA) + migrate(conn)——一个「检查」动作会写 schema：
+    # 在只读介质、权限受限、生产排障时都可能改变现场。更糟的是库不存在时它会
+    # **建一个空库**然后报告「一切正常」——把「没有」说成「没问题」，是体检最坏的形态。
+    _root = Path(args.root)
+    _db = _root / "index.sqlite"
+    if not _db.exists():
+        print(f"错误：库不存在（{_db}）——体检不会创建它", file=sys.stderr)
+        raise SystemExit(2)
+    conn = connect(_root)
     total = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     memories = conn.execute("SELECT COUNT(*) FROM code_index WHERE status='active'").fetchone()[0]
     dormant = conn.execute("SELECT COUNT(*) FROM code_index WHERE dormant=1").fetchone()[0]
@@ -8986,6 +8994,13 @@ def cmd_healthcheck(args):
     except Exception as exc:        # noqa: BLE001
         print(f"  知识库索引：判不到（{type(exc).__name__}: {exc}）")
     conn.close()
+    # F-P1-6：**体检的结论必须能被机器读到**（退出码是脚本唯一可读的结论）。
+    # 旧实现直接结束 → 永远 exit 0，于是「断链 1 条」在 && 链条里表现为成功。
+    # 0 = 干净 / 1 = 有问题（断链或幽灵归属）/ 2 = 判不到（库缺失）。
+        # 判定口径**只按审查方声明的那条**：断链 / 幽灵归属 = 1。
+    # 全文索引缺口（gap）不并入退出码——它属于另一条 P2 议题，混进来会让
+    # 「exit 1」这个信号同时代表两件事，调用方无法区分该做什么。
+    raise SystemExit(1 if (broken or _ghost) else 0)
 
 
 def cmd_rebuild(args):
