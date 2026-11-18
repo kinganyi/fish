@@ -44,7 +44,8 @@ from fish_surface import (  # T02：拆包后的跨模块引用
     normalize_surface,
 )
 
-from fish_common import (
+from fish_common import (  # noqa: F401
+    _visibility_sql, _visibility_enforced,
     warn_ignored,
     warn_derived,
     ATTENTION_OPEN_KEYWORDS,
@@ -633,9 +634,14 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
             if not code or code in skip:
                 continue
             row = conn.execute(
-                "SELECT title FROM code_index WHERE code=? AND status='active' "
-                "AND dormant=0", (code,)).fetchone()
+                "SELECT title, visibility, owner FROM code_index "
+                "WHERE code=? AND status='active' AND dormant=0", (code,)).fetchone()
             if not row:
+                continue
+            # 第四轮评审 🟠-4：推送候选会把标题递进注入包 → 必须按可见性过滤。
+            if (str(row[1] or "shared").strip().lower() == "private"
+                    and _visibility_enforced(conn)
+                    and str(row[2] or "") != str(citizen_id or "")):
                 continue
             title = row[0] or ""
             nproj = _project_of(conn, code)
@@ -1130,7 +1136,8 @@ def extract_terms(conn, prompt, *, limit=PROMPT_MAX_TERMS):
                 add(run[start:start + size])
     return terms[:int(limit)]
 
-def search_memories_any(conn, terms, *, project=None, limit=8, include_superseded=False):
+def search_memories_any(conn, terms, *, project=None, limit=8, include_superseded=False,
+                         viewer_citizen_id=None):
     """多关键词检索（编码精确优先 + FTS OR + 按命中词数排序）。
 
     为什么不用 `search_memories`：它是**单串**入口（用户敲一个词），
@@ -1167,6 +1174,10 @@ def search_memories_any(conn, terms, *, project=None, limit=8, include_supersede
     sql = ("SELECT code, title, project, mem_type, tags FROM code_index "
            "WHERE code IN (" + placeholders + ")")
     params = list(hits)
+    # 第四轮评审 🟠-4：联想候选也打印标题 → 同样过滤。
+    _sav, _sap = _visibility_sql(conn, viewer_citizen_id)
+    sql += _sav
+    params += _sap
     if not include_superseded:
         # 硬过滤写在 SQL 里（不是靠调用方记得）：被取代/作废的条目**永远**不进候选。
         sql += " AND status='active' AND dormant=0"
@@ -1225,7 +1236,10 @@ def build_prompt_candidates(conn, root, *, prompt, citizen_id=None, session_key=
         conv_cands = []
     if not terms:
         return _with_ctx_project(conn, kb_cands + conv_cands, project)
-    rows = search_memories_any(conn, terms, project=None, limit=max(int(limit) * 4, 12))
+    # 第四轮评审 🟠-4：传 viewer——否则开关打开后主人自己的私有记忆也进不了推送。
+    rows = search_memories_any(conn, terms, project=None,
+                               limit=max(int(limit) * 4, 12),
+                               viewer_citizen_id=citizen_id)
     if not rows:
         return _with_ctx_project(conn, kb_cands + conv_cands, project)
     pushed = _recent_pushed_codes(

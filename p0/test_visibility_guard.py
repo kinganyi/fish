@@ -50,7 +50,9 @@ def _all_domain_src():
     `_rule_rows` 搬到 `fish_inject.py` 之后，这条范围问题被暴露出来了。
     """
     out = []
-    for name in ("fish.py", "fish_inject.py"):
+    for name in ("fish.py", "fish_inject.py", "fish_push.py", "fish_common.py",
+                 "mcp_server.py", "fish_kb_index.py", "fish_corpus_store.py",
+                 "fish_maintenance.py"):
         p = HERE / name
         if p.is_file():
             out.append(p.read_text(encoding="utf-8"))
@@ -489,6 +491,21 @@ BY_EXACT_CODE = {
     "supersede_memory":  "按精确 code 改状态",
     "withdraw_memory":   "按精确 code 改状态",
     "search_by_relevance": "push 用：按精确 code 集合取相关性",
+    # ---- 第 40 轮：扫描扩到全库后补的分类（这 6 个此前从未被看见）----
+    "_open_loop_rows":       "_visibility_sql（fish_common；第 40 轮补，原来会泄露）",
+    "build_push_candidates": "内联可见性判定（fish_push；第 40 轮补，原来会泄露）",
+    "search_memories_any":   "_visibility_sql（fish_push；第 40 轮补，原来会泄露）",
+    "_task_links_rebuild":   "维护任务重建链接：管理员身份跑，无 viewer 概念",
+    "reindex_fts":           "FTS 索引重建：同上，系统级",
+    "get_segment":           "语料段：走 F-P0-4 的 citizen 隔离（另一套机制）",
+    "read_resource":         "_visibility_sql 无 viewer（mcp_server:2311，第 38 轮修）",
+    "tool_resolve":          "按精确 code 取完整记录——**待复核**：MCP 工具面无身份时取不取",
+    "seen":                  "实际是 build_push_candidates 内联的查标题（已加判定，见附录）",
+    # 下面两个是**扫描的假阳性**：归属回溯到了错的函数（`add` / `read_jsonl`
+    # 是 mcp_server 里的 JSONL 读写辅助，体内没有 code_index 查询）。
+    # 如实登记它们而不是改判据让它们消失——判据的"找得全"本来就不保证。
+    "add":                   "★ 扫描假阳性（JSONL 辅助，无 code_index 查询）",
+    "read_jsonl":            "★ 扫描假阳性（同上）",
 }
 
 
@@ -507,8 +524,23 @@ class VisibilityReadPathInventoryTest(unittest.TestCase):
         for i, ln in enumerate(lines):
             if not _re.search(r"SELECT .*\btitle\b", ln):
                 continue
+            # **只认 `code_index`**：`visibility` 列只在那张表上。
+            # 不设这条时 `kb_index`（知识库，另有自己的隔离）也会被算进来，
+            # `search_kb` 就是这么被误报的。语句可能跨行，所以看后面 8 行。
+            if not _re.search(r"code_index", "\n".join(lines[i:i + 8])):
+                continue
             for k in range(i, -1, -1):
-                m = _re.match(r"^def ([A-Za-z_][A-Za-z0-9_]*)", lines[k])
+                # **不许跨过模块级语句**：顶格且不是 def/class/@/注释/空的行
+                # 说明函数已经结束了。不设这条边界时，模块级或别的函数里的
+                # SELECT 会被归到上一个 def 头上——`_inject_sections_arg` 与
+                # `search_kb` 就是这么被误报的（实测它们体内没有这条 SQL）。
+                if (lines[k] and not lines[k][0].isspace()
+                        and not _re.match(r"^(def |class |@|#)", lines[k])):
+                    break
+                # **要认缩进的 `def`**：`mcp_server.py` 里读路径是方法
+                # （`    def read_resource`），只认顶格 def 会把它们全归到
+                # 上一个顶层函数头上——`_inject_sections_arg` 就是这么被误报的。
+                m = _re.match(r"^\s*def ([A-Za-z_][A-Za-z0-9_]*)", lines[k])
                 if m:
                     out.add(m.group(1))
                     break
@@ -533,7 +565,7 @@ class VisibilityReadPathInventoryTest(unittest.TestCase):
         """反向判据：名单里点名的函数必须还在（改名/删除要同步）。"""
         src = _all_domain_src()
         import re as _re
-        defs = set(_re.findall(r"^def ([A-Za-z_][A-Za-z0-9_]*)", src, _re.M))
+        defs = set(_re.findall(r"^\s*def ([A-Za-z_][A-Za-z0-9_]*)", src, _re.M))
         missing = sorted((set(FILTERED) | set(BY_EXACT_CODE)) - defs)
         self.assertEqual(missing, [],
                          f"名单里这些函数在 fish.py 里找不到了：{missing}")
