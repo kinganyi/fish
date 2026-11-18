@@ -75,15 +75,22 @@ class DataAclTest(unittest.TestCase):
     def test_no_wide_groups(self):
         """**核心**：两个目标都不许带 `Authenticated Users` / `BUILTIN\\Users`。"""
         offenders = []
+        checked = 0
         for rel in self.TARGETS:
             p = P0 / rel
             if not _exists(p):
                 continue
+            checked += 1
             rc, out = _acl(p)
             self.assertEqual(rc, 0, f"icacls 读不了 {rel}：{out[:200]}")
             for w in WIDE:
                 if w in out:
                     offenders.append(f"{rel} 含 {w}")
+        # 第三轮评审 B-6：目标一个都不存在时必须**跳过**，不能"零靶点通过"。
+        # 公开镜像里没有 `data/` 也没有 `fish_identity.json`，原实现于是
+        # `offenders == []` 恒过——那不是在说"已经收紧"，是在说"没东西可查"。
+        if checked == 0:
+            self.skipTest("两个目标都不存在（公开镜像只带代码）——判不到，不是通过")
         self.assertEqual(offenders, [],
                          "数据目录对同机所有用户开放——记忆/语料可被读，身份锚可被改：\n"
                          + "\n".join(offenders))
@@ -117,14 +124,18 @@ class DataAclTest(unittest.TestCase):
         没有这条，"把所有 ACE 删光"也能让上面两条变绿——那会把机器变成一个
         连管理员都进不去的目录，是**更严重**的故障。
         """
+        checked = 0
         for rel in self.TARGETS:
             p = P0 / rel
             if not _exists(p):
                 continue
+            checked += 1
             _rc, out = _acl(p)
             for keep in MUST_KEEP:
                 self.assertIn(keep, out,
                               f"{rel} 丢了 {keep}——收紧不能把系统自己锁在外面")
+        if checked == 0:
+            self.skipTest("两个目标都不存在——判不到，不是通过")
 
     def test_current_user_keeps_full_control(self):
         """当前用户必须仍可写——否则 fish 自己就跑不了。"""

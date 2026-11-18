@@ -161,18 +161,44 @@ class McpKindBypassTest(unittest.TestCase):
         self.assertIsNotNone(res)
 
     def test_schemas_do_not_advertise_resident(self):
-        """结构判据：工具 schema 的 `kind` 枚举里不许再出现 resident / role。
+        """结构判据：**身份相关工具**的 `kind` 枚举里不许出现 resident / role。
 
         收窄代码但不收窄 schema，等于"文档说你能自封，代码拒绝你"——
-        调用方会以为是自己写错了，而不是这条路本来就不该存在。
+        调用方会以为是自己写错了，而不是这条路本不该存在。
+
+        ## 第三轮评审：这条原来也是假的
+
+        原实现拿正则扫 `mcp_server.py` 源码文本，只认单行
+        `"kind": {"type": "string", "enum": [`。两种失效方式：
+          ① 把 enum 改成多行，正则就看不见了；
+          ② 失靶守卫是 `assertTrue(enums)`——而 **board 工具也有一个 kind 枚举**
+             （`["progress","done","note"]`），它永远存在，守卫永远满足。
+        评审官实测：把两个身份工具的 enum 改多行并加回 resident/role → **判据绿**。
+
+        现在直接从 `mcp_server.TOOLS` 这个**真实数据结构**里读，不碰文本；
+        失靶守卫盯的是**具体工具名**，board 的 kind 满足不了它。
         """
-        src = (HERE / "mcp_server.py").read_text(encoding="utf-8")
-        import re as _re
-        enums = _re.findall(r'"kind": \{"type": "string", "enum": \[([^\]]*)\]', src)
-        self.assertTrue(enums, "没找到 kind 的 schema 定义——判据失去靶点")
-        for e in enums:
-            self.assertNotIn("resident", e, f"schema 仍宣传 resident：{e}")
-            self.assertNotIn("role", e, f"schema 仍宣传 role：{e}")
+        import mcp_server as _m
+        wanted = ("register", "session_start")
+        found = {}
+        for t in _m.TOOLS:
+            props = (t.get("inputSchema") or {}).get("properties") or {}
+            if "kind" in props:
+                found[t["name"]] = props["kind"].get("enum") or []
+        # 失靶守卫：按**名字**断言，不接受"只要有任何 kind 枚举就行"
+        missing = [w for w in wanted if w not in found]
+        self.assertEqual(missing, [],
+                         f"这些工具没有 kind 参数（判据失去靶点）：{missing}；"
+                         f"实际带 kind 的工具：{sorted(found)}")
+        for name in wanted:
+            enum = found[name]
+            self.assertNotIn("resident", enum,
+                             f"{name} 的 schema 仍宣传 resident：{enum}")
+            self.assertNotIn("role", enum,
+                             f"{name} 的 schema 仍宣传 role：{enum}")
+            self.assertIn("visitor", enum,
+                          f"{name} 的 schema 连 visitor 都没有：{enum}")
+
 
     def test_visitor_token_cannot_write_rule_end_to_end(self):
         """**端到端**：拿到 visitor token 后写 rule，必须被拒。
