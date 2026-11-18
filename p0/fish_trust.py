@@ -170,6 +170,19 @@ AUTH_REQUIRED_MEM_TYPES = frozenset({"rule", "identity"})
 # visitor 是**自助登记**的，任何人一次 session_start 就有。
 AUTHORIZED_CITIZEN_KINDS = ("resident", "role")
 
+# **F-P1-X（2026-11-18 第二轮独立评审 🔴-1）：上一版这道门是假的。**
+#
+# 我加了"必须 resident/role"，但 MCP 的 `session_start` / `register` 把 `kind`
+# 当**调用方入参**（mcp_server.py:318/445 的 inputSchema 里就摆着三个选项）。
+# 于是攻击者只要写 `session_start(kind="resident")` 就绕过了整道门——
+# 评审官一行复现：建出 resident 公民 + token，然后 remember(mem_type="rule") 成功。
+#
+# **一把钥匙在攻击者手里的门，不是门。**
+#
+# 所以真正的不变量是：**MCP 面只能自建 visitor**。resident / role 是"被授予"的，
+# 只能由主人在这台机器上动手（`fish citizen set-kind`），不能由调用方声明。
+SELF_ISSUABLE_KINDS = ("visitor",)
+
 
 def citizen_kind_of(conn, citizen_id):
     """查一个公民的 kind（visitor / role / resident）。查不到返回 None。

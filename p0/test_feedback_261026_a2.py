@@ -201,7 +201,7 @@ class FB08SameNameNoticeTest(_Case):
 
     def test_FB08_notice_when_same_name_exists(self):
         """先 register 一个 role 名，再 `session start --alias 同名` → 提示出现。"""
-        reg = self.srv.tool_register({"display_name": "a2-同名", "kind": "role"}, self.anon)
+        reg = self.srv.tool_register({"display_name": "a2-同名", "kind": "visitor"}, self.anon)
         reg_id = reg.splitlines()[0].strip()
         self.assertTrue(reg_id, reg)
 
@@ -209,19 +209,21 @@ class FB08SameNameNoticeTest(_Case):
         conflicts = res["name_conflicts"]
         self.assertEqual([c["citizen_id"] for c in conflicts], [reg_id],
                          f"应命中那条 role 公民：{res}")
-        self.assertEqual(conflicts[0]["kind"], "role")
+        # F-P1-X（第二轮评审 🔴-1）：MCP 面只能自建 visitor，不能自封 role。
+        # 本判据验的是"同名提示"，与 kind 无关，所以跟着改成 visitor。
+        self.assertEqual(conflicts[0]["kind"], "visitor")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             fish._print_session_start(res)
         out = buf.getvalue()
-        self.assertIn(fish.same_name_notice(reg_id, "role"), out, out)
+        self.assertIn(fish.same_name_notice(reg_id, "visitor"), out, out)
         self.assertIn("检测到同名公民", out)
         self.assertIn("不自动合并", out, "必须说清「不合并」（决策 14）")
         self.assertIn("--citizen", out, "要给出沿用它的具体动作")
 
     def test_FB08_no_notice_when_name_is_fresh(self):
         """换名 → 不出现（否则提示会退化成每次都说的噪音）。"""
-        self.srv.tool_register({"display_name": "a2-同名2", "kind": "role"}, self.anon)
+        self.srv.tool_register({"display_name": "a2-同名2", "kind": "visitor"}, self.anon)
         res = fish.start_session(self.conn, alias="a2-另一个名字", environ={})
         self.assertEqual(res["name_conflicts"], [])
         buf = io.StringIO()
@@ -231,10 +233,10 @@ class FB08SameNameNoticeTest(_Case):
 
     def test_FB08_mcp_receipt_same_wording(self):
         """MCP 的 session_start 回执照样提示，且文案与 CLI **同一个实现**。"""
-        reg = self.srv.tool_register({"display_name": "a2-同名3", "kind": "role"}, self.anon)
+        reg = self.srv.tool_register({"display_name": "a2-同名3", "kind": "visitor"}, self.anon)
         reg_id = reg.splitlines()[0].strip()
         out = self.srv.tool_session_start({"session_name": "a2-同名3"}, self.anon)
-        self.assertIn(fish.same_name_notice(reg_id, "role"), out, out)
+        self.assertIn(fish.same_name_notice(reg_id, "visitor"), out, out)
 
     def test_FB08_self_is_not_a_conflict(self):
         """复用同一条会话（同 key）不该把自己报成同名冲突。"""

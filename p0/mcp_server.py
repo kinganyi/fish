@@ -41,7 +41,8 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import fish  # noqa: E402
+import fish
+import fish_trust
 import fish_profile   # noqa: E402 —— 主人画像（R1-2：AI 只能 propose）
 import fish_corpus  # noqa: E402
 
@@ -315,7 +316,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "display_name": {"type": "string", "description": "你的名字，如 workbuddy-main"},
-                "kind": {"type": "string", "enum": ["visitor", "role", "resident"],
+                "kind": {"type": "string", "enum": ["visitor"],
                          "description": "居留形态：visitor 会话级 / role 项目级 / resident 永久"},
                 "role": {"type": "string", "description": "角色描述，如 reviewer"},
                 "host": {"type": "string", "description": "来源宿主，如 workbuddy"},
@@ -442,7 +443,7 @@ TOOLS = [
                                  "description": "会话标识（幂等锚：同一 AI 重复调用应传同一个值）"},
                 "project": {"type": "string",
                             "description": "可选：顺带开一个项目档期"},
-                "kind": {"type": "string", "enum": ["visitor", "role", "resident"],
+                "kind": {"type": "string", "enum": ["visitor"],
                          "description": "居留形态（默认 visitor）"},
             },
             "required": ["session_name"],
@@ -1309,8 +1310,17 @@ class FishServer:
         if not name:
             raise ValueError("display_name 不能为空")
         kind = a.get("kind", "visitor")
-        if kind not in fish.KINDS:
-            raise ValueError(f"kind 只能是 {fish.KINDS}")
+        # F-P1-X（第二轮评审 🔴-1）：MCP 面不许自封 resident/role。
+        # kind 是调用方入参——上一版只检查「必须是被授予的」，
+        # 而攻击者自己声明 resident 就绕过了。审批权必须在主人手里。
+        if kind not in fish_trust.SELF_ISSUABLE_KINDS:
+            raise ValueError(
+                "MCP 面只能登记 visitor，不能自封 %r。\n"
+                "  resident / role 是**被授予**的身份：rule / identity 会进"
+
+                "所有人的注入包；允许调用方自己声明，等于任何人与主人同等话语权。\n"
+
+                "  要获得：请主人在本机执行 `fish citizen set-kind <citizen_id> resident`。" % (kind,))
         role = a.get("role")
         # host 只从入参取：FISH_ACTOR 是进程级启动参数，用它当"来源宿主"会把
         # 所有会话的公民都记成同一个宿主，等于换了个字段继续串号。
@@ -1637,8 +1647,17 @@ class FishServer:
         display_name = (a.get("display_name") or "").strip() or session_name
         project = (a.get("project") or "").strip() or None
         kind = a.get("kind") or "visitor"
-        if kind not in fish.KINDS:
-            raise ValueError(f"kind 只能是 {fish.KINDS}")
+        # F-P1-X（第二轮评审 🔴-1）：MCP 面不许自封 resident/role。
+        # kind 是调用方入参——上一版只检查「必须是被授予的」，
+        # 而攻击者自己声明 resident 就绕过了。审批权必须在主人手里。
+        if kind not in fish_trust.SELF_ISSUABLE_KINDS:
+            raise ValueError(
+                "MCP 面只能登记 visitor，不能自封 %r。\n"
+                "  resident / role 是**被授予**的身份：rule / identity 会进"
+
+                "所有人的注入包；允许调用方自己声明，等于任何人与主人同等话语权。\n"
+
+                "  要获得：请主人在本机执行 `fish citizen set-kind <citizen_id> resident`。" % (kind,))
 
         try:
             # `display_name` 不单独传：`start_session` 里它会由 `alias`（= session_name）

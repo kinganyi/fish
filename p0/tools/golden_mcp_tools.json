@@ -385,9 +385,7 @@
     "kind": {
      "description": "居留形态：visitor 会话级 / role 项目级 / resident 永久",
      "enum": [
-      "visitor",
-      "role",
-      "resident"
+      "visitor"
      ],
      "type": "string"
     },
@@ -574,9 +572,7 @@
     "kind": {
      "description": "居留形态（默认 visitor）",
      "enum": [
-      "visitor",
-      "role",
-      "resident"
+      "visitor"
      ],
      "type": "string"
     },
