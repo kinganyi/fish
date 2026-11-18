@@ -224,212 +224,224 @@ def rebuild_projection(conn, root: Path) -> dict:
                             "先按 bad_events 里的 seq 定位并修好 payload。"})
     rep["precheck_ok"] = True
 
-    conn.execute("DELETE FROM code_index")
+    # **F-P1-X（第三轮评审）：删投影 + 重放必须可回滚。**
+    #
+    # 预检只能挡住它**声明过**的字段类型。评审官实测 `body_ref: 123`：
+    # 形状合法 → 预检放过 → 重放时 TypeError → **而 DELETE 已经执行了**。
+    # 实测：坏事件排第一条时投影 2→0 且调用方 commit 后永久丢失。
+    #
+    # 根子不在"字段表漏了一行"——枚举永远会漏下一行。
+    # 所以改成结构性保证：**删除与重放包进一个事务，异常就回滚**。
+    try:
+        conn.execute("DELETE FROM code_index")
 
-    # owner 归一所需的知识：哪些才是真公民（见 07 D-13）。
-    # 库里没有公民知识时（空库 / 测试）不做归一——不凭猜测改写归属。
-    # 2026-11-11（序3 归档验证暴露）：必须含 `citizens_archive` 里的冷公民。
-    # 只用热表时，已归档公民名下的记忆会被判成"无效 owner"→ 归一成系统主人
-    # （实测：归档 12 个公民后 rebuild 改写了 6 条记忆的归属，D-10 同类事故）。
-    valid_citizen_ids = citizen_ids_known(conn)
-    sys_owner = resolve_owner(conn)
+        # owner 归一所需的知识：哪些才是真公民（见 07 D-13）。
+        # 库里没有公民知识时（空库 / 测试）不做归一——不凭猜测改写归属。
+        # 2026-11-11（序3 归档验证暴露）：必须含 `citizens_archive` 里的冷公民。
+        # 只用热表时，已归档公民名下的记忆会被判成"无效 owner"→ 归一成系统主人
+        # （实测：归档 12 个公民后 rebuild 改写了 6 条记忆的归属，D-10 同类事故）。
+        valid_citizen_ids = citizen_ids_known(conn)
+        sys_owner = resolve_owner(conn)
 
-    # ---- 2. 重放 memory.recorded ----
-    rows = conn.execute(
-        "SELECT ts,actor,payload FROM events WHERE type='memory.recorded' ORDER BY seq"
-    ).fetchall()
-    for ts, actor_s, payload_s in rows:
-        p = json.loads(payload_s)
-        try:
-            actor = json.loads(actor_s or "{}")
-        except Exception:
-            actor = {}
-        code = p["code"]
-        # 应用改名映射（2026-10-25 治理）。**必须在 `snap.get` 之前**：
-        # 快照的键是新编码，用旧编码去查会查不到，于是 owner/occurred_at 的兜底链全断。
-        if code in rename_map:
-            code = rename_map[code]
-            rep["renamed_applied"] += 1
-        old = snap.get(code, {})
+        # ---- 2. 重放 memory.recorded ----
+        rows = conn.execute(
+            "SELECT ts,actor,payload FROM events WHERE type='memory.recorded' ORDER BY seq"
+        ).fetchall()
+        for ts, actor_s, payload_s in rows:
+            p = json.loads(payload_s)
+            try:
+                actor = json.loads(actor_s or "{}")
+            except Exception:
+                actor = {}
+            code = p["code"]
+            # 应用改名映射（2026-10-25 治理）。**必须在 `snap.get` 之前**：
+            # 快照的键是新编码，用旧编码去查会查不到，于是 owner/occurred_at 的兜底链全断。
+            if code in rename_map:
+                code = rename_map[code]
+                rep["renamed_applied"] += 1
+            old = snap.get(code, {})
 
-        # 时间事实的兜底链（2026-10-22 调整顺序）：
-        #   payload → 重建前投影（**仅当它不晚于记录时间**）→ 事件时间 → 正文文件 mtime
-        # 为什么要「不晚于」：occurred_at 晚于 recorded_at 在逻辑上不可能；出现就说明投影值
-        # 被历史那版坏重建压平过（实证 3 条被写成重建时刻）。这种值不可信，以事件时间为准。
-        occurred = p.get("occurred_at")
-        if occurred:
-            rep["from_payload"] += 1
-        elif old.get("occurred_at") and old["occurred_at"] <= ts:
-            occurred = old["occurred_at"]
-            rep["from_projection"] += 1
-        elif old.get("occurred_at"):
-            occurred = ts
-            rep["from_event"] += 1
-            rep["occurred_corrected"] += 1
-            rep["corrected_codes"].add(code)
-            rep["occurred_corrected_list"].append(f"{code}: {old['occurred_at']} → {ts}")
-        else:
-            ref = p.get("body_ref") or ""
-            f = (root / ref) if ref else None
-            if f is not None and f.exists():
-                occurred = datetime.datetime.fromtimestamp(
-                    f.stat().st_mtime, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-                rep["from_file"] += 1
-            else:
+            # 时间事实的兜底链（2026-10-22 调整顺序）：
+            #   payload → 重建前投影（**仅当它不晚于记录时间**）→ 事件时间 → 正文文件 mtime
+            # 为什么要「不晚于」：occurred_at 晚于 recorded_at 在逻辑上不可能；出现就说明投影值
+            # 被历史那版坏重建压平过（实证 3 条被写成重建时刻）。这种值不可信，以事件时间为准。
+            occurred = p.get("occurred_at")
+            if occurred:
+                rep["from_payload"] += 1
+            elif old.get("occurred_at") and old["occurred_at"] <= ts:
+                occurred = old["occurred_at"]
+                rep["from_projection"] += 1
+            elif old.get("occurred_at"):
                 occurred = ts
                 rep["from_event"] += 1
-
-        owner = actor.get("citizen_id") or old.get("owner") or "unknown"
-        # 外部审查 🔴9（2026-11-11）：**先解析合并链，再判"是否有效公民"**。
-        # 不解析 = rebuild 把人工合并静默撤销 —— owner 回到原始 actor 的公民，
-        # 而那个公民此刻 status 已是 `merged_into:<dst>`，留下幽灵归属。
-        if owner not in ("", "unknown", None):
-            _resolved = resolve_merged(merge_map, owner)
-            if _resolved != owner:
-                rep["owner_merged"] += 1
-                rep["owner_merged_list"].append(f"{code}: {owner!r} → {_resolved!r}")
-                owner = _resolved
-        # owner 必须是有效公民（07 D-13）。有公民知识时把无效值归一到系统主人并逐条记录，
-        # 而不是把它写回投影（否则会留下指向幽灵公民的归属）。
-        if (valid_citizen_ids and owner not in valid_citizen_ids
-            and owner not in ("unknown", UNATTRIBUTED)):   # 2026-11-11：豁免「未归属」
-            rep["owner_normalized"] += 1
-            rep["owner_normalized_list"].append(f"{code}: {owner!r} → {sys_owner!r}")
-            rep["normalized_codes"].add(code)
-            owner = sys_owner or "unknown"
-        if owner in ("", "unknown", None):
-            rep["owner_missing"] += 1
-
-        # 项目：**编码前缀优先**；`body_ref` 只在 code 没被改名映射过时才拿来兜底。
-        # 2026-10-25 修：原文是「body_ref 优先（重命名场景比按前缀切更忠实）」，但改名后
-        # body_ref 是**旧路径**（`projects/ANYI/...`），而 code 已映射成 `anyi-studio-*`——
-        # 于是 body_ref 把正确的 project 覆盖回 `ANYI`。副本实测：rebuild 后
-        # anyi-studio 108→8、大肥鱼 55→0（几乎全部被打回旧项目），212 条挂在 ANYI 下。
-        project = split_code_prefix(code)
-        if code == p.get("code"):
-            # code 没被映射：沿用老逻辑（历史重命名的场景 body_ref 更忠实）
-            ref = p.get("body_ref") or ""
-            if ref.startswith("projects/") and ref.count("/") >= 2:
-                project = ref.split("/")[1]
-        if not project:
-            project = code.split("-")[0]
-
-        # file_path 的取法（2026-10-25 三次迭代后的最终版）：
-        #   ① **优先用快照**——它是"文件此刻真的在哪"这个唯一事实。
-        #      `body_relpath` 用 title 算，而事件里的 title 是**记录时**的；
-        #      重命名脚本用的是 `code_index.title`（可能被 memory.revised 改过）。
-        #      两者不一致时重算会算出不同路径 → 重建即断链（副本实测 73 条）。
-        #   ② 快照没有（新库/首建）时，code 没被映射就信 body_ref；
-        #   ③ 都不行才用 `body_relpath` 重算。
-        snap_fp = (snap.get(code) or {}).get("file_path") or ""
-        if snap_fp and (root / snap_fp).exists():
-            file_path = snap_fp
-        elif code == p.get("code") and p.get("body_ref") and (root / p["body_ref"]).exists():
-            file_path = p["body_ref"]
-        else:
-            file_path = body_relpath(project, code, p.get("title"))
-
-        session_actor = p.get("session_actor", old.get("session_actor"))
-        # 附件：新事件 payload 存完整元数据（含 blob 路径），旧事件只有 name+sha256。
-        # 旧事件不完整时用重建前投影兜底；连投影都没有，就降级保留 name+sha256 并计数。
-        atts = p.get("attachments")
-        full = bool(atts) and all(isinstance(a, dict) and a.get("blob") for a in atts)
-        if full:
-            atts_s = json.dumps(atts, ensure_ascii=False)
-        elif old.get("attachments"):
-            atts_s = old["attachments"]
-            rep["atts_from_projection"] += 1
-        else:
-            atts_s = json.dumps(atts, ensure_ascii=False) if atts else None
-            if atts:
-                rep["atts_degraded"] += 1
-
-        conn.execute(
-            "INSERT OR IGNORE INTO code_index (code,title,project,owner,mem_type,visibility,"
-            "status,tags,file_path,occurred_at,recorded_at,session_actor,attachments) "
-            "VALUES (?,?,?,?,?,?,'active',?,?,?,?,?,?)",
-            (code, p.get("title"), project, owner,
-             p.get("mem_type", "fact"),
-             # G-06（安全审计 2026-10-29）：旧版 `p.get("visibility", "shared")`
-             # 在事件**缺键或为 null** 时兜底成 shared —— 生产 322 条事件里有 7 条
-             # 没有 visibility 键（2.2%），一次 rebuild 就会把 private **静默公开**。
-             # 回落到重建前快照里的历史值（owner/attachments 都是这么做的），
-             # 只有"历史也没有"时才用 shared。
-             (p.get("visibility")
-              or (snap.get(code) or {}).get("visibility")
-              or "shared"),
-             json.dumps(p.get("tags", []), ensure_ascii=False), file_path,
-             occurred, ts, session_actor, atts_s))
-        rep["projected"] += 1
-
-    # ---- 3. 重放 memory.superseded（替代链靠事件恢复，不靠猜）----
-    # 2026-10-25：old/new **都要过改名映射**，否则事件里的旧编码会把映射后的条目
-    # "悬空"——UPDATE 找不到行，静默失效（重建后 status 全变回 active）。
-    for (payload_s,) in conn.execute(
-            "SELECT payload FROM events WHERE type='memory.superseded' ORDER BY seq").fetchall():
-        p = json.loads(payload_s)
-        old_code, new_code = p.get("old"), p.get("new")
-        if not old_code:
-            continue
-        old_code = rename_map.get(old_code, old_code)
-        if new_code:
-            new_code = rename_map.get(new_code, new_code)
-        conn.execute(
-            "UPDATE code_index SET status='superseded', superseded_by=? WHERE code=?",
-            (new_code, old_code))
-        rep["superseded_events"] += 1
-
-    # ---- 3b. 重放 memory.retired（作废 / withdrawn，ADR-003 状态机）----
-    for (payload_s,) in conn.execute(
-            "SELECT payload FROM events WHERE type='memory.retired' ORDER BY seq").fetchall():
-        p = json.loads(payload_s)
-        code = p.get("code")
-        if not code:
-            continue
-        code = rename_map.get(code, code)      # 2026-10-25：作废事件也要过改名映射
-        if p.get("status", "withdrawn") == "withdrawn":
-            conn.execute("UPDATE code_index SET status='withdrawn' WHERE code=?", (code,))
-            rep["retired_events"] += 1
-
-    # ---- 4a. 访问记录：快照优先（它是累积态，已含历史与事件两者的效果）----
-    restored = set()
-    for code, s in snap.items():
-        if not (s["last_accessed_at"] or s["access_count"] or s["dormant"]):
-            continue
-        cur = conn.execute(
-            "UPDATE code_index SET last_accessed_at=?, access_count=?, dormant=? WHERE code=?",
-            (s["last_accessed_at"], s["access_count"], s["dormant"], code))
-        if cur.rowcount:
-            rep["access_preserved"] += 1
-            restored.add(code)
-
-    # ---- 4b. 快照里没有访问信息的条目：从事件补齐 ----
-    # 2026-10-22 起访问与休眠都有事件来源（memory.accessed / memory.dormant），
-    # 所以「投影整个被毁、没有快照」时这两类状态不再必然丢失（修 07 D-12）。
-    # 只对未被快照覆盖的条目重放，避免与累积值重复计数。
-    for ts, payload_s in conn.execute(
-            "SELECT ts,payload FROM events WHERE type IN ('memory.accessed','memory.dormant') "
-            "ORDER BY seq"):
-        p = json.loads(payload_s)
-        if p.get("codes"):                       # memory.accessed
-            counted = bool(p.get("counted", True))
-            for c in p["codes"]:
-                if c in restored:
-                    continue
-                if counted:
-                    conn.execute(
-                        "UPDATE code_index SET last_accessed_at=?, dormant=0, "
-                        "access_count=COALESCE(access_count,0)+1 WHERE code=?", (ts, c))
+                rep["occurred_corrected"] += 1
+                rep["corrected_codes"].add(code)
+                rep["occurred_corrected_list"].append(f"{code}: {old['occurred_at']} → {ts}")
+            else:
+                ref = p.get("body_ref") or ""
+                f = (root / ref) if ref else None
+                if f is not None and f.exists():
+                    occurred = datetime.datetime.fromtimestamp(
+                        f.stat().st_mtime, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                    rep["from_file"] += 1
                 else:
-                    conn.execute(
-                        "UPDATE code_index SET last_accessed_at=?, dormant=0 WHERE code=?", (ts, c))
-                rep["access_from_events"] += 1
-        elif p.get("code"):                      # memory.dormant
-            if p["code"] in restored:
+                    occurred = ts
+                    rep["from_event"] += 1
+
+            owner = actor.get("citizen_id") or old.get("owner") or "unknown"
+            # 外部审查 🔴9（2026-11-11）：**先解析合并链，再判"是否有效公民"**。
+            # 不解析 = rebuild 把人工合并静默撤销 —— owner 回到原始 actor 的公民，
+            # 而那个公民此刻 status 已是 `merged_into:<dst>`，留下幽灵归属。
+            if owner not in ("", "unknown", None):
+                _resolved = resolve_merged(merge_map, owner)
+                if _resolved != owner:
+                    rep["owner_merged"] += 1
+                    rep["owner_merged_list"].append(f"{code}: {owner!r} → {_resolved!r}")
+                    owner = _resolved
+            # owner 必须是有效公民（07 D-13）。有公民知识时把无效值归一到系统主人并逐条记录，
+            # 而不是把它写回投影（否则会留下指向幽灵公民的归属）。
+            if (valid_citizen_ids and owner not in valid_citizen_ids
+                and owner not in ("unknown", UNATTRIBUTED)):   # 2026-11-11：豁免「未归属」
+                rep["owner_normalized"] += 1
+                rep["owner_normalized_list"].append(f"{code}: {owner!r} → {sys_owner!r}")
+                rep["normalized_codes"].add(code)
+                owner = sys_owner or "unknown"
+            if owner in ("", "unknown", None):
+                rep["owner_missing"] += 1
+
+            # 项目：**编码前缀优先**；`body_ref` 只在 code 没被改名映射过时才拿来兜底。
+            # 2026-10-25 修：原文是「body_ref 优先（重命名场景比按前缀切更忠实）」，但改名后
+            # body_ref 是**旧路径**（`projects/ANYI/...`），而 code 已映射成 `anyi-studio-*`——
+            # 于是 body_ref 把正确的 project 覆盖回 `ANYI`。副本实测：rebuild 后
+            # anyi-studio 108→8、大肥鱼 55→0（几乎全部被打回旧项目），212 条挂在 ANYI 下。
+            project = split_code_prefix(code)
+            if code == p.get("code"):
+                # code 没被映射：沿用老逻辑（历史重命名的场景 body_ref 更忠实）
+                ref = p.get("body_ref") or ""
+                if ref.startswith("projects/") and ref.count("/") >= 2:
+                    project = ref.split("/")[1]
+            if not project:
+                project = code.split("-")[0]
+
+            # file_path 的取法（2026-10-25 三次迭代后的最终版）：
+            #   ① **优先用快照**——它是"文件此刻真的在哪"这个唯一事实。
+            #      `body_relpath` 用 title 算，而事件里的 title 是**记录时**的；
+            #      重命名脚本用的是 `code_index.title`（可能被 memory.revised 改过）。
+            #      两者不一致时重算会算出不同路径 → 重建即断链（副本实测 73 条）。
+            #   ② 快照没有（新库/首建）时，code 没被映射就信 body_ref；
+            #   ③ 都不行才用 `body_relpath` 重算。
+            snap_fp = (snap.get(code) or {}).get("file_path") or ""
+            if snap_fp and (root / snap_fp).exists():
+                file_path = snap_fp
+            elif code == p.get("code") and p.get("body_ref") and (root / p["body_ref"]).exists():
+                file_path = p["body_ref"]
+            else:
+                file_path = body_relpath(project, code, p.get("title"))
+
+            session_actor = p.get("session_actor", old.get("session_actor"))
+            # 附件：新事件 payload 存完整元数据（含 blob 路径），旧事件只有 name+sha256。
+            # 旧事件不完整时用重建前投影兜底；连投影都没有，就降级保留 name+sha256 并计数。
+            atts = p.get("attachments")
+            full = bool(atts) and all(isinstance(a, dict) and a.get("blob") for a in atts)
+            if full:
+                atts_s = json.dumps(atts, ensure_ascii=False)
+            elif old.get("attachments"):
+                atts_s = old["attachments"]
+                rep["atts_from_projection"] += 1
+            else:
+                atts_s = json.dumps(atts, ensure_ascii=False) if atts else None
+                if atts:
+                    rep["atts_degraded"] += 1
+
+            conn.execute(
+                "INSERT OR IGNORE INTO code_index (code,title,project,owner,mem_type,visibility,"
+                "status,tags,file_path,occurred_at,recorded_at,session_actor,attachments) "
+                "VALUES (?,?,?,?,?,?,'active',?,?,?,?,?,?)",
+                (code, p.get("title"), project, owner,
+                 p.get("mem_type", "fact"),
+                 # G-06（安全审计 2026-10-29）：旧版 `p.get("visibility", "shared")`
+                 # 在事件**缺键或为 null** 时兜底成 shared —— 生产 322 条事件里有 7 条
+                 # 没有 visibility 键（2.2%），一次 rebuild 就会把 private **静默公开**。
+                 # 回落到重建前快照里的历史值（owner/attachments 都是这么做的），
+                 # 只有"历史也没有"时才用 shared。
+                 (p.get("visibility")
+                  or (snap.get(code) or {}).get("visibility")
+                  or "shared"),
+                 json.dumps(p.get("tags", []), ensure_ascii=False), file_path,
+                 occurred, ts, session_actor, atts_s))
+            rep["projected"] += 1
+
+        # ---- 3. 重放 memory.superseded（替代链靠事件恢复，不靠猜）----
+        # 2026-10-25：old/new **都要过改名映射**，否则事件里的旧编码会把映射后的条目
+        # "悬空"——UPDATE 找不到行，静默失效（重建后 status 全变回 active）。
+        for (payload_s,) in conn.execute(
+                "SELECT payload FROM events WHERE type='memory.superseded' ORDER BY seq").fetchall():
+            p = json.loads(payload_s)
+            old_code, new_code = p.get("old"), p.get("new")
+            if not old_code:
                 continue
-            conn.execute("UPDATE code_index SET dormant=1 WHERE code=?", (p["code"],))
-            rep["dormant_from_events"] += 1
-    conn.commit()
+            old_code = rename_map.get(old_code, old_code)
+            if new_code:
+                new_code = rename_map.get(new_code, new_code)
+            conn.execute(
+                "UPDATE code_index SET status='superseded', superseded_by=? WHERE code=?",
+                (new_code, old_code))
+            rep["superseded_events"] += 1
+
+        # ---- 3b. 重放 memory.retired（作废 / withdrawn，ADR-003 状态机）----
+        for (payload_s,) in conn.execute(
+                "SELECT payload FROM events WHERE type='memory.retired' ORDER BY seq").fetchall():
+            p = json.loads(payload_s)
+            code = p.get("code")
+            if not code:
+                continue
+            code = rename_map.get(code, code)      # 2026-10-25：作废事件也要过改名映射
+            if p.get("status", "withdrawn") == "withdrawn":
+                conn.execute("UPDATE code_index SET status='withdrawn' WHERE code=?", (code,))
+                rep["retired_events"] += 1
+
+        # ---- 4a. 访问记录：快照优先（它是累积态，已含历史与事件两者的效果）----
+        restored = set()
+        for code, s in snap.items():
+            if not (s["last_accessed_at"] or s["access_count"] or s["dormant"]):
+                continue
+            cur = conn.execute(
+                "UPDATE code_index SET last_accessed_at=?, access_count=?, dormant=? WHERE code=?",
+                (s["last_accessed_at"], s["access_count"], s["dormant"], code))
+            if cur.rowcount:
+                rep["access_preserved"] += 1
+                restored.add(code)
+
+        # ---- 4b. 快照里没有访问信息的条目：从事件补齐 ----
+        # 2026-10-22 起访问与休眠都有事件来源（memory.accessed / memory.dormant），
+        # 所以「投影整个被毁、没有快照」时这两类状态不再必然丢失（修 07 D-12）。
+        # 只对未被快照覆盖的条目重放，避免与累积值重复计数。
+        for ts, payload_s in conn.execute(
+                "SELECT ts,payload FROM events WHERE type IN ('memory.accessed','memory.dormant') "
+                "ORDER BY seq"):
+            p = json.loads(payload_s)
+            if p.get("codes"):                       # memory.accessed
+                counted = bool(p.get("counted", True))
+                for c in p["codes"]:
+                    if c in restored:
+                        continue
+                    if counted:
+                        conn.execute(
+                            "UPDATE code_index SET last_accessed_at=?, dormant=0, "
+                            "access_count=COALESCE(access_count,0)+1 WHERE code=?", (ts, c))
+                    else:
+                        conn.execute(
+                            "UPDATE code_index SET last_accessed_at=?, dormant=0 WHERE code=?", (ts, c))
+                    rep["access_from_events"] += 1
+            elif p.get("code"):                      # memory.dormant
+                if p["code"] in restored:
+                    continue
+                conn.execute("UPDATE code_index SET dormant=1 WHERE code=?", (p["code"],))
+                rep["dormant_from_events"] += 1
+    except BaseException:
+        # 回滚到删除之前。这里**不吞异常**：原始错误必须传上去。
+        conn.rollback()
+        raise
 
     # ---- 4b. 快照补回：事件里找不到来源的条目（2026-10-25）----
     # 为什么会有这种条目：**编码被复用过**。典型案例——
