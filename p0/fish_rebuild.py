@@ -47,6 +47,13 @@ class RebuildError(Exception):
         self.detail = detail or {}
 
 
+# F-P1-X（评审 🟠-1）：预检覆盖的事件类型。
+# 判据 `test_precheck_types_cover_every_replayed_type` 会扫源码里的重放类型，
+# 断言它们全在这里——谁新增一类重放却忘了加进来，那条就红。
+_PRECHECK_TYPES = ("memory.recorded", "memory.superseded", "memory.retired",
+                   "memory.accessed", "memory.dormant")
+
+
 
 def rebuild_projection(conn, root: Path) -> dict:
     """从事件重放重建 `code_index` 投影，返回对账报告。
@@ -146,26 +153,47 @@ def rebuild_projection(conn, root: Path) -> dict:
     # `memory.recorded` 事件必须能解析成 dict 且带 `code`。任一失败就在这里停，
     # **一个字节都还没删**。这比"删了再回滚"更稳——回滚依赖连接状态，
     # 预检不依赖任何东西。
+    # **F-P1-X（2026-11-18 独立评审 🟠-1）：预检必须覆盖所有会被重放解析的事件类型。**
+    #
+    # 原实现只扫 `memory.recorded`，而重放阶段还会裸 `json.loads` 另外三类
+    # （`memory.superseded` / `memory.retired` / `memory.accessed`+`memory.dormant`）。
+    # 后果实测：注入一条畸形 `memory.retired` → JSONDecodeError **发生在 DELETE 之后**，
+    # 同一连接内投影 2→1 行，随后 commit 固化。"投影未被修改"那句话在那条路径上是假的。
+    #
+    # 判据要和实现一样长：预检的类型清单必须与重放用到的类型清单逐项相等，
+    # 否则"我预检过了"永远只是"我预检了我想到的那部分"。
+    # 提成模块级：判据要能读到它，否则"预检覆盖哪些类型"只能靠人肉核对。
+    PRECHECK_TYPES = _PRECHECK_TYPES
+    # 只有 `memory.recorded` 必须带 code（其余按 code 集合或 id 定位，不强求）
+    NEEDS_CODE = ("memory.recorded",)
+
+    marks = ",".join("?" for _ in PRECHECK_TYPES)
     bad_events = []
-    for seq, payload_s in conn.execute(
-            "SELECT seq,payload FROM events WHERE type='memory.recorded'").fetchall():
+    for seq, ev_type, payload_s in conn.execute(
+            "SELECT seq,type,payload FROM events WHERE type IN (%s)" % marks,
+            PRECHECK_TYPES).fetchall():
         try:
             p = json.loads(payload_s or "{}")
         except Exception as exc:
-            bad_events.append((seq, f"JSON 解析失败: {type(exc).__name__}"))
+            bad_events.append((seq, ev_type, f"JSON 解析失败: {type(exc).__name__}"))
             continue
         if not isinstance(p, dict):
-            bad_events.append((seq, "payload 不是对象"))
-        elif not p.get("code"):
-            bad_events.append((seq, "payload 缺 code"))
+            bad_events.append((seq, ev_type, "payload 不是对象"))
+        elif ev_type in NEEDS_CODE and not p.get("code"):
+            bad_events.append((seq, ev_type, "payload 缺 code"))
     if bad_events:
         # 抛出去而不是"跳过坏事件继续"：跳过会让投影少一条，而少的那条
         # 看起来和"本来就没有"完全一样——静默丢数据比响亮失败糟得多。
+        by_type = {}
+        for _seq, ev_type, _why in bad_events:
+            by_type[ev_type] = by_type.get(ev_type, 0) + 1
         raise RebuildError(
-            f"重建中止：{len(bad_events)} 条 memory.recorded 事件无法解析，"
+            f"重建中止：{len(bad_events)} 条事件无法解析"
+            f"（{', '.join(f'{k}×{v}' for k, v in sorted(by_type.items()))}），"
             f"投影**未被修改**",
             detail={"bad_events": bad_events[:10],
-                    "hint": "先修事件或备份后用 --skip-bad 显式跳过"})
+                    "checked_types": list(PRECHECK_TYPES),
+                    "hint": "先修这几条事件再重建；坏事件不修就重建会把它们静默丢掉"})
     rep["precheck_ok"] = True
 
     conn.execute("DELETE FROM code_index")
