@@ -100,6 +100,8 @@ from fish_corpus import CorpusError, CorpusNotReady  # noqa: F401
 # 全部继续可用，且与 `fish_kb.<name>` 是**同一个对象**。
 # 为什么不用 `import *`：漏名是静默的，而这里每个名字都被判据 J1 逐个查对象同一性。
 # 生成/校验：`python tools/gen_reexport.py --check`
+# F-P1-5：数据面 CLI 入口（实现住 fish_dataplane，这里只做 re-export）
+from fish_dataplane import cli as dataplane_cli  # noqa: F401
 from fish_attach import (AttachmentRejected, store_blob,  # F-P1-3
                          ATTACH_MAX_BYTES_KEY, ATTACH_MAX_MB_DEFAULT,
                          ATTACH_SENSITIVE_PATTERNS, ATTACH_DENY_ROOTS,

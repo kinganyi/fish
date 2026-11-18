@@ -36,6 +36,7 @@ import fnmatch
 import hashlib
 import mimetypes
 import os
+import sys
 import re
 from pathlib import Path
 
@@ -649,3 +650,105 @@ def set_compressor(fn):
     global _DELIVER_COMPRESSOR
     _DELIVER_COMPRESSOR = fn
     return _DELIVER_COMPRESSOR
+
+# ---------------------------------------------------------------- CLI 入口
+# F-P1-5（2026-11-18 外部审查）：本模块的 10 个函数原本**没有任何产品入口**——
+# 资产表、缩略图、引用反查、无引用结论都只能靠作者的临时脚本产出。
+# 一个只能被作者临时脚本触发的功能，等于不存在。
+
+def cli(args):
+    """`fish dataplane <action>` 的实现。返回退出码（0 成功 / 1 有问题 / 2 用法错）。
+
+    **签名只有一个 args**：`main()` 的约定是 `rc = args.func(args)`。
+    连接在这里自己开、自己关——命令层拿到的是一个可用的 conn，
+    而不是要求调用方先替它连好库（那样每个 action 都要重复一遍 try/finally）。
+
+    **四个动作都默认 dry-run，只读不写**——这些操作会遍历 10.7 GB，
+    误触发的代价远高于多打一个 `--apply`。
+    """
+    import json as _json
+    action = getattr(args, "dp_action", None)
+    import fish as _fish
+    root = Path(getattr(args, "root", "") or ".")
+    conn = _fish.connect(root)
+    try:
+        return _cli_with_conn(args, conn, root, action, _json)
+    finally:
+        conn.close()
+
+
+def _cli_with_conn(args, conn, root, action, _json):
+    vault = None
+    try:
+        import fish_kb as _kb
+        vault = _kb.kb_vault_get(conn, getattr(args, "vault", None))
+    except Exception as exc:              # noqa: BLE001
+        if action != "classify":
+            print(f"错误：取不到知识库（{type(exc).__name__}: {exc}）", file=sys.stderr)
+            return 2
+
+    if action == "classify":
+        # 单个文件的**分类判定**：给"为什么它算 image/video/other"一个可查的答案。
+        target = Path(getattr(args, "path", ""))
+        if not target.exists():
+            print(f"错误：文件不存在：{target}", file=sys.stderr)
+            return 2
+        # 返回是三元组 (kind, mime, magic)——**按魔数判定**，扩展名不参与结论
+        # （外部审查 I5：分类只许看魔数，扩展名可以随便改）。
+        got = classify_file(target)
+        kind, mime, magic = (tuple(got) + (None, None, None))[:3]
+        print(f"  {target}")
+        print(f"  kind  = {kind}")
+        print(f"  mime  = {mime}")
+        print(f"  magic = {magic!r}")
+        return 0
+
+    if action == "stats":
+        res = asset_stats(conn, vault_id=vault["vault_id"])
+        if getattr(args, "json", False):
+            print(_json.dumps(res, ensure_ascii=False, indent=2))
+            return 0
+        print(f"  资产 {res['total']} 条 / {res['bytes'] / 1024 / 1024 / 1024:.2f} GB")
+        # by_kind / by_status 的值是 {count, bytes} 字典，不是裸整数——
+        # 直接 f-string 打出来会是一坨 {'count': 9, ...}，看不出主次。
+        for label, key in (("类型", "by_kind"), ("状态", "by_status")):
+            for k, v in sorted(res.get(key, {}).items()):
+                if isinstance(v, dict):
+                    n, b = v.get("count", 0), v.get("bytes", 0)
+                    print(f"    {label} {k:<10} {n:>5} 条 / {b / 1024 / 1024:>9.1f} MB")
+                else:
+                    print(f"    {label} {k:<10} {v}")
+        ref = res.get("referenced")
+        if ref is not None:
+            print(f"  被引用 {ref} 条 / 无引用 {res.get('unreferenced', 0)} 条")
+        return 0
+
+    if action == "scan":
+        res = scan_vault(conn, vault, dry_run=not getattr(args, "apply", False),
+                         compute_hash=getattr(args, "hash", False),
+                         limit=getattr(args, "limit", None))
+        print(f"  扫描 {res.get('scanned', 0)} 个文件 / 新增 {res.get('added', 0)} / "
+              f"更新 {res.get('updated', 0)} / 跳过 {res.get('skipped', 0)}")
+        if not getattr(args, "apply", False):
+            print("  （dry-run：一个字节都没写；加 --apply 才落库）")
+        return 0
+
+    if action == "refs":
+        res = build_referenced_by(conn, vault, write=bool(getattr(args, "apply", False)))
+        print(f"  被引用 {res.get('referenced', 0)} 条 / 无引用 {res.get('unreferenced', 0)} 条")
+        if not getattr(args, "apply", False):
+            print("  （dry-run：未写 referenced_by；加 --apply 才落库）")
+        return 0
+
+    if action == "thumbs":
+        res = make_thumbnails(conn, vault, data_root=root,
+                              limit=getattr(args, "limit", 0) or 0,
+                              dry_run=not getattr(args, "apply", False))
+        print(f"  缩略图 生成 {res.get('made', 0)} / 跳过 {res.get('skipped', 0)} / "
+              f"失败 {res.get('failed', 0)}")
+        if not getattr(args, "apply", False):
+            print("  （dry-run：未写图；加 --apply 才生成）")
+        return 0
+
+    print(f"错误：未知动作 {action!r}", file=sys.stderr)
+    return 2

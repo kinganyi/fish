@@ -178,6 +178,26 @@ def main():
 
     # 看板（P1-b · 2026-10-25）。裁决 `16` §4.1：**数据库做真相 + 文件做渲染**，
     # 所以写入只走这里（AI 不许直接 write 渲染文件），文件删了可随时重建。
+    # F-P1-5（2026-11-18 外部审查）：数据面的四个动作原本没有任何产品入口——
+    # 资产表/缩略图/引用反查/无引用结论都只能靠作者的临时脚本产出。
+    # 全部默认 dry-run、只读：这些操作会遍历 10.7 GB，误触发的代价远高于多打一个 --apply。
+    p = sub.add_parser("dataplane", help="数据面：资产扫描 / 引用反查 / 缩略图 / 读数")
+    dp = p.add_subparsers(dest="dp_action", required=True)
+    for _name, _help in (("stats", "资产层读数（按 kind/status 聚合）"),
+                         ("scan", "扫描 vault 写 kb_asset"),
+                         ("refs", "从笔记反解引用，写 referenced_by"),
+                         ("thumbs", "生成 WebP 缩略图")):
+        _sp = dp.add_parser(_name, help=_help)
+        _sp.add_argument("--vault", default=None, help="库名（缺省=默认库）")
+        _sp.add_argument("--json", action="store_true", help="JSON 输出")
+        _sp.add_argument("--limit", type=int, default=None, help="最多处理几个")
+        _sp.add_argument("--hash", action="store_true", help="扫描时算 sha256（慢）")
+        _sp.add_argument("--apply", action="store_true", help="真写库（默认 dry-run）")
+        _sp.set_defaults(func=_f.dataplane_cli)
+    _cp = dp.add_parser("classify", help="判定单个文件的 kind 与 magic")
+    _cp.add_argument("path")
+    _cp.set_defaults(func=_f.dataplane_cli)
+
     p = sub.add_parser("board", help="看板（show / checkin / post / render / close）")
     bsub = p.add_subparsers(dest="board_action", required=True)
 
