@@ -41,7 +41,13 @@ class VisibilityTest(unittest.TestCase):
     def _remember(self, title, visibility, owner="cit-owner"):
         res = fish.record_memory(
             self.conn, self.root, project="VIS", title=title, body="正文",
-            visibility=visibility, owner=owner)
+            visibility=visibility, owner=owner,
+            # F-P1-2（2026-11-18 外部审查）：写入侧新增了一道守卫——
+            # 开关关着时**拒绝**写 private（否则它只是个骗人的标签）。
+            # 本文件这五条判据测的是**读取/过滤**行为，不是"写入是否允许"，
+            # 所以这里显式走"只要标签"的通道，让它们继续测原本要测的东西。
+            # 写入侧守卫本身在 test_visibility_guard.py 里单独判。
+            allow_unenforced_private=True)
         return res[0]
 
     def _set(self, key, value):

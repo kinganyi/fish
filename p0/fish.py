@@ -1024,6 +1024,7 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
                   mem_type: str = "fact", tags=None, visibility: str = "shared",
                   owner=None, session_actor=None, attachments=None,
                   allow_sensitive_attachments=False,
+                  allow_unenforced_private=False,
                   occurred_at=None, supersedes=None, cause=None, hints=None,
                   supersede_notes=None) -> tuple:
     """**唯一的记忆写入入口** —— CLI 与 MCP 都必须走这里。
@@ -1047,6 +1048,40 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
     if visibility not in ("shared", "private"):
         raise ValueError(
             f"未知 visibility={visibility!r}（可用值：shared / private）")
+    # ---- F-P1-2（2026-11-18 外部审查）：`private` 不许变成一个骗人的标签 ----
+    #
+    # 审查方实测：默认配置下写进去 `visibility='private'` 之后，没有读路径按它过滤，
+    # 于是它只是一个字符串——而写入方**收不到任何提示**。
+    #
+    # 核实后的准确现状（我第一版注释写"零调用点"，那是 grep 名字拼错导致的误判，已改正）：
+    #   · `_filter_by_visibility` **确实接在** `search_memories`（L2621）上，实现正确；
+    #   · 但它只在 `privacy.visibility_enforced` 打开时生效，而该键**默认关**；
+    #   · `list_memories` / `neighbors` / `recent_fallback` / 注入各段**不过滤**。
+    # 所以缺的不是过滤器，是"默认关着时写入方以为它生效了"这一层谎。
+    #
+    # 修法取审查方给的两个选项里的**第二个**（拒绝写入），理由是可验证性：
+    # 补 17 处读路径，漏一处就是"以为私有了其实没有"，而这个错误**不会报错**；
+    # 拒绝写入只有一个判定点，它错不了。
+    #
+    # 为什么不全补：`_filter_by_visibility` 已经能过滤，但"全部读路径"包含
+    # search / list / neighbors / inject 各段 / push / similar / distill 等 17 处，
+    # 每一处都要传 viewer 且顺序正确。这个工作量不该和"先堵住谎言"挤在同一批里。
+    # 开关打开（privacy.visibility_enforced=1）时仍然放行写入——那时过滤是真的。
+    #
+    # 用户 2026-10-29 的"做成开关、不强制"决定**没有被推翻**：开关还在，
+    # 只是它现在必须真的有效才允许写 private。
+    if visibility == "private" and not allow_unenforced_private:
+        try:
+            enforced = _visibility_enforced(conn)
+        except Exception:      # noqa: BLE001 —— 判不到就当没强制（宁严勿松）
+            enforced = False
+        if not enforced:
+            raise ValueError(
+                "`visibility=private` 当前不会生效——它只会变成一个标签，"
+                "而你不会收到任何提示。\n"
+                "　原因：`privacy.visibility_enforced` 关着（默认）。\n"
+                "　要真私有：`fish config set privacy.visibility_enforced 1` 后再写。\n"
+                "　只要标签：加 `--allow-unenforced-private`（并接受它不保护任何东西）。")
     # 项目可写性（2026-10-25 · 阶段 D）：closed / retired 拒绝写入。
     # 为什么拦在**这里**而不是 MCP 层：`record_memory` 是唯一写入口（CLI 与 MCP 共用），
     # 拦在别处必然有一条路径漏掉——那正是"两条路径必须共用一份写入逻辑"的原始教训。
@@ -5381,7 +5416,8 @@ def cmd_remember(args):
         mem_type=args.type, tags=args.tags or [], visibility=args.visibility,
         owner=owner, session_actor=args.session_actor,
         attachments=args.attach or [],
-                       allow_sensitive_attachments=getattr(args, "allow_sensitive_attach", False), occurred_at=occurred_at, cause=args.cause,
+                       allow_sensitive_attachments=getattr(args, "allow_sensitive_attach", False),
+                       allow_unenforced_private=getattr(args, "allow_unenforced_private", False), occurred_at=occurred_at, cause=args.cause,
         supersedes=getattr(args, "supersedes", None) or None,
         hints=hints, supersede_notes=supersede_notes)
     try:

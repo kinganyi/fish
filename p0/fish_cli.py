@@ -409,7 +409,8 @@ def main():
     p.add_argument("--type", default="fact",
                    choices=["identity", "rule", "fact", "episode", "lesson", "artifact"])
     p.add_argument("--visibility", default="shared", choices=["private", "shared"],
-                   help="private=只给 owner 看（可选标签；执行层未完成，见 fish_common）")
+                   help=("private=只给 owner 看。默认不生效："
+                         "privacy.visibility_enforced 关时拒绝写入，避免变成一个骗人的标签"))
     p.add_argument("--tags", nargs="*", default=[])
     p.add_argument("--owner", default=None,
                    help="公民 ID（不是显示名）。缺省=系统主人（citizens.is_owner）")
@@ -426,6 +427,10 @@ def main():
                    help="允许附件命中敏感名单/系统目录（默认拒绝）")
     p.add_argument("--session-actor", dest="session_actor", default=None,
                    help="会话级身份（如 anyi-dev），用于区分同一宿主下的不同会话")
+    # F-P1-2：`private` 在开关关着时不生效。要"只要标签"必须显式说出口。
+    p.add_argument("--allow-unenforced-private",
+                   dest="allow_unenforced_private", action="store_true",
+                   help="允许写 private 但不启用过滤（它不会保护任何东西）")
     # FB-11：CLI 侧的“写新的同时置旧的”。可重复给（一条新记忆替代多条旧条目）。
     p.add_argument("--supersedes", action="append", default=[], metavar="OLD_CODE",
                    help="把这条替代掉的旧编码（可重复）。**新条目写成功之后**才置旧条目"
