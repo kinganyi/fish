@@ -15,7 +15,7 @@ bpath.write_bytes(data)          # 写一半断电 → 目录里留一个 sha256
 
 ② 没有敏感名单：`--attach ~/.ssh/id_rsa` 把私钥按内容寻址复制进 `blobs/`。
    **内容寻址意味着改名也挡不住**——sha256 一样就还是同一份。
-③ 没有允许根：机器上任何可读路径都能被吸进来，包括系统目录。
+③ 没有位置拦截：机器上任何可读路径都能被吸进来，包括系统目录与凭据目录。
 
 ## 依赖方向
 
@@ -53,9 +53,30 @@ ATTACH_SENSITIVE_PATTERNS = (
     "*凭证*", "*密码*", "*密钥*",
 )
 
+# ---------------------------------------------------------------- 拦截面
+#
+# **F-P1-X（2026-11-18 独立评审 🟠-5）：这里原来叫"允许根校验"，但实现只是
+# 4 条系统目录的黑名单——名不副实。评审官实测：`<tmp>\.ssh\config` 与一个
+# 叫 `prod-notes.txt`（内容里有密码）的文件都能进库。**
+#
+# 修正分两半：**把网撑大** + **把话说准**。
+#
+# 撑大：加凭据目录段。它们是已知的密钥/令牌存放地，路径形态可枚举。
+ATTACH_DENY_SEGMENTS = (
+    "/.ssh/", "/.aws/", "/.gnupg/", "/.kube/", "/.docker/", "/.azure/",
+    "/.config/gcloud/", "/.config/gh/", "/appdata/roaming/gcloud/",
+    "/appdata/roaming/gh/", "/appdata/roaming/docker/",
+)
 # 系统目录：吸进附件没有正当用途，但一旦发生就是把系统文件复制进了记忆库
 ATTACH_DENY_ROOTS = ("c:\\windows", "c:\\program files", "c:\\program files (x86)",
                      "c:\\programdata")
+
+# **这套拦截面覆盖不到什么**（必须说清，否则下一个人会以为它是全面的）：
+#   · 内容里带密码的普通文件（`prod-notes.txt` 这种）——不看文件内容就判不出来；
+#   · 上面清单之外的自定义凭据目录；
+#   · 改了名的密钥副本（内容寻址只保证"同一份内容只存一次"，不保证"不存"）。
+# 真正的兜底是 `--allow-sensitive-attach` **默认关**：要放宽必须有人显式说出来，
+# 而不是"它看起来像个普通文件所以进去了"。
 
 
 class AttachmentRejected(ValueError):
@@ -97,17 +118,31 @@ def _attach_check_name(src: Path) -> None:
 
 
 def _attach_check_root(src: Path) -> None:
-    """系统目录下的文件一律拒绝——吸进附件没有正当用途。"""
+    """拒绝系统目录与**已知凭据目录**下的文件。
+
+    函数名保留 `_root` 是为了不破坏既有 import（它已经是公开面的一部分），
+    但它的语义比名字宽：既看根，也看路径段。
+
+    **它不是白名单**：挡的是"已知危险位置"，不是"只允许已知安全位置"。
+    覆盖不到什么，见上面 `ATTACH_DENY_SEGMENTS` 之后的注释。
+    """
     try:
-        real = str(src.resolve()).lower()
+        real = str(src.resolve()).lower().replace("\\", "/")
     except OSError:
         return
     for deny in ATTACH_DENY_ROOTS:
-        if real.startswith(deny):
+        if real.startswith(deny.replace("\\", "/")):
             raise AttachmentRejected(
                 "attach_denied_root",
                 f"附件 `{src}` 在系统目录下，拒绝入库。",
                 hint="把要存的文件复制到工作目录再 attach")
+    for seg in ATTACH_DENY_SEGMENTS:
+        if seg in real:
+            raise AttachmentRejected(
+                "attach_denied_credential_dir",
+                f"附件 `{src}` 在凭据目录（{seg.strip('/')}）下，拒绝入库。",
+                hint="这里放的是密钥/令牌；确实要存就先复制到一个普通目录，"
+                     "并接受它会以明文形式进记忆库")
 
 
 def validate_attachment(src, *, conn=None, allow_sensitive=False):

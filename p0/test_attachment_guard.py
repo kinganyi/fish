@@ -13,7 +13,7 @@ bpath.write_bytes(data)                 # 写一半断电 → 目录里留个 sh
 
 ② 没有敏感名单：`--attach ~/.ssh/id_rsa` 把私钥按**内容寻址**复制进 `blobs/`。
    内容寻址意味着**改名也挡不住**——sha256 一样就还是同一份。
-③ 没有允许根：机器上任何可读路径都能被吸进来，包括系统目录。
+③ 没有位置拦截：机器上任何可读路径都能被吸进来，包括系统目录与凭据目录。
 
 ## 这批判据为什么能失败
 
@@ -138,7 +138,7 @@ class AttachmentGuardTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "attach_too_large",
                          "放行敏感文件不该顺带放行超大文件")
 
-    # ------------------------------------------------------------- ③ 允许根
+    # ----------------------------------- ③ 位置拦截（系统目录 + 凭据目录；**不是白名单**）
     def test_directory_is_rejected(self):
         d = Path(self._tmp) / "adir"
         d.mkdir()
@@ -223,6 +223,48 @@ class AttachmentGuardTest(unittest.TestCase):
         i_code = src.index("    code = next_code(conn, project)")
         self.assertLess(i_val, i_code,
                         "附件校验排在了 next_code 之后——被拒时会烧编码号")
+
+
+    # ------------------------------------------- 🟠-5 凭据目录必须拦
+    def test_credential_directories_are_rejected(self):
+        """**核心**：`.ssh` / `.aws` 这些目录下的文件不许入库。
+
+        评审官实测：实现原来只是 4 条系统目录黑名单，`<tmp>\.ssh\config`
+        能直接进去。它不是"配错了"，是**功能根本不存在却被描述成存在**。
+        """
+        base = Path(self._tmp)
+        for seg, fname in ((".ssh", "config"), (".aws", "credentials"),
+                           (".gnupg", "secring.gpg")):
+            d = base / seg
+            d.mkdir(exist_ok=True)
+            p = d / fname
+            p.write_text("SECRET")
+            with self.assertRaises(A.AttachmentRejected, msg=f"{seg}/{fname} 没被拦") as ctx:
+                A.validate_attachment(p)
+            # 两种拒绝码都算对：文件名命中敏感名单（`credentials`）会先被拦，
+            # 目录命中凭据段是另一条路。**判据要盯的是"拒了"，不是"哪一条先开火"**——
+            # 盯具体码会让判据在两条防线顺序调整时假红。
+            self.assertIn(ctx.exception.code,
+                          ("attach_denied_credential_dir", "attach_sensitive"),
+                          f"{seg}/{fname} 的拒绝码不对：{ctx.exception.code}")
+
+    def test_normal_path_still_passes(self):
+        """对照组：普通目录下的普通文件必须通过——否则"一律拒绝"也能让上面变绿。"""
+        p = self._mk("report.md", b"# hello")
+        A.validate_attachment(p)
+
+    def test_the_limitation_is_documented(self):
+        """**诚实判据**：拦截面覆盖不到什么，必须写在代码里。
+
+        评审的核心不是"漏了一条规则"，是"名不副实"——叫"允许根校验"而实际是
+        4 条黑名单。所以这条判据盯的不是实现，是**说明**：
+        源码里必须写清"内容里带密码的普通文件判不出来"这件事。
+        """
+        src = (HERE / "fish_attach.py").read_text(encoding="utf-8")
+        self.assertIn("内容里带密码的普通文件", src,
+                      "没有写明拦截面覆盖不到内容型秘密——下一个人会以为它是全面的")
+        self.assertIn("不是白名单", src,
+                      "没写明它是黑名单而不是白名单")
 
 
 if __name__ == "__main__":

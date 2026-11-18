@@ -31,6 +31,7 @@ import gzip
 import ast
 import builtins
 import json
+import re
 import importlib.util
 import subprocess
 import symtable
@@ -494,6 +495,45 @@ class J4RatchetTest(unittest.TestCase):
         import re as _re
         hard = _re.findall(r"^FISH_LINES_(?:MIN|MAX)\s*=\s*\d+", src, _re.M)
         self.assertEqual(hard, [], f"仍然写死了窗口数字：{hard}")
+
+
+    def test_history_is_append_only(self):
+        """**核心**：history 是哈希链，就地改任何一条都会断链。
+
+        外部审查 🟡-1 实测的绕过方式：把 `max` 抬到 14000，同时**就地改掉
+        最后一条 history 的 `new`**（不新增记录、理由不动）→ 原来那 4 条判据全绿。
+        "每次改动必须写理由"因此只挡住了"不写理由的人"，挡不住"懒得写就改旧的"。
+
+        这条把"改旧的"变成可检测：每条 history 的 sha256 串着上一条，
+        改一条就断一片。
+        """
+        import hashlib as _hl
+        d = self._data()
+        prev = ""
+        for idx, h in enumerate(d["history"]):
+            raw = "|".join([prev, str(h.get("date")), str(h.get("field")),
+                            str(h.get("old")), str(h.get("new")), str(h.get("reason"))])
+            want = _hl.sha256(raw.encode("utf-8")).hexdigest()
+            self.assertEqual(
+                h.get("sha256"), want,
+                f"history 第 {idx} 条的 sha256 对不上——这一条被就地改过。\n"
+                f"  记录 {h.get('sha256')}\n  实算 {want}")
+            prev = want
+
+    def test_raising_the_window_needs_a_new_entry(self):
+        """抬窗必须**新增**一条历史，不能改旧的。
+
+        这是上一条的语义版：即便有人重算了整条链，只要他抬了窗却**没加新记录**，
+        这条也会红——因为长度没变而值变了。
+        """
+        d = self._data()
+        m = re.search(r'"max":\s*(\d+)', (self.RATCHET).read_text(encoding="utf-8"))
+        self.assertIsNotNone(m)
+        recorded = sorted(int(x) for x in
+                          re.findall(r"(\d{4,})", str(d["history"][-1]["new"])))
+        self.assertIn(d["max"], recorded,
+                      f"当前 max={d['max']} 不在最新一条历史 {d['history'][-1]['new']} 里"
+                      "——抬了窗却没记新账")
 
 
 class SplitSizeTest(unittest.TestCase):
