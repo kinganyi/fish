@@ -1142,7 +1142,11 @@ class FishServer:
     def tool_neighbors(self, a, ident):
         strategy = a.get("strategy") or fish.get_config(self.conn, "neighbors.strategy")
         n = int(a.get("n") or fish.get_config(self.conn, "neighbors.n"))
-        res = fish.neighbors(self.conn, a["code"], n=n, strategy=strategy)
+        # 第四轮评审 🟠-5：**必须传 viewer**。不传时 `_visibility_sql` 对无 viewer
+        # 的语义是"一律剔除 private"——于是开关打开后主人自己也看不到
+        # 自己的私有邻居。这与第二轮给 list/count 修的是同一个病。
+        res = fish.neighbors(self.conn, a["code"], n=n, strategy=strategy,
+                                 viewer_citizen_id=ident.citizen_id)
         if res is None:
             return f"编码不存在：{a['code']}\n"
         lines = [f"策略={res['strategy']} n={n}"]
@@ -2294,8 +2298,20 @@ class FishServer:
             return (pack + "\n<!-- 资源读取不带会话凭证：本次身份未核；"
                            "带身份请用工具调用并传 token=... -->\n")
         if uri == "fish://index":
+            # **第四轮评审 🔴-2：这份索引曾经无身份、无过滤地列出 200 条 code+title。**
+            #
+            # 它比看起来严重：我的读路径清单里有 6 个函数被标成 `BY_EXACT_CODE`
+            # 并注明"编号不是枚举出来的，所以安全"。而这里就是一个**枚举器**——
+            # 任何人通过 MCP 读 `fish://index` 就能拿到全部编号，
+            # **那条豁免理由的地基是假的。**
+            #
+            # `resources/read` 的 params 只有 uri/_meta，拿不到 token，
+            # 所以这里按"无 viewer"处理——`_visibility_sql` 对无 viewer 的语义是
+            # **一律剔除 private**（猜错方向是泄露，代价不对称）。
+            _iv, _ip = fish._visibility_sql(self.conn, None)
             rows = self.conn.execute(
-                "SELECT code,title,mem_type FROM code_index ORDER BY code DESC LIMIT 200").fetchall()
+                "SELECT code,title,mem_type FROM code_index WHERE 1=1"
+                + _iv + " ORDER BY code DESC LIMIT 200", _ip).fetchall()
             return "# 编码索引\n\n" + "\n".join(
                 f"- {c} [{m}] {t}" for c, t, m in rows) + "\n"
         raise KeyError(uri)

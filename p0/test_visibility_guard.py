@@ -341,6 +341,33 @@ class PrivateWriteGuardTest(unittest.TestCase):
         self.assertNotIn("ZZ私有ruleZZ", text,
                          "注入包「规矩」段泄露了别人的私有 rule 标题")
 
+    def test_fish_index_resource_filters_private(self):
+        """**第四轮评审 🔴-2**：`fish://index` 曾经无身份列出 200 条 code+title。
+
+        它比其他泄露更严重的原因：我的读路径清单里有 6 个函数被标成
+        `BY_EXACT_CODE`，理由写着"编号不是枚举出来的，所以安全"。
+        而 `fish://index` 就是一个**枚举器**——任何人通过 MCP 读它
+        就能拿到全部编号。**那条豁免理由的地基是假的。**
+
+        `resources/read` 的 params 只有 uri/_meta，拿不到 token，
+        所以这里按"无 viewer"处理：**一律剔除 private**。
+        """
+        self._enforce(True)
+        pri, _ = self._write(title="ZZ索引私有ZZ", visibility="private",
+                             owner="C-OWNER")
+        self._write(title="索引公开", visibility="shared")
+        import mcp_server
+        srv = mcp_server.FishServer(self.root)
+        try:
+            body = srv.read_resource("fish://index")
+        finally:
+            srv.conn.close()
+        text = body if isinstance(body, str) else str(body)
+        self.assertNotIn("ZZ索引私有ZZ", text,
+                         "fish://index 里列出了私有编号——"
+                         "它一列出，BY_EXACT_CODE 那条豁免理由就不成立了")
+        self.assertIn("索引公开", text, "公开条目应当仍在（否则过滤过头）")
+
 
 # ---------------------------------------------------------------- 读路径清单
 #

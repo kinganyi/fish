@@ -5700,7 +5700,7 @@ def cmd_distill(args):
     try:
         try:
             res = distill_clusters(conn, project=args.project, days=args.days,
-                                   min_group=args.min, max_groups=args.max_groups)
+                                   min_group=args.min, max_groups=args.max_groups, viewer_citizen_id=token_actor_citizen_id(conn))
         except ValueError as exc:
             print(f"错误：{exc}", file=sys.stderr)
             # 评审 🟡8：原来这里是 `return 2`，但 `main()` 结尾只顾调 `args.func(args)`、
