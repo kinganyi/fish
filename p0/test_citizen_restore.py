@@ -125,7 +125,10 @@ class HintPointsAtRealCommandTest(unittest.TestCase):
     """**提示里提到的命令必须真实存在**——这条不依赖具体实现。"""
 
     def test_archived_error_mentions_an_existing_command(self):
-        src = io.open(HERE / "fish.py", encoding="utf-8").read()
+        # F-P1-10：argparse 装配已搬到 fish_cli.py，扫描要覆盖两个文件。
+        # 只扫 fish.py 会让本判据在拆分后变成永远绿（找不到 add_parser 就当成没提示）。
+        src = "".join(io.open(HERE / f, encoding="utf-8").read()
+                      for f in ("fish.py", "fish_cli.py"))
         # 找所有「先 xxx 再」形态的提示
         hints = re.findall(r"先\s*`?([a-z][a-z0-9-]{2,})`?\s*再", src)
         self.assertTrue(hints, "没找到任何「先 xxx 再」形态的提示（判据失去靶点）")

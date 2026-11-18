@@ -30,6 +30,7 @@
 import gzip
 import ast
 import builtins
+import json
 import importlib.util
 import subprocess
 import symtable
@@ -85,7 +86,9 @@ COMMON_NAMES = ("ulid", "now_utc", "iso_local", "count_tokens", "_exc_text")
 # 语义等价的真正硬判据仍是 J1/J1b/J7（名字集合 + 对象同一）与 J8（函数体 AST）。
 # 2026-11-11（E-11 拆包第四刀）：建表/补列一族（20 个 ensure 函数 + 2 个常量 / 约 600 行）
 # 搬到 `fish_db.py`。实测 13,606 → **12,976 行**，窗口随之下移：13,400–13,900 → 12,700–13,200。
-FISH_LINES_MIN = 12700
+# F-P1-10（2026-11-18）：main() + argparse（686 行）搬进 fish_cli.py 之后，
+# 窗口**跟着往下走**。这条是审查方批评「J4 可抬窗」的正解：
+# 拆一次就降一次，而不是拆完顺手抬窗把空出来的空间又填回去。方向只许降。
 # 2026-10-29（P1 修复轮，外部审查 §8 P1）：🔴11 公民状态校验 / 🔴10 链式+唯一约束 /
 # 🔴6 body_relpath 路径穿越拦截 / 🔴9 append_event 事务参数 都落在 fish.py 上，
 # 实测 14,302 行 → 上界 14,300 → **14,500**。这是"功能增长"的判据迁移（不是放宽）：
@@ -116,7 +119,6 @@ FISH_LINES_MIN = 12700
 #   · F-P0-3 信任门：_allow_untrusted_lessons + 两处 SQL 过滤，+10 行
 # 三处都是**安全修复**，不是功能膨胀。总量 13,226，窗口留 74 行余量。
 # 下次再要抬，必须同样写明"加的是什么、为什么必须加"——不接受"顺手调大"。
-FISH_LINES_MAX = 13300
 # ⚠️ 死常量（2026-11-11 标注）：`EXPECTED_LINE_ACTUAL` 在**任何断言里都没被引用**，
 # 它的值（14,032）也早已过期。只在 `docs/fix-list-语料层-20261027.md:43` 里被记为
 # "陈旧：不改门禁"——保留名字是为了让那条历史记录还能对上号，**不要把它当判据**。
@@ -150,6 +152,15 @@ FISH_SCHEMA_LINES_MIN = 480
 FISH_SCHEMA_LINES_MAX = 700
 # 2026-11-11 新模块 · 建表/补列/迁移辅助（20 个 ensure 函数 + 2 个数据常量）。
 # 注意 `migrate` **不在**这里：它是编排者，要调 KB 专属的 ensure，搬走会成上行依赖。
+# F-P1-10（2026-11-18 外部审查）：窗口数字不再写死在测试里，改从
+# `_audit/j4_ratchet.json` 读。数字写两处必然漂——这不是理论，是这个仓库
+# 已经发生过的事（README 徽章 1,647 vs 实际 1,737）。单一出处在 JSON，
+# 每次改动必须在 history 里写理由；没有理由的改动在评审时无处可藏。
+_RATCHET = json.loads(
+    (Path(__file__).resolve().parent / "_audit" / "j4_ratchet.json").read_text(encoding="utf-8"))
+FISH_LINES_MIN = int(_RATCHET["min"])
+FISH_LINES_MAX = int(_RATCHET["max"])
+
 FISH_DB_LINES_MIN = 520
 # 2026-11-18（F-P1-7）：720 → 800。
 #
@@ -418,6 +429,62 @@ class SplitDependencyTest(unittest.TestCase):
                     if isinstance(node, ast.Name) and node.id in ("__file__", "__name__")]
             self.assertEqual(hits, [],
                              f"{path.name} 仍在用模块自身身份（__file__/__name__）：行 {hits}")
+
+
+
+class J4RatchetTest(unittest.TestCase):
+    """J4 窗口的**棘轮**（F-P1-10，2026-11-18 外部审查）。
+
+    审查方对 J4 的批评不是"它守错了东西"，而是"它只守行数、可以被抬窗"——
+    也就是说：真正的门是**没有人会去抬窗**这个约定，而约定不是判据。
+
+    这里把约定变成三条能红的东西：
+      ① 数字只有一个出处（`_audit/j4_ratchet.json`），测试里不再写死；
+      ② 每一次改动都必须在 history 里留下**非空理由**——抬窗可以，但必须留话；
+      ③ 最新一条历史的 `new` 必须与当前值一致——不许改数字不改历史。
+    """
+
+    RATCHET = Path(__file__).resolve().parent / "_audit" / "j4_ratchet.json"
+
+    def _data(self):
+        return json.loads(self.RATCHET.read_text(encoding="utf-8"))
+
+    def test_every_change_carries_a_reason(self):
+        """**核心**：没有理由的改动算违规。
+
+        抬窗本身不禁止（有时候确实必须抬），但"顺手调大"不允许。
+        """
+        d = self._data()
+        self.assertTrue(d.get("history"), "history 为空：连第一次登记都没有")
+        bad = [h for h in d["history"]
+               if not str(h.get("reason") or "").strip()]
+        self.assertEqual(bad, [], f"这些改动没有写理由：{bad}")
+
+    def test_latest_history_matches_current_values(self):
+        """改了数字却没记历史 → 红。数字与历史必须同步。"""
+        d = self._data()
+        last = d["history"][-1]
+        self.assertEqual(str(last["new"]), f'{d["min"]},{d["max"]}',
+                         f"最新历史 {last['new']} 与当前值 {d['min']},{d['max']} 不一致")
+
+    def test_window_is_sane(self):
+        d = self._data()
+        self.assertLess(d["min"], d["max"], "min 必须小于 max")
+        real = len((Path(__file__).resolve().parent / "fish.py")
+                   .read_text(encoding="utf-8").split("\n")) - 1
+        self.assertGreaterEqual(real, d["min"], f"fish.py 只有 {real} 行，低于窗口下限")
+        self.assertLessEqual(real, d["max"], f"fish.py 有 {real} 行，超出窗口上限")
+
+    def test_no_hardcoded_window_in_tests(self):
+        """反向判据：测试文件里不许再出现写死的窗口数字。
+
+        否则"单一出处"只是说说：写死的那个照样能覆盖 JSON。
+        """
+        src = (Path(__file__).resolve().parent / "test_split_contract.py").read_text(
+            encoding="utf-8")
+        import re as _re
+        hard = _re.findall(r"^FISH_LINES_(?:MIN|MAX)\s*=\s*\d+", src, _re.M)
+        self.assertEqual(hard, [], f"仍然写死了窗口数字：{hard}")
 
 
 class SplitSizeTest(unittest.TestCase):
