@@ -527,3 +527,125 @@ def asset_stats(conn, vault_id=None) -> dict:
             "SELECT status, COUNT(*) FROM kb_asset" + where + " GROUP BY status", args):
         out["by_status"][st] = n
     return out
+
+# ============================================================== W6：压缩接缝（deliver）
+#
+# ## 定位：留接缝，不接压缩器
+#
+# 2026-11-18 实测（headroom 0.44.0，venv 独立安装）：
+#     JSON 元数据 ×60（kb_asset 形态）  14,160 → 8,038 字符   省 43.2%
+#     中文 markdown（fish 记忆形态）     1,620 → 1,620 字符    省  0.0%
+#     Python 源码                        7,660 → 7,660 字符    省  0.0%
+#
+# 结论：**fish 自己的负载几乎无收益**（中文散文，headroom 自称 "little on prose"），
+# 唯一确定能省的是 `kb_asset` 这类结构化元数据。所以：
+#   · 默认**关闭**（`dataplane.compress_enabled` = 0）
+#   · 不把 headroom 拉进生产依赖（它在独立 venv 里，装的是一整套 litellm/tokenizers）
+#   · 只留一个**注入点**，将来真要用时挂上去
+#
+# ## 三条不变量在这一个函数里守住
+#
+#   I1 原文不可变  —— 压缩只发生在"搬给模型之前"，本函数不写库、不改存储
+#   I2 写路径不压缩 —— 本函数是**读路径**的唯一入口；写路径（remember/kb_write）不调它
+#   I4 身份不可压  —— `_DELIVER_NEVER_COMPRESS` 命中即原样返回
+#
+# 判据用 grep 守住这三条：`compress` 只许出现在本模块的 deliver 内部，
+# 出现在 `remember` / `kb_write` / `render_profile_block` 的调用链上即红。
+
+# 注入点：None = 不压。见 `set_compressor`。
+_DELIVER_COMPRESSOR = None
+
+# I4：这些内容永远原样返回，连尝试都不尝试。
+_DELIVER_NEVER_COMPRESS = ("identity", "profile", "rule", "code")
+
+
+class Delivery(dict):
+    """交付结果。字段固定四个，少一个就不叫"可逆"。"""
+
+    def __init__(self, text, *, original_len, kind, compressor, saved, handle):
+        super().__init__(text=text, original_len=original_len, kind=kind,
+                         compressor=compressor, saved=saved, handle=handle)
+
+    @property
+    def text(self):
+        return self["text"]
+
+
+def _compressor_enabled(conn):
+    """读配置。**默认关闭**——装了不用的依赖是负债。"""
+    try:
+        from fish_common import get_config
+        return bool(int(get_config(conn, "dataplane.compress_enabled") or 0))
+    except Exception:      # A档：配置读不到就按"关闭"处理，宁可少压不可压错
+        return False
+
+
+def deliver(conn, payload, *, kind="auto", budget=None, source=None,
+            handle_hint=None) -> Delivery:
+    """把一段内容交付给模型：**唯一的压缩入口**。
+
+    无论压不压，返回值都带四样东西（I3 可逆性硬契约）：
+      · `text`          —— 实际交付的文本
+      · `original_len`  —— 原始字符数（读者据此判断"我看到的完整吗"）
+      · `saved`         —— 省了多少字符（0 表示没压）
+      · `handle`        —— **怎么取回原文**（不能为空）
+
+    `handle_hint` 由调用方给（通常是一个可执行入口，如 `kb open <rel>`）。
+    不给就退化成"源标记"，仍然可定位。
+
+    ## 为什么 `kind` 在 I4 名单里就直接返回
+
+    身份/画像/铁律/精确编码被压 = 信息不可逆损失。这不是"少压一点"，是"不许压"。
+    """
+    text = "" if payload is None else str(payload)
+    original_len = len(text)
+    handle = handle_hint or (f"原文：{source}" if source else "原文：调用方持有")
+
+    base = dict(original_len=original_len, kind=kind, compressor="none",
+                saved=0, handle=handle)
+
+    if not text:
+        return Delivery(text, **base)
+    # I4：连尝试都不尝试
+    if str(kind).lower() in _DELIVER_NEVER_COMPRESS:
+        return Delivery(text, **(base | {"compressor": "skipped:protected"}))
+    # 预算够用就不压（压了反而增加"取回"的心智负担）
+    if budget is not None:
+        try:
+            from fish_common import count_tokens  # noqa: F401
+        except Exception:                        # A档：没有分词器就跳过预算判断
+            pass
+        # 这里刻意不做 token 估算——估算不准会让"该压的没压"。
+        # 真接压缩器时再按实测 token 判定。
+    if not _compressor_enabled(conn):
+        return Delivery(text, **base)
+
+    fn = _DELIVER_COMPRESSOR
+    if fn is None:
+        return Delivery(text, **(base | {"compressor": "unavailable"}))
+
+    try:
+        out = fn(text, kind=kind)
+    except Exception as exc:             # A档：压缩失败必须回退到原文，绝不"压一半"
+        return Delivery(text, **(base | {"compressor": f"error:{type(exc).__name__}"}))
+    if not isinstance(out, str) or not out:
+        return Delivery(text, **(base | {"compressor": "empty_result"}))
+    # 压缩后反而更长 → 不要（这类"压缩"只会浪费预算）
+    if len(out) >= original_len:
+        return Delivery(text, **(base | {"compressor": "no_win"}))
+    return Delivery(out, **{
+        "original_len": original_len, "kind": kind,
+        "compressor": getattr(fn, "__name__", "custom"),
+        "saved": original_len - len(out), "handle": handle,
+    })
+
+
+def set_compressor(fn):
+    """注入压缩器（`fn(text, *, kind) -> str`）。传 None 表示卸下。
+
+    故意做成**注入**而不是 import：headroom 装在独立 venv（全套 litellm/tokenizers），
+    把它拉成 fish 的生产依赖，代价远大于它现在能带来的收益。将来真要接时再注入。
+    """
+    global _DELIVER_COMPRESSOR
+    _DELIVER_COMPRESSOR = fn
+    return _DELIVER_COMPRESSOR
