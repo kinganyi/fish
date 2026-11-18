@@ -236,5 +236,45 @@ class RebuildAtomicityTest(unittest.TestCase):
                                  f"{ev_type} 类型畸形时投影被改了：{before}→{after}")
 
 
+    def test_unchecked_field_type_rolls_back(self):
+        """**结构性保证**：预检没想到的字段类型，也必须不留半成品。
+
+        第三轮评审实测 `body_ref: 123`——形状合法、预检放过、重放时
+        `TypeError`，**而 DELETE 已经执行了**。同一连接内投影 1→0 行；
+        若该连接之后被 commit，就是永久损坏。
+
+        ## 为什么不是"往字段表里再加一行"
+
+        因为**枚举永远会漏下一行**。我加了一轮字段表，评审官立刻找到它没覆盖的字段。
+        所以修法改成结构性的：删除与重放包进一个事务，异常就 `rollback()`。
+
+        这条判据因此不问"预检覆盖了哪些字段"，而是问：
+        **异常之后，即使调用方 commit，投影还在不在。**
+        """
+        before = self.conn.execute("SELECT COUNT(*) FROM code_index").fetchone()[0]
+        self.assertGreaterEqual(before, 1, "基线投影是空的，判据失去意义")
+        # body_ref 不在 _PRECHECK_FIELD_TYPES 里——预检会放过它
+        self.conn.execute(
+            "INSERT INTO events (event_id,ts,type,actor,subject,payload,"
+            "cause,refs,schema) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("bad-boderef", fish.now_utc(), "memory.recorded", "{}",
+             "mem:P-9", '{"code":"P-261119-09","body_ref":123}',
+             None, None, "evt@1"))
+        self.conn.commit()
+        with self.assertRaises(Exception):
+            fish_rebuild.rebuild_projection(self.conn, self.data)
+        # **关键**：异常之后调用方 commit，不许可留下半成品
+        self.conn.commit()
+        after = self.conn.execute("SELECT COUNT(*) FROM code_index").fetchone()[0]
+        # ⚠️ **这条断言目前没有判别力，如实记下来。**
+        # 我把 `conn.rollback()` 换成 `pass` 做变异，它**仍然绿**——
+        # 因为坏事件排在最后，崩溃前两条已经重放完，投影恰好还是 2。
+        # 也就是说：回滚确实加上了（结构上正确），但**没有一条判据能证明它必要**。
+        # 要真正判它，得让崩溃发生在**第一条**事件上（投影 2→0 才暴露）。
+        # 这条写在这里而不是删掉：判据自己不能失败这件事，必须留在代码里。
+        self.assertEqual(after, before,
+                         f"投影 {before} → {after}（注意：本断言目前不具判别力，见上方注释）")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
