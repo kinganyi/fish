@@ -931,7 +931,7 @@ def locate_body(root, code, file_path):
     return "missing", None
 
 
-def read_body_path(conn, root, code):
+def read_body_path(conn, root, code, *, viewer_citizen_id=None):
     """读正文的**唯一入口**（CLI 与 MCP 共用）——永远返回 `(text, info)`，**不抛异常**。
 
     `info` 是给人看的状态：`{"state": "exact"|"relocated"|"missing",
@@ -953,11 +953,25 @@ def read_body_path(conn, root, code):
     异常会让调用方（MCP 工具、CLI、批量脚本）整条链断掉。而"某一条正文不见了"
     是**局部数据问题**，不该升级成"整个系统不可用"。
     """
+    # 第四轮评审 🔴-2：正文按可见性放行。原来拿到编号就能读全文，而
+    # `fish://index` 曾无身份列出全部编号——两个一拼就能读任何人的私有正文。
+    # 不抛异常（本函数契约是"永远返回 (text, info)"）：拒绝返回 state="forbidden"。
     row = conn.execute(
-        "SELECT code, file_path, project, title, status FROM code_index WHERE code=?",
+        "SELECT code, file_path, project, title, status, visibility, owner "
+        "FROM code_index WHERE code=?",
         (code,)).fetchone()
     if not row:
         raise ValueError(f"编码不存在：{code}")
+    _vis_deny = False
+    if row[5] and str(row[5]).strip().lower() == "private" and _visibility_enforced(conn):
+        if str(row[6] or "") != str(viewer_citizen_id or ""):
+            _vis_deny = True
+    if _vis_deny:
+        return "", {"state": "forbidden", "path": None, "healed": False,
+                    "hint": (f"属于别人的私有记忆：{row[0]}\n"
+                             "　可见性开关开着（privacy.visibility_enforced），"
+                             "而本次调用没有匹配的身份。")}
+    row = row[:5]
     code, file_path, project, title, status = row
     state, p = locate_body(root, code, file_path)
 

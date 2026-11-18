@@ -368,6 +368,34 @@ class PrivateWriteGuardTest(unittest.TestCase):
                          "它一列出，BY_EXACT_CODE 那条豁免理由就不成立了")
         self.assertIn("索引公开", text, "公开条目应当仍在（否则过滤过头）")
 
+    def test_read_body_path_denies_other_citizen(self):
+        """**第四轮评审 🔴-2 的另一半**：拿到编号也不能读别人的私有正文。
+
+        `read_body_path` 是"读正文的唯一入口"，原来拿到 code 就返回全文。
+        而 `fish://index` 曾经无身份列出全部编号——两个一拼，
+        任何 MCP 客户端都能读任何人的私有正文。索引那头已修，这里补正文。
+
+        **不抛异常**：本函数契约是"永远返回 (text, info)"，所以拒绝时
+        `state="forbidden"` 且正文为空——与 `missing` 同级但原因不同。
+        """
+        self._enforce(True)
+        code, _ = self._write(title="私有正文甲", visibility="private",
+                              owner="C-OWNER")
+        text, info = fish.read_body_path(self.conn, self.root, code,
+                                         viewer_citizen_id="C-OTHER")
+        self.assertEqual(info["state"], "forbidden",
+                         f"别人拿编号读到了私有正文：state={info['state']}")
+        self.assertNotIn("正文", text or "", "被拒绝时不许返回正文内容")
+
+        text2, info2 = fish.read_body_path(self.conn, self.root, code,
+                                           viewer_citizen_id="C-OWNER")
+        self.assertEqual(info2["state"], "exact", "主人自己反而读不到")
+        self.assertTrue(text2, "主人读到空正文")
+
+        text3, info3 = fish.read_body_path(self.conn, self.root, code)
+        self.assertEqual(info3["state"], "forbidden",
+                         "没有身份时 private 正文泄露了")
+
 
 # ---------------------------------------------------------------- 读路径清单
 #
