@@ -109,7 +109,7 @@ from fish_attach import (AttachmentRejected, store_blob,  # F-P1-3
                          ATTACH_SENSITIVE_PATTERNS, ATTACH_DENY_ROOTS,
                          _attach_max_bytes, _attach_check_name,
                          _attach_check_root)
-import fish_meta, fish_token   # noqa: E401 —— 挤行数窗口，两者都是薄模块
+import fish_atomic, fish_meta, fish_token  # noqa: E401 —— 薄模块挤行数窗口
 from fish_inject import (  # noqa: F401  —— 拆分后仍从 fish 导出，调用方不用改
     _allow_untrusted_lessons, _lesson_rows, _recent_lesson_rows,
     count_lesson_rows, _rule_rows, count_rule_rows)
@@ -1150,7 +1150,8 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
             lines.append(f"- [{at['name']}]({at['blob']}) "
                          f"({at['size']} B, sha256:{at['sha256'][:12]}…){cap}")
         lines.append("")
-    (root / rel).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # F-P2-8：原子写（崩在中途会留半个文件，而投影看着完全正常）
+    fish_atomic.write_text_atomic(root / rel, "\n".join(lines) + "\n")
 
     # ---- 索引 + 事件 ----
     # 时间事实只取一次：occurred_at（这件事什么时候发生）进事件 payload，
@@ -12623,7 +12624,6 @@ import fish_cli as _fish_cli  # noqa: E402
 
 _fish_cli.install(globals())   # 把自己的命名空间交给 CLI 层（dict，不传模块对象）
 from fish_cli import main  # noqa: E402,F401
-
 
 if __name__ == "__main__":
     main()

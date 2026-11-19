@@ -158,5 +158,86 @@ class FtsCommitParamTest(unittest.TestCase):
                          f"commit=False 仍提交了（回滚没生效）：{rows}")
 
 
+class BodyAtomicityTest(unittest.TestCase):
+    """**F-P2-8**：正文原来是 `Path.write_text`——直接写。
+
+    崩溃/断电在这行的中间 → 盘上半个 Markdown，前半有后半没有，
+    **而投影里那条记录看起来完全正常**。没有任何东西会告诉你它坏了。
+
+    这条判据不模拟崩溃（那要子进程 + 信号，脆），而是问**结构问题**：
+    正文目录里出现过的临时文件必须被清理，且写完的内容必须逐字节完整。
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self._tmp = tempfile.mkdtemp(prefix="fish-p28-")
+        self.root = Path(self._tmp) / "data"
+        self.root.mkdir(parents=True)
+        self.conn = fish.connect(self.root)
+        self.conn.executescript(fish.SCHEMA)
+        fish.migrate(self.conn)
+        self.conn.execute(
+            "INSERT INTO code_registry (prefix, namespace, last_date, last_seq)"
+            " VALUES ('P','P','2026-11-19',0)")
+        self.conn.commit()
+
+    def tearDown(self):
+        try:
+            self.conn.close()
+        except Exception:      # noqa: BLE001
+            pass
+
+    def test_body_is_written_atomically(self):
+        """走 `fish_atomic.write_text_atomic`（结构判据），且不留 .tmp。"""
+        import fish_atomic
+        code, _ = fish.record_memory(
+            self.conn, self.root, project="P", title="原子正文",
+            body="正文内容\n第二行\n", mem_type="fact")
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT file_path FROM code_index WHERE code=?", (code,)).fetchone()
+        target = self.root / row[0]
+        self.assertTrue(target.is_file(), "正文没写出来")
+        self.assertIn("正文内容", target.read_text(encoding="utf-8"),
+                      "正文内容不完整")
+        leftovers = list(self.root.rglob("*.tmp"))
+        self.assertEqual(leftovers, [], f"正文目录留下了临时文件：{leftovers}")
+        # **接线判据**：上面的"内容对不对 / 有没有 .tmp"在非原子写下**也成立**
+        # （直接 write_text 的内容同样完整、同样不留 .tmp）。实测把实现换回
+        # `write_text` 做变异 → 前面两条仍绿。所以必须再问一句：
+        # **record_memory 到底有没有走原子写？**
+        import ast as _ast
+        src = (Path(__file__).resolve().parent / "fish.py").read_text(
+            encoding="utf-8")
+        target = None
+        for node in _ast.walk(_ast.parse(src)):
+            if (isinstance(node, _ast.FunctionDef)
+                    and node.name == "record_memory"):
+                target = node
+                break
+        self.assertIsNotNone(target, "找不到 record_memory——判据失去靶点")
+        names = {n.attr for n in _ast.walk(target) if isinstance(n, _ast.Attribute)}
+        self.assertIn("write_text_atomic", names,
+                      "record_memory 没走 fish_atomic.write_text_atomic——"
+                      "正文又变回非原子写了（崩在中途会留半个文件）")
+
+    def test_atomic_helper_cleans_up_on_failure(self):
+        """写失败时**不许**留临时文件——否则崩一次攒一个。"""
+        import fish_atomic
+        from pathlib import Path
+        d = Path(self._tmp) / "at"
+        d.mkdir()
+
+        class _Boom:
+            def __str__(self):
+                raise RuntimeError("boom")
+
+        with self.assertRaises(Exception):
+            fish_atomic.write_text_atomic(d / "x.md", _Boom())
+        self.assertEqual(list(d.rglob("*.tmp")), [],
+                         "失败后留下了临时文件")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
