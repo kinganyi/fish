@@ -88,6 +88,25 @@ def write_text_atomic(path, text, *, encoding="utf-8", newline=None) -> Path:
                 pass
 
 
+def sha256_of_file(path) -> str:
+    """**文件字节**的 sha256——校验必须用它，不能用字符串的。
+
+    ## 为什么（第七轮之后踩的坑）
+
+    `write_text_atomic` 用 `newline=None`（与 `Path.write_text` 一致），
+    Windows 上会把 `\n` 转成 CRLF。于是**盘上是 CRLF、内存里是 LF**，
+    对一个字符串算 sha256 得不到文件的哈希——实测两者不等。
+
+    校验的对象是"盘上那份内容"，所以就从盘上读。
+    """
+    import hashlib
+    h = hashlib.sha256()
+    with io.open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def sha256_of_text(text, *, encoding="utf-8") -> str:
     """正文的哈希——写进事件里，让"正文被改过"变成可判定。"""
     import hashlib

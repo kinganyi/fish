@@ -264,5 +264,56 @@ class BodyAtomicityTest(unittest.TestCase):
             f"  write_text_atomic {b.read_bytes()!r}")
 
 
+    def test_event_carries_the_body_hash(self):
+        """**F-P2-8 后半**：事件里的 `body_sha256` 必须等于**落盘正文**的哈希。
+
+        没有这个字段时，正文**写出之后**被改坏（磁盘损坏/外部篡改）查不出来——
+        事件里只有 `body_ref`（一个路径），引用不校验内容。
+
+        判据不只查字段在不在，还**真的去算**：读回正文文件，算 sha256，
+        与事件里的值比。哈希算的是落盘字节，不是入参 `body`（后者少了标题行）。
+        """
+        import hashlib
+        import json
+        code, _ = fish.record_memory(
+            self.conn, self.root, project="P", title="哈希测试",
+            body="正文内容\n第二行\n", mem_type="fact")
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT file_path FROM code_index WHERE code=?", (code,)).fetchone()
+        on_disk = (self.root / row[0]).read_bytes()
+        want = hashlib.sha256(on_disk).hexdigest()
+
+        payload = json.loads(self.conn.execute(
+            "SELECT payload FROM events WHERE type='memory.recorded' "
+            "AND payload LIKE ?", (f"%{code}%",)).fetchone()[0])
+        self.assertIn("body_sha256", payload,
+                      "事件 payload 里没有 body_sha256——正文被改坏查不出来")
+        self.assertEqual(payload["body_sha256"], want,
+                         "事件里的哈希与落盘正文对不上")
+
+    def test_a_tampered_body_is_detectable(self):
+        """改一个字节，哈希就不再匹配——**这才是这个字段的用处**。"""
+        import hashlib
+        import json
+        code, _ = fish.record_memory(
+            self.conn, self.root, project="P", title="篡改测试",
+            body="原始正文\n", mem_type="fact")
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT file_path FROM code_index WHERE code=?", (code,)).fetchone()
+        payload = json.loads(self.conn.execute(
+            "SELECT payload FROM events WHERE type='memory.recorded' "
+            "AND payload LIKE ?", (f"%{code}%",)).fetchone()[0])
+        old_hash = payload["body_sha256"]
+        # 篡改：往正文里塞一个字
+        p = self.root / row[0]
+        p.write_text(p.read_text(encoding="utf-8") + "偷偷加的一行\n",
+                     encoding="utf-8")
+        now = hashlib.sha256(p.read_bytes()).hexdigest()
+        self.assertNotEqual(now, old_hash,
+                            "篡改后哈希没变——这个字段没有校验能力")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

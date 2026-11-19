@@ -1152,7 +1152,10 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
                          f"({at['size']} B, sha256:{at['sha256'][:12]}…){cap}")
         lines.append("")
     # F-P2-8：原子写（崩在中途会留半个文件，而投影看着完全正常）
-    fish_atomic.write_text_atomic(root / rel, "\n".join(lines) + "\n")
+    # F-P2-8：哈希算**落盘的字节**（原始 body 少了标题行/附件段，校验会假红）
+    _body_text = "\n".join(lines) + "\n"
+    fish_atomic.write_text_atomic(root / rel, _body_text)
+    body_sha256 = fish_atomic.sha256_of_file(root / rel)   # 算盘上的字节，不是字符串
 
     # ---- 索引 + 事件 ----
     # 时间事实只取一次：occurred_at（这件事什么时候发生）进事件 payload，
@@ -1182,6 +1185,9 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
                      {"citizen_id": owner or "unknown", "evidence_level": "machine"},
                      {"kind": "memory", "id": code},
                      {"code": code, "title": title, "body_ref": rel,
+                      # F-P2-8：正文哈希。没有它，**写出之后**被改坏（磁盘损坏/外部
+                      # 篡改）查不出来——事件里有引用，但引用不校验内容。
+                      "body_sha256": body_sha256,
                       "mem_type": mem_type, "tags": tags or [], "visibility": visibility,
                       "occurred_at": occurred_at,
                       "session_actor": session_actor,
