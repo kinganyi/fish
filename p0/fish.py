@@ -8796,6 +8796,9 @@ def cmd_corpus(args):
                 conn, codes, session_key=key),
             # A①：帧上限的配置键读侧。语料层不许 import 主库（J2），只能注入。
             "config_of": lambda key: get_config(conn, key),
+            # F-P0-4 第六轮 🔴-1：执行层需要知道自己是谁，否则 CLI 没有锁。
+            # 无凭证时返回 ""（= 无身份，按最严处理：什么都读不到）。
+            "actor_citizen": lambda: token_actor_citizen_id(conn) or "",
         })
     finally:
         conn.close()

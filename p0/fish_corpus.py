@@ -1480,7 +1480,8 @@ def run_command(args, resolvers=None) -> int:
     if action in CLI_ACTIONS:                  # search/read/forget/rebuild/doctor
         key = os.environ.get("FISH_SESSION_KEY")
         rc, out_lines, accept = run_cli(
-            action, root=root, session_key=key, target=getattr(args, "target", None),
+            action, root=root, session_key=key, target=getattr(args, "target", None,
+            actor_citizen=resolvers.get("actor_citizen")),
             host=host_arg, limit=getattr(args, "limit", None),
             max_chars=getattr(args, "max_chars", READ_DEFAULT_MAX_CHARS),
             json_out=bool(getattr(args, "json", False)),
@@ -1522,7 +1523,7 @@ def _coerce_scope(scope):
 def run_cli(action, *, root=None, target=None, host=None, limit=None, dry_run=False,
             max_chars=READ_DEFAULT_MAX_CHARS, reason="", json_out=False, apply_=False,
             project_of=None, candidates_of=None, citizen_of=None,
-            session_key=None) -> tuple:
+            session_key=None, actor_citizen=None) -> tuple:
     """`fish corpus search|read|forget|rebuild|doctor` 的**全部逻辑**。
 
     返回 `(退出码, 输出行, 需要回填 accepted 的 code 列表)`。放在模块里而不是
@@ -1534,8 +1535,18 @@ def run_cli(action, *, root=None, target=None, host=None, limit=None, dry_run=Fa
         raise CorpusError("run_cli 不认识的动作：%r（只认 %s）"
                           % (act, "/".join(CLI_ACTIONS)))
     host_filter = None if (host or "all").lower() == "all" else host.lower()
+    # **F-P0-4 的第六轮评审 🔴-1**：隔离原来只装在 MCP 门口
+    # （`tool_corpus` 里 `filters["citizen"]`），**CLI 与库入口完全没有锁**——
+    # `fish corpus read log:dsh:<别人的 sid>#seq=1` 能读到别人的原话。
+    # 隔离必须装在**执行层**，不能装在其中一个调用方上。
+    # 隔离装在**执行层**，不装在其中一个调用方上。
+    # 无身份（actor_citizen 为空）按最严处理：什么都读不到。
+    _actor = str(actor_citizen() or "") if callable(actor_citizen) else str(actor_citizen or "")
     if act == "search":
-        res = search(target or "", filters={"host": [host_filter]} if host_filter else None,
+        _f = {"host": [host_filter]} if host_filter else {}
+        if _actor:
+            _f["citizen"] = [_actor]
+        res = search(target or "", filters=_f or None,
                      limit=limit or SEARCH_DEFAULT_LIMIT, root=root, via="cli:corpus",
                      session_key=session_key)
         if json_out:
@@ -1559,6 +1570,11 @@ def run_cli(action, *, root=None, target=None, host=None, limit=None, dry_run=Fa
         try:
             res = read(target or "", max_chars=max_chars, root=root, via="cli:corpus",
                        session_key=session_key)
+            # 与 MCP 同一句话、同一判定：不属于当前公民就拒绝（含未归属）。
+            if _actor and str(res.get("citizen_id") or "") != _actor:
+                lines = ["这个 pointer 指向的段落不属于当前公民，拒绝读取。",
+                         "  （未归属的段落也不给读：它们同样可能是别人的会话。）"]
+                return 1, lines, []
         except store.PointerError as exc:
             lines = ["门牌错误（%s）：%s" % (exc.code, exc)]
             for cand in exc.candidates:

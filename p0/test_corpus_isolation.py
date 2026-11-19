@@ -175,5 +175,48 @@ class CorpusIsolationTest(unittest.TestCase):
         self.assertIn("青梅煮酒", body, f"读自己的段落失败了：{body[:400]}")
 
 
+    def test_cli_path_is_isolated_too(self):
+        """**第六轮评审 🔴-1**：隔离原来只装在 MCP 门口。
+
+        评审官现场演示：同一个库、两个公民的语料，给甲的身份跑 CLI——
+
+            fish corpus read log:dsh:<乙的 sid>#seq=1  → rc=0，拿到乙的原话
+
+        **执行层没有锁，只有一个调用方有锁。** 而可见性清单里
+        `get_segment` 的豁免理由正是"走 F-P0-4 的 citizen 隔离"——
+        **那条豁免的地基是假的。**
+
+        这条判据走**执行层**（`fish_corpus.run_cli`），不经过 MCP，
+        所以它测的是"锁在不在执行层"，不是"MCP 记不记得上锁"。
+        """
+        import fish_corpus
+        from fish_corpus import store as _store
+
+        def _actor(cid):
+            return lambda: cid
+
+        # ① search：甲的检索结果里不许出现乙的独有词
+        rc, lines, _acc = fish_corpus.run_cli(
+            "search", root=self.root, target="独有词", actor_citizen=_actor(CIT_A))
+        blob = "\n".join(lines)
+        self.assertNotIn("围魏救赵", blob, "CLI search 把乙公民的语料给了甲")
+        self.assertIn("青梅煮酒", blob, "甲连自己的都搜不到（过滤过头）")
+
+        # ② read：甲读乙的门牌必须被拒
+        rc2, l2, _a2 = fish_corpus.run_cli(
+            "read", root=self.root, target="log:dsh:sid-B#seq=1",
+            actor_citizen=_actor(CIT_A))
+        self.assertNotIn("围魏救赵", "\n".join(l2),
+                         "CLI read 读到了别的公民的正文原文")
+        self.assertNotEqual(rc2, 0, "跨公民读取居然返回成功")
+
+        # ③ 甲读自己的门牌必须成功（否则是过滤过头）
+        _rc3, l3, _a3 = fish_corpus.run_cli(
+            "read", root=self.root, target="log:dsh:sid-A#seq=1",
+            actor_citizen=_actor(CIT_A))
+        self.assertIn("青梅煮酒", "\n".join(l3),
+                      "甲读自己的语料也被挡了（过滤过头）")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
