@@ -128,12 +128,18 @@ def pytest_configure(config):
     real_rmtree = _sh.rmtree
 
     def guarded_rmtree(path, *a, **kw):
+        # **每次调用现读** `_DATA_GUARD["dir"]`，不用闭包里的 `data`：
+        # 判据要用假根当靶子测这道护栏（真路径当靶子的话，护栏一失效
+        # 判据自己就删掉了生产数据——2026-11-19 我就是这么又删了一次）。
+        guard_dir = _DATA_GUARD.get("dir")
+        if guard_dir is None:
+            return real_rmtree(path, *a, **kw)
         try:
             target = _P(str(path)).resolve()
         except OSError:      # A档：解析不了就交给原函数，它会自己报错
             return real_rmtree(path, *a, **kw)
         try:
-            target.relative_to(data.resolve())
+            target.relative_to(_P(str(guard_dir)).resolve())
         except ValueError:
             return real_rmtree(path, *a, **kw)
         raise AssertionError(

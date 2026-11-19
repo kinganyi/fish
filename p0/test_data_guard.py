@@ -35,20 +35,53 @@ import conftest  # noqa: E402
 
 class ProductionDataGuardTest(unittest.TestCase):
 
+    def _fake_data_root(self):
+        """造一个**假的** data 根，装护栏时指向它。
+
+        ## 为什么不能用真的 `p0/data` 当靶子（我踩了两次）
+
+        第一版这条判据写的是 `shutil.rmtree(HERE / "data" / "projects")`。
+        **护栏在的时候**它抛错、判据绿；**护栏不在的时候**（比如做变异自证）
+        它就是一次**真的删除**——2026-11-19 我用它把刚恢复的 279 条正文
+        又删了一遍。
+
+        一个"为了验证护栏而执行删除"的判据，在护栏失效时**正好造成它要防的
+        那种损失**。所以靶子必须是假的：护栏指向临时根，删的是临时根里的东西。
+        """
+        import tempfile as _tf
+        from pathlib import Path as _P
+        root = _P(_tf.mkdtemp(prefix="fish-guard-fake-")) / "data"
+        (root / "projects").mkdir(parents=True)
+        (root / "projects" / "x.md").write_text("x", encoding="utf-8")
+        return root
+
     def test_rmtree_on_production_data_is_refused(self):
-        """**核心**：删 `p0/data` 下的东西必须抛错。"""
-        data = HERE / "data"
-        if not data.is_dir():
+        """**核心**：删 `p0/data` 下的东西必须抛错。
+
+        **靶子是假根**，见 `_fake_data_root` 的注释——用真路径当靶子，
+        护栏失效时判据自己就会造成损失。
+        """
+        if not (HERE / "data").is_dir():
             self.skipTest("这棵树没有 data/（公开镜像）——判不到，不是通过")
+        fake = self._fake_data_root()
+        self.addCleanup(shutil.rmtree, fake.parent, True)
+
         class _C:      # pytest_configure 只要一个 config 参数，内容不用
             pass
+
+        real_guard_dir = conftest._DATA_GUARD.get("dir")
         conftest.pytest_configure(_C())
+        conftest._DATA_GUARD["dir"] = fake    # 指向假根
         try:
             with self.assertRaises(AssertionError) as cm:
-                shutil.rmtree(data / "projects")
+                shutil.rmtree(fake / "projects")
             self.assertIn("INC-20261119-01", str(cm.exception),
                           "拦住了，但没说明为什么——下一个人会以为这是误拦")
+            # 护栏**真的**没让删：假根还在
+            self.assertTrue((fake / "projects" / "x.md").is_file(),
+                            "抛错了但文件还是被删了——护栏是假的")
         finally:
+            conftest._DATA_GUARD["dir"] = real_guard_dir
             conftest.pytest_unconfigure(_C())
 
     def test_rmtree_on_temp_still_works(self):
@@ -57,17 +90,23 @@ class ProductionDataGuardTest(unittest.TestCase):
         护栏如果宽到把 `tempfile.mkdtemp()` 也拦了，那所有测试都会崩——
         一个把正常工作也拦掉的护栏，会被下一个人直接拆掉。
         """
-        data = HERE / "data"
-        if not data.is_dir():
+        if not (HERE / "data").is_dir():
             self.skipTest("这棵树没有 data/——判不到")
+        fake = self._fake_data_root()
+        self.addCleanup(shutil.rmtree, fake.parent, True)
+
         class _C:
             pass
+
+        real_guard_dir = conftest._DATA_GUARD.get("dir")
         conftest.pytest_configure(_C())
+        conftest._DATA_GUARD["dir"] = fake
         try:
             t = tempfile.mkdtemp(prefix="fish-guard-ok-")
             shutil.rmtree(t)      # 不抛就是对的
             self.assertFalse(Path(t).exists(), "临时目录没删掉")
         finally:
+            conftest._DATA_GUARD["dir"] = real_guard_dir
             conftest.pytest_unconfigure(_C())
 
     def test_guard_is_installed_by_conftest(self):
