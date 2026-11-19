@@ -200,5 +200,41 @@ class RealVaultTest(unittest.TestCase):
         self.assertGreater(r["assets"], 2000, f"资产数异常少：{r['assets']}")
 
 
+    def test_image_dimensions_are_written(self):
+        """**F-P2-3**：`kb_asset.width/height` 一直存在但从没被写过。
+
+        实测（2026-11-19，生产库）：**2196 行里 width/height/detail 全空**。
+        字段存在而永远为空，比没有这个字段更坏——查的人会以为有数据。
+
+        这条判据造一张已知尺寸的图，扫一遍，要求尺寸**真的写进库里**。
+        """
+        import tempfile
+        from PIL import Image
+        import fish as _fish
+        import fish_dataplane as _D
+
+        d = Path(tempfile.mkdtemp(prefix="fish-p23-")) / "data"
+        d.mkdir(parents=True)
+        conn = _fish.connect(d)
+        try:
+            conn.executescript(_fish.SCHEMA)
+            _fish.migrate(conn)
+            conn.commit()
+            vault = d / "vault"
+            vault.mkdir()
+            Image.new("RGB", (37, 19), "red").save(vault / "a.png")
+            row = {"vault_id": "V1", "name": "测试库", "path": str(vault),
+                   "mode": "ro", "status": "active"}
+            _D.scan_vault(conn, row, dry_run=False, compute_hash=False)
+            got = conn.execute(
+                "SELECT width, height FROM kb_asset WHERE rel_path='a.png'"
+            ).fetchone()
+            self.assertIsNotNone(got, "扫描没写进 kb_asset")
+            self.assertEqual((got[0], got[1]), (37, 19),
+                             f"图片尺寸没写对：{got}")
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

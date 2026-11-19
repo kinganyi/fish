@@ -208,6 +208,25 @@ def _ignored(rel, globs) -> bool:
     return False
 
 
+
+def _media_dims(path):
+    """图片的 (width, height)；读不到返回 (None, None)。
+
+    **F-P2-3（2026-11-18 外部审查）**：`kb_asset.width/height` 一直存在但**从没被写过**
+    （实测 2196 行全空）。字段存在而永远为空，比没有这个字段更坏——查的人会以为
+    有数据，然后发现全是 NULL。
+
+    只在**图片**上做：视频要 ffprobe（外部依赖），那是另一件事，
+    所以 `duration_ms` 这一轮仍然留空——**但下面会把它写进登记**，不假装已经填了。
+    """
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            return int(im.width), int(im.height)
+    except Exception:      # A档：读不出尺寸不该让整次扫描失败（坏图/非图片/无 Pillow）
+        return None, None
+
+
 def walk_vault(root, globs=()) -> list:
     """列出 vault 下所有文件（相对路径，posix 风格，已按 ignore_globs 过滤）。"""
     root = Path(root)
@@ -285,20 +304,27 @@ def scan_vault(conn, vault_row, *, dry_run=True, compute_hash=False,
             "size": st.st_size, "kind": kind, "mime": mime,
             "content_hash": sha256_file(p) if compute_hash else None,
             "how": how,
+            # F-P2-3：图片尺寸真的读出来（原来 width/height 永远是 NULL）
+            **dict(zip(("width", "height"),
+                       _media_dims(p) if kind == "image" else (None, None))),
         })
 
     if not dry_run:
         ts = now_utc()
         conn.executemany(
             "INSERT INTO kb_asset (vault_id,rel_path,mtime,size,kind,mime,"
-            "content_hash,indexed_at,status) VALUES (?,?,?,?,?,?,?,?,'active') "
+            "content_hash,width,height,indexed_at,status) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,'active') "
             "ON CONFLICT(vault_id,rel_path) DO UPDATE SET "
             "mtime=excluded.mtime, size=excluded.size, kind=excluded.kind, "
             "mime=excluded.mime, "
             "content_hash=COALESCE(excluded.content_hash, kb_asset.content_hash), "
+            "width=COALESCE(excluded.width, kb_asset.width), "
+            "height=COALESCE(excluded.height, kb_asset.height), "
             "indexed_at=excluded.indexed_at, status='active'",
             [(r["vault_id"], r["rel_path"], r["mtime"], r["size"], r["kind"],
-              r["mime"], r["content_hash"], ts) for r in rows])
+              r["mime"], r["content_hash"], r.get("width"), r.get("height"), ts)
+             for r in rows])
         conn.commit()
 
     stats["ok"] = True
