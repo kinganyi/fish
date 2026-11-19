@@ -976,6 +976,18 @@ def read_body_path(conn, root, code, *, viewer_citizen_id=None):
                              "而本次调用没有匹配的身份。")}
     row = row[:5]
     code, file_path, project, title, status = row
+    # F-P2-7：`file_path` 是库里的值，被改过就能指到任意位置。判**解析后的
+    # 真实路径**（resolve 展开 `..` 与链接），不是字符串前缀——后者一绕就破。
+    _ext = None
+    if file_path:
+        try:
+            Path(root, file_path).resolve().relative_to(Path(root).resolve())
+        except (ValueError, OSError):
+            _ext = Path(root, file_path).resolve()
+    if _ext is not None:
+        return "", {"state": "forbidden", "path": None, "healed": False,
+                    "hint": (f"记录的位置在库外，拒绝读取：{code}（{file_path}）\n"
+                             "　code_index 可能被外部改过；用 `fish rebuild` 校正。")}
     state, p = locate_body(root, code, file_path)
 
     if state == "missing":

@@ -724,6 +724,43 @@ class PrivateWriteGuardTest(unittest.TestCase):
             f"这些函数在 FILTERED 里，但体内没有任何可见性过滤：{offenders}\n"
             "  要么接线，要么把它挪到 BY_EXACT_CODE 并写明为什么安全")
 
+
+    def test_body_path_cannot_escape_the_root(self):
+        """**F-P2-7**：`read_body_path` 原来信任库里的 `file_path`。
+
+        库被改过就能把它指向任意位置——而 `Path.relative_to` 对库外路径会
+        **抛 ValueError**，违反本函数"永远返回 (text, info)、不抛异常"的契约。
+
+        判的是**解析后的真实路径**（`resolve` 展开 `..` 与符号链接），
+        不是字符串前缀比较——后者被 `a/../../..` 一绕就破。
+        """
+        import tempfile
+        self._enforce(True)
+        code, _ = self._write(title="正常条目")
+
+        # ① 正常读
+        t0, i0 = fish.read_body_path(self.conn, self.root, code)
+        self.assertEqual(i0["state"], "exact", f"正常条目读不到：{i0}")
+
+        # ② 库外绝对路径
+        outside = Path(tempfile.mkdtemp(prefix="sec-")) / "secret.txt"
+        outside.write_text("库外文件不该被读\n", encoding="utf-8")
+        self.conn.execute("UPDATE code_index SET file_path=? WHERE code=?",
+                          (str(outside), code))
+        self.conn.commit()
+        t1, i1 = fish.read_body_path(self.conn, self.root, code)
+        self.assertEqual(i1["state"], "forbidden",
+                         f"库外绝对路径没被拒：state={i1['state']}")
+        self.assertNotIn("库外文件", t1 or "", "读到了库外文件")
+
+        # ③ 相对路径上跳
+        self.conn.execute("UPDATE code_index SET file_path=? WHERE code=?",
+                          ("../../../../etc/passwd", code))
+        self.conn.commit()
+        t2, i2 = fish.read_body_path(self.conn, self.root, code)
+        self.assertEqual(i2["state"], "forbidden",
+                         f"上跳路径没被拒：state={i2['state']}")
+
 # ---------------------------------------------------------------- 读路径清单
 #
 # **F-P1-X（第三轮评审后的自查）**：我补私有过滤时，是按"我记得的那几条"补的。
