@@ -109,7 +109,7 @@ from fish_attach import (AttachmentRejected, store_blob,  # F-P1-3
                          ATTACH_SENSITIVE_PATTERNS, ATTACH_DENY_ROOTS,
                          _attach_max_bytes, _attach_check_name,
                          _attach_check_root)
-import fish_token
+import fish_meta, fish_token   # noqa: E401 —— 挤行数窗口，两者都是薄模块
 from fish_inject import (  # noqa: F401  —— 拆分后仍从 fish 导出，调用方不用改
     _allow_untrusted_lessons, _lesson_rows, _recent_lesson_rows,
     count_lesson_rows, _rule_rows, count_rule_rows)
@@ -160,7 +160,6 @@ from fish_push import (FRESHNESS_EXEMPT_TYPES, PROMPT_MAX_TERMS, STALE_SENSITIVE
 
 DEFAULT_ROOT = Path(__file__).resolve().parent / "data"
 
-# ------------------------------------------------------------------ 配置
 
 
 KINDS = ("resident", "visitor", "role", "system")
@@ -725,6 +724,7 @@ def migrate(conn: sqlite3.Connection):
     _ensure_boards_home_paths(conn)
     _kb_backfill_mandatory_globs(conn)
     conn.commit()
+    fish_meta.stamp(conn)      # F-P2-5：补完列之后盖章，那一刻结构已符合期望
 
 
 # ------------------------------------------------------------------ 配置

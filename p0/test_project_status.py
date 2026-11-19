@@ -67,6 +67,10 @@ class ProjectStatusTest(unittest.TestCase):
         self._citizen(CID_A, "小甲")
         self._citizen(CID_B, "小乙")
         self._citizen(CID_C, "小丙")
+        # **必须提交**：`_run_main` 会在**同进程再开一个连接**跑 `fish.main()`。
+        # 夹具不提交的话，第二个连接拿到的是 `database is locked`——
+        # 而测试会把它误读成"CLI 参数校验没生效"。
+        self.conn.commit()
 
     def tearDown(self):
         self.conn.close()
