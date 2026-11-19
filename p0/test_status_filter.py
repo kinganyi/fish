@@ -53,6 +53,31 @@ PROD_RETIRED = "anyi-studio-261022-29"
 SIM_BODY = "语义相似判据专用正文：冻结写入、导出快照、核对断链与回填对账。"
 
 
+
+def _prod_db_is_real(path):
+    """这个 index.sqlite 是不是**真有内容**的生产库？
+
+    **为什么需要这个**：原来只判 `path.exists()`。但全量跑时别的测试会**造出**
+    `data/index.sqlite`（空壳、0 张表），于是这些"生产库"判据拿空壳硬跑，
+    报成红——**而它们本来该 skip（判不到）**。
+
+    2026-11-19 镜像实测：删掉 `data/` 后这些判据正确跳过；留着空壳就全红。
+    假红会训练人忽略判据，所以这里必须判"内容"，不是"文件名"。
+    """
+    import sqlite3 as _s
+    try:
+        c = _s.connect(f"file:{path}?mode=ro", uri=True)
+    except _s.Error:
+        return False
+    try:
+        n = c.execute("SELECT COUNT(*) FROM code_index").fetchone()[0]
+        return n > 0
+    except _s.Error:
+        return False
+    finally:
+        c.close()
+
+
 class FishStatusFilterTest(unittest.TestCase):
     """判据 A–G。类名与文件名被 mutation_status_filter.py 逐条点名调用。"""
 
@@ -235,8 +260,10 @@ class FishStatusFilterTest(unittest.TestCase):
         `("ANYI-261022-29", 0.9292)`，而该条 status='withdrawn'。
         """
         # 第四轮评审后补：没有生产库时判不到，不是失败
-        if not (HERE / "data" / "index.sqlite").is_file():
-            self.skipTest("没有生产库可复制——判不到，不是通过")
+        # 2026-11-19（第七轮后）：**空壳库也算没有**——只判 is_file() 时，
+        # 别的测试造出的 4096 B 空库会让这条判据拿空壳硬跑，报成假红。
+        if not _prod_db_is_real(HERE / "data" / "index.sqlite"):
+            self.skipTest("没有真实生产库可复制（不存在或是空壳）——判不到，不是通过")
         conn = sqlite3.connect(str(self._copy_prod_db()))
         try:
             row = conn.execute(

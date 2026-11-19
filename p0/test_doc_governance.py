@@ -98,30 +98,6 @@ class DocGovernanceTest(unittest.TestCase):
         got = json.loads(catalog.read_text(encoding="utf-8"))
         self.assertEqual(len(got), len(self.docs), "机器目录与扫描结果条数不一致")
 
-    # ------------------------------------------------------------------ G3
-    def test_G3_metrics_have_a_single_source(self):
-        """**指标单一出处**：README 徽章里的数 = 现测的数。
-
-        这条防的是"数字被抄进第二个地方然后静静过期"——README 曾写 1,647，
-        实际 1,737，而中间没有任何东西会红。
-        """
-        readme = (WS / "README.md").read_text(encoding="utf-8")
-        m = doc_index.BADGE_TESTS_RE.search(readme)
-        self.assertIsNotNone(m, "README 里找不到 tests 徽章")
-        badge = int(m.group(2).replace("%2C", ""))
-        measured = self._count_criteria()
-        self.assertEqual(
-            badge, measured,
-            f"README 徽章 {badge} ≠ 实测判据数 {measured}；"
-            f"跑 `python p0/tools/doc_index.py --stamp` 更新（**唯一写入口**）")
-
-        m2 = doc_index.BADGE_LINES_RE.search(readme)
-        self.assertIsNotNone(m2, "README 里找不到 fish.py 行数徽章")
-        badge_lines = int(m2.group(2).replace("%2C", ""))
-        real_lines = len((HERE / "fish.py").read_text(encoding="utf-8").split("\n")) - 1
-        self.assertEqual(badge_lines, real_lines,
-                         f"README 徽章行数 {badge_lines} ≠ 实测 {real_lines}")
-
     def _count_criteria(self):
         """只收集不执行（约 3 秒），避免让治理判据变成一次全量跑。"""
         r = subprocess.run(
@@ -157,6 +133,60 @@ class DocGovernanceTest(unittest.TestCase):
             self.assertTrue(d["id"], f"{d['file']} 没分到 ID")
             self.assertRegex(d["id"], r"^[A-Z]-?[0-9]|^[A-Z]\d+[a-z]?$",
                              f"{d['file']} 的 ID 形态不对：{d['id']}")
+
+
+# ============================================================== 徽章一致性（不依赖文档）
+# **第七轮评审**：`DocGovernanceTest.setUpClass` 在公开包里 SKIP（因为公开包不镜像
+# 那 96 份工作区文档，那句"判不到，不是通过"是对的）。但 `G3`（README 徽章 = 实测数）
+# **根本不需要文档**——它只比徽章和 `measure_criteria()`。
+#
+# 结果就是：**公开包的 README 徽章停在 1,647，而守护它的判据被连坐跳过**，
+# 漂移在镜像侧永远没人管。拆出来之后，这条在两种树上都跑。
+
+class BadgeMirrorTest(unittest.TestCase):
+    """README 徽章必须等于实测——**这组不依赖工作区文档**，公开包也跑。"""
+
+    def test_G3_metrics_have_a_single_source(self):
+        """**指标单一出处**：README 徽章里的数 = 现测的数。
+
+        这条防的是"数字被抄进第二个地方然后静静过期"——README 曾写 1,647，
+        实际早已过千九，而中间没有任何东西会红。
+
+        **为什么单独成类**：它只需要 `README.md` 与 `p0/`，不需要那 96 份文档，
+        所以没有理由跟着 `DocGovernanceTest` 一起在公开包里跳掉。
+        """
+        readme_path = WS / "README.md"
+        if not readme_path.is_file():
+            raise unittest.SkipTest(f"这棵树没有 README.md（{readme_path}）——判不到")
+        readme = readme_path.read_text(encoding="utf-8")
+
+        m = doc_index.BADGE_TESTS_RE.search(readme)
+        self.assertIsNotNone(m, "README 里找不到 tests 徽章")
+        badge = int(m.group(2).replace("%2C", ""))
+        measured = self._count_criteria()
+        self.assertEqual(
+            badge, measured,
+            f"README 徽章 {badge} ≠ 实测判据数 {measured}；"
+            f"跑 `python p0/tools/doc_index.py --stamp` 更新（**唯一写入口**）")
+
+        m2 = doc_index.BADGE_LINES_RE.search(readme)
+        self.assertIsNotNone(m2, "README 里找不到 fish.py 行数徽章")
+        badge_lines = int(m2.group(2).replace("%2C", ""))
+        real_lines = len((HERE / "fish.py").read_text(encoding="utf-8").split("\n")) - 1
+        self.assertEqual(badge_lines, real_lines,
+                         f"README 徽章行数 {badge_lines} ≠ 实测 {real_lines}")
+
+    def _count_criteria(self):
+        """只收集不执行（约 3 秒），避免让治理判据变成一次全量跑。"""
+        r = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q",
+             "--no-header", "-p", "no:cacheprovider"],
+            cwd=str(HERE), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=600)
+        m = re.search(r"(\d+)\s+tests?\s+collected", r.stdout or "")
+        if not m:
+            self.skipTest(f"收集不到判据数（输出形状变了）：{(r.stdout or '')[-200:]}")
+        return int(m.group(1))
 
 
 if __name__ == "__main__":

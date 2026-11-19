@@ -91,6 +91,31 @@ SEG_TEXT = ("撞车判据的唯一真值是 overlap：先比目录前缀、再�
             "已经反复确认过，长度足够过 min_chars。")
 
 
+
+def _prod_db_is_real(path):
+    """这个 index.sqlite 是不是**真有内容**的生产库？
+
+    **为什么需要这个**：原来只判 `path.exists()`。但全量跑时别的测试会**造出**
+    `data/index.sqlite`（空壳、0 张表），于是这些"生产库"判据拿空壳硬跑，
+    报成红——**而它们本来该 skip（判不到）**。
+
+    2026-11-19 镜像实测：删掉 `data/` 后这些判据正确跳过；留着空壳就全红。
+    假红会训练人忽略判据，所以这里必须判"内容"，不是"文件名"。
+    """
+    import sqlite3 as _s
+    try:
+        c = _s.connect(f"file:{path}?mode=ro", uri=True)
+    except _s.Error:
+        return False
+    try:
+        n = c.execute("SELECT COUNT(*) FROM code_index").fetchone()[0]
+        return n > 0
+    except _s.Error:
+        return False
+    finally:
+        c.close()
+
+
 def _frame(payload) -> bytes:
     blob = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     return zstandard.ZstdCompressor().compress(blob + b"\n")
@@ -724,8 +749,9 @@ class LinkStrengthTest(RerankCase):
         值都 > 0。真库不可用时 skip 并写明（判不到 ≠ 通过）。
         """
         real = P0 / "data" / "index.sqlite"
-        if not real.exists():
-            self.skipTest("真库 data/index.sqlite 不存在：真 links 判不到，不是通过")
+        if not _prod_db_is_real(real):
+            self.skipTest("真库 data/index.sqlite 不存在或是空壳："
+                          "真 links 判不到，不是通过")
         tmp = Path(tempfile.mkdtemp(prefix="fish-rerank-links-"))
         self.addCleanup(shutil.rmtree, tmp, True)
         root = tmp / "data"

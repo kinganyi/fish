@@ -308,7 +308,11 @@ class FishProfileS1Test(unittest.TestCase):
                           "（可用 FISH_PROD_DB 指向只读副本）——判不到，不是通过")
         prod_root = db.parent
         audit = prod_root / fish.AUDIT_DIR_NAME / fish.AUDIT_TOOL_CALLS_FILE
-        self.assertTrue(audit.exists(), f"判据 H 需要真实审计文件：{audit}")
+        if not audit.exists():
+            # **判不到，不是失败**：审计文件是**数据产物**，不是代码性质。
+            # 只有库没有审计（公开包 / 新建工作区）时，这条判据测不了——
+            # 和上面"缺库就 skip"是同一个道理，只是我上一版漏了这一个依赖。
+            self.skipTest(f"判据 H 需要真实审计文件：{audit} 不存在——判不到，不是通过")
 
         conn = sqlite3.connect(db.as_uri() + "?mode=ro", uri=True)
         try:
