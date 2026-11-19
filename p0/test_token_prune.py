@@ -81,5 +81,37 @@ class TokenPruneTest(unittest.TestCase):
         self.assertIsNotNone(row[0], "陈旧 token 没被撤销")
 
 
+    def test_never_expiring_can_go_stale(self):
+        """**第七轮评审 🟡**：第一版的 stale **排除了永不过期的 token**。
+
+        而生产实测：跑完 prune 后剩 381 条，其中未撤销 218 = 永不过期 218
+        ——**剩下所有活 token 都永不过期，stale 永远是 0，命令对它们零作用**。
+        而"每开一个会话多一行"的增长主体正是这批。
+
+        判据：造一条 2000 年签发、**永不过期**的 token，它必须算陈旧。
+        """
+        self.conn.execute(
+            "INSERT INTO session_tokens (token_hash,citizen_id,session_key,"
+            "evidence,channel,parent_token,issued_at,expires_at,revoked_at) "
+            "VALUES ('h-ancient','C1','k-ancient','machine','cli',NULL,"
+            "'2000-01-01T00:00:00Z',NULL,NULL)")
+        self.conn.commit()
+        st = fish_token.token_stats(self.conn)
+        self.assertEqual(st["stale"], 2,
+                         f"永不过期的老 token 没算陈旧——命令对增长主体零作用：{st}")
+
+    def test_the_four_columns_are_disjoint(self):
+        """四栏是**四种不同的东西**，不是四个会重叠的过滤器。
+
+        第七轮评审发现 expired 里含 18 条已撤销——重叠会让"还剩多少"算不清。
+        """
+        st = fish_token.token_stats(self.conn)
+        # 夹具：h-expired 已过期、h-never 永不过期、h-live 有效、h-stale 陈旧
+        self.assertEqual(st["expired"], 1, f"expired 数不对：{st}")
+        self.assertEqual(st["never_expires"], 1, f"never_expires 数不对：{st}")
+        # h-ancient 不在这个夹具里，h-stale 是唯一陈旧
+        self.assertEqual(st["stale"], 1, f"stale 只该数未过期且很久没签发的那条：{st}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

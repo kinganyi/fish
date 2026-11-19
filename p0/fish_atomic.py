@@ -43,11 +43,26 @@ from pathlib import Path
 TMP_SUFFIX = ".tmp"
 
 
-def write_text_atomic(path, text, *, encoding="utf-8", newline="") -> Path:
+def write_text_atomic(path, text, *, encoding="utf-8", newline=None) -> Path:
     """把 `text` 原子地写到 `path`。返回写入的路径。
 
-    `newline=""` 与 `Path.write_text` 的默认行为对齐：**不做换行转换**，
-    所以逐字节等价于原来那次 `write_text`——本函数只改"怎么写"，不改"写什么"。
+    `newline=None`（默认）= **与 `Path.write_text` 完全一致**：Python 会把 `\n`
+    转成平台换行（Windows 上是 CRLF）。
+
+    ## 这里踩过一个坑（第七轮评审抓的）
+
+    第一版写的是 `newline=""`，docstring 还写着"逐字节等价于 `Path.write_text`"。
+    **那句话在 Windows 上是假的**——`newline=""` 关闭转换，产出 LF；
+    而 `Path.write_text` 产出 CRLF。实测：
+
+        Path.write_text   b'\xe7\x94\xb2\r\n...'   (CRLF)
+        write_text_atomic b'\xe7\x94\xb2\n...'      (LF)
+
+    生产后果：778 个正文里 **774 个 CRLF、3 个 LF**，那 3 个的 mtime 都在那次提交之后
+    ——正文库从此 LF/CRLF 混排。功能没坏，但**"只改怎么写、不改写什么"这句话不成立**，
+    而将来加 body hash 时会出现纯换行造成的假差异。
+
+    修法就是把默认值改回 `None`——**不是改注释，是改行为**。
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)

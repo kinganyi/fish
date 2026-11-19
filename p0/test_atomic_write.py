@@ -239,5 +239,30 @@ class BodyAtomicityTest(unittest.TestCase):
                          "失败后留下了临时文件")
 
 
+    def test_atomic_matches_write_text_bytes(self):
+        """**逐字节等价**必须被**验**，不能只在 docstring 里断言。
+
+        第七轮评审实测：第一版 `write_text_atomic` 用 `newline=""`（关闭转换），
+        而 `Path.write_text` 用 `newline=None`（转平台换行）。**Windows 上产出
+        CRLF vs LF，字节不等**——而 docstring 写着"逐字节等价"。
+
+        生产后果：778 个正文里 774 CRLF / 3 LF，3 个的 mtime 都在那次提交之后。
+
+        这条判据直接比字节：**同一个字符串，两条路写出来必须一模一样。**
+        """
+        import fish_atomic
+        d = Path(tempfile.mkdtemp(prefix="fish-p28b-"))
+        a = d / "via_write_text.md"
+        b = d / "via_atomic.md"
+        text = "甲\n乙\n丙\n"
+        a.write_text(text, encoding="utf-8")
+        fish_atomic.write_text_atomic(b, text)
+        self.assertEqual(
+            a.read_bytes(), b.read_bytes(),
+            f"两条路写出来的字节不同——『逐字节等价』这句话不成立：\n"
+            f"  Path.write_text   {a.read_bytes()!r}\n"
+            f"  write_text_atomic {b.read_bytes()!r}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

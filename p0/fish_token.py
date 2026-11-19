@@ -46,16 +46,19 @@ def token_stats(conn) -> dict:
     no_exp = _n("SELECT COUNT(*) FROM session_tokens "
                 "WHERE expires_at IS NULL AND revoked_at IS NULL")
     expired = _n("SELECT COUNT(*) FROM session_tokens "
-                 "WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                 "WHERE revoked_at IS NULL "
+                 "AND expires_at IS NOT NULL AND expires_at <= ?",
                  (_now_z(conn),))
     # 陈旧 = **未过期但很久没签发**。已过期的**不算陈旧**（它归 expired 那栏，
     # 否则同一行被数两次；且对已过期的人来说"陈旧"是多余信息）。
+    # 陈旧 = **未撤销 + 很久没签发 + （没有过期时间 或 还没过期）**。
+    # 第七轮评审指出第一版把「永不过期」也排除了——那正是增长主体
+    # （生产 218/381 永不过期，命令对它们零作用）。但**已过期的不算陈旧**，
+    # 它归 expired 那栏，否则同一行被数两次（四栏必须互斥）。
     stale = _n("SELECT COUNT(*) FROM session_tokens "
-               "WHERE revoked_at IS NULL "
-               "AND COALESCE(expires_at, '') != '' "
-               "AND expires_at > ? "
-               "AND issued_at <= ?",
-               (_now_z(conn), _days_ago_z(STALE_DAYS_DEFAULT)))
+               "WHERE revoked_at IS NULL AND issued_at <= ? "
+               "AND (expires_at IS NULL OR expires_at > ?)",
+               (_days_ago_z(STALE_DAYS_DEFAULT), _now_z(conn)))
     return {"total": total, "active": active, "never_expires": no_exp,
             "expired": expired, "stale": stale}
 
@@ -79,17 +82,16 @@ def token_prune(conn, *, expired=True, stale=False, dry_run=True) -> dict:
 
     if stale:
         cutoff = _days_ago_z(STALE_DAYS_DEFAULT)
-        sql = ("SELECT COUNT(*) FROM session_tokens WHERE revoked_at IS NULL "
-               "AND COALESCE(expires_at, '') != '' AND expires_at > ? "
-               "AND issued_at <= ?")
-        m = int(conn.execute(sql, (now, cutoff)).fetchone()[0])
+        sql = ("SELECT COUNT(*) FROM session_tokens "
+               "WHERE revoked_at IS NULL AND issued_at <= ? "
+               "AND (expires_at IS NULL OR expires_at > ?)")
+        m = int(conn.execute(sql, (cutoff, now)).fetchone()[0])
         out["would_revoke"] = m
         if not dry_run and m:
             conn.execute("UPDATE session_tokens SET revoked_at = ? "
-                         "WHERE revoked_at IS NULL "
-                         "AND COALESCE(expires_at, '') != '' AND expires_at > ? "
-                         "AND issued_at <= ?",
-                         (now, now, cutoff))
+                         "WHERE revoked_at IS NULL AND issued_at <= ? "
+                         "AND (expires_at IS NULL OR expires_at > ?)",
+                         (now, cutoff, now))
             out["revoked"] = m
 
     if not dry_run:

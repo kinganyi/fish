@@ -69,5 +69,36 @@ class SchemaVersionTest(unittest.TestCase):
         self.assertGreater(fish_meta.SCHEMA_VERSION, 0)
 
 
+    def test_stamp_never_downgrades(self):
+        """**第七轮评审 🟡**：`stamp()` 会把比代码更新的库**静默降级**。
+
+        实测：造一个 `user_version=5` 的库，`describe()` 说 `newer`，
+        而 `stamp()` 照样写 1 —— 5 → 1。
+
+        版本号存在的意义是"让这步做过没有可判定"；能往下盖的版本号做不到这件事。
+        库比代码新通常意味着**代码比库旧**（回滚过）——那种情况下**库是对的**。
+        """
+        self.conn.execute("PRAGMA user_version = 5")
+        self.conn.commit()
+        fish_meta.stamp(self.conn)
+        self.assertEqual(fish_meta.read_version(self.conn), 5,
+                         "比代码新的库被降级了——版本号不许往下盖")
+
+    def test_stamp_writes_on_a_readonly_connection_raises(self):
+        """那个 `# A档` 吞异常的注释曾经描述了一个**不会发生**的场景。
+
+        第七轮评审实测：只读连接上 `PRAGMA user_version=N` **在 execute 就抛**，
+        根本走不到 commit。所以 `stamp()` 现在**不吞**——让调用方决定
+        （`migrate()` 会吞，因为列已经对齐、只是版本记不下来）。
+        """
+        import sqlite3 as _s
+        ro = _s.connect(f"file:{self.root / 'index.sqlite'}?mode=ro", uri=True)
+        try:
+            with self.assertRaises(_s.OperationalError):
+                fish_meta.stamp(ro, version=999)
+        finally:
+            ro.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -724,7 +724,8 @@ def migrate(conn: sqlite3.Connection):
     _ensure_boards_home_paths(conn)
     _kb_backfill_mandatory_globs(conn)
     conn.commit()
-    fish_meta.stamp(conn)      # F-P2-5：补完列之后盖章，那一刻结构已符合期望
+    try: fish_meta.stamp(conn)   # F-P2-5：补完列后盖章
+    except sqlite3.OperationalError: pass   # A档：只读库写不了版本号
 
 
 # ------------------------------------------------------------------ 配置
@@ -12625,7 +12626,6 @@ def cmd_profile(args):
                                     config_fn=get_config)
     finally:
         conn.close()
-
 
 # F-P1-10（2026-11-18 外部审查）：`main()` 与 argparse 装配已搬到 fish_cli.py。
 # **必须在文件末尾 import**：fish_cli 里 `import fish`，而它需要的是一个属性

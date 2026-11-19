@@ -61,18 +61,25 @@ def stamp(conn, version=None) -> int:
     """
     before = read_version(conn)
     want = int(SCHEMA_VERSION if version is None else version)
+    # **不降级**：库比代码新的时候（before > want）**一个字都不写**。
+    # 第七轮评审实测：造一个 user_version=5 的库，`describe()` 说 newer，
+    # 而 `stamp()` 照样写 1 —— 版本号被静默往下盖，与"让这步做过没有可判定"冲突。
+    # 这通常意味着代码比库旧（回滚过），那种情况下**库是对的、代码是旧的**。
+    if before > want:
+        return before
     if before == want:
         # **已经是这个版本就一个字节都不写**。`migrate()` 在每次 CLI 调用里都会跑，
         # 无条件盖章会让"只读命令"也写一次 WAL——实测把 `board render` 变成了
         # 会改 data_root 的写入（判据 test_board_home_root 抓到）。
         return before
+    # **只读连接上这一行就会抛**（`attempt to write a readonly database`），
+    # 根本走不到下面的 commit——所以第一版那句 `# A档：只读连接上没有事务可提交`
+    # 描述的是一个**不会发生**的场景（第七轮评审实测）。真正被吞掉的是
+    # commit 因别的原因失败（如锁超时），那会让"盖章失败"变成静默。
     conn.execute(f"PRAGMA user_version = {want}")
-    # **必须提交**：`PRAGMA user_version = N` 开一个写事务。不提交就放手，
+    # **必须提交**：`PRAGMA user_version = N` 开一个写事务，不提交就放手，
     # 下一个连接会拿到 `database is locked`——实测会让别的进程整条链失败。
-    try:
-        conn.commit()
-    except sqlite3.Error:      # A档：只读连接上没有事务可提交，版本号本来也写不进去
-        pass
+    conn.commit()
     return before
 
 
