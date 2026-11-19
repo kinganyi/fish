@@ -294,6 +294,17 @@ def main():
     p = sub.add_parser("kb", help="知识库（vault / tree / open / search / write / rollback / stats / doctor）")
     ksub = p.add_subparsers(dest="kb_action", required=True)
 
+    # **F-P2-6**：token 会一直长——每开一个会话多一行，而没有命令能让它变小。
+    p = sub.add_parser("token", help="会话 token 的清点与清理")
+    tsub = p.add_subparsers(dest="token_action", required=True)
+    tl = tsub.add_parser("list", help="清点：总数/未撤销/永不过期/已过期/陈旧")
+    tl.set_defaults(func=_f.cmd_token)
+    tp = tsub.add_parser("prune", help="清理：删过期、撤销陈旧（缺省 dry-run）")
+    tp.add_argument("--stale", action="store_true",
+                    help="同时把长期未签发的标记撤销（不删，留审计痕迹）")
+    tp.add_argument("--apply", action="store_true", help="真做（缺省 dry-run）")
+    tp.set_defaults(func=_f.cmd_token)
+
     kv = ksub.add_parser("vault", help="登记 / 列出 / 设默认 / 改模式 / 扫描 / 移除")
     kvsub = kv.add_subparsers(dest="kb_vault_action", required=True)
 

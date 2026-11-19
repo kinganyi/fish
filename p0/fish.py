@@ -109,6 +109,7 @@ from fish_attach import (AttachmentRejected, store_blob,  # F-P1-3
                          ATTACH_SENSITIVE_PATTERNS, ATTACH_DENY_ROOTS,
                          _attach_max_bytes, _attach_check_name,
                          _attach_check_root)
+import fish_token
 from fish_inject import (  # noqa: F401  —— 拆分后仍从 fish 导出，调用方不用改
     _allow_untrusted_lessons, _lesson_rows, _recent_lesson_rows,
     count_lesson_rows, _rule_rows, count_rule_rows)
@@ -8784,6 +8785,31 @@ def cmd_push(args):
                       "push.after_tool_budget_tokens", "push.situational_budget_tokens",
                       "push.after_tool_every_n_calls", "push.gap_window_days"):
                 print("  %-34s %s" % (k, get_config(conn, k)))
+    finally:
+        conn.close()
+
+
+def cmd_token(args):
+    """会话 token 的清点与清理（F-P2-6）。实现在 `fish_token`，这里只是薄壳。"""
+    conn = connect(Path(args.root))
+    try:
+        act = getattr(args, "token_action", "list")
+        if act == "list":
+            st = fish_token.token_stats(conn)
+            print(f"token 总数 {st['total']}；未撤销 {st['active']}；"
+                  f"永不过期 {st['never_expires']}；已过期 {st['expired']}；"
+                  f"陈旧(>{fish_token.STALE_DAYS_DEFAULT}天) {st['stale']}")
+            return 0
+        res = fish_token.token_prune(
+            conn, expired=True, stale=bool(getattr(args, "stale", False)),
+            dry_run=not bool(getattr(args, "apply", False)))
+        if res["dry_run"]:
+            print(f"**dry-run**：会删过期 {res.get('would_delete', 0)} 条；"
+                  f"会把陈旧 {res.get('would_revoke', 0)} 条标记撤销。"
+                  "真做加 `--apply`。")
+        else:
+            print(f"已删过期 {res['deleted']} 条；已撤销陈旧 {res['revoked']} 条。")
+        return 0
     finally:
         conn.close()
 
