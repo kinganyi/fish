@@ -83,3 +83,21 @@ def emit_decision(hook_event_name: str, decision: str, reason: str) -> None:
         }
     }, ensure_ascii=True) + "\n")
     sys.stdout.flush()
+
+
+def log_child_stderr(tag, text):
+    """子进程 stderr 落盘（hook 里 stdout 是契约面，不能污染；但也不能丢）。"""
+    if not (text or "").strip():
+        return
+    try:
+        import datetime
+        d = DATA / "_audit"
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "hook-stderr.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+                "tag": tag,
+                "stderr": text[-4000:],
+            }, ensure_ascii=False) + "\n")
+    except Exception as exc:       # noqa: BLE001
+        sys.stderr.write(f"[hook] hook-stderr 落盘失败（已忽略）：{exc!r}\n")

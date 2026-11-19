@@ -31,6 +31,7 @@ session_key 的旧凭证——hook 每次会话开始都签一次，会把 MCP �
 一起吊销。"查身份"不该有写副作用。
 """
 from fish_common import warn_ignored
+from hook_io import log_child_stderr  # noqa: F401
 import json
 import os
 import subprocess
@@ -48,24 +49,6 @@ DATA = Path(os.environ.get("FISH_DATA") or (HERE / "data"))
 # ack 探针已验证通过（2026-10-22 05:13，两个会话均输出 FISH-HOOK-ACK）
 # 现默认 inject：注入真实的「权威当下」
 MODE = os.environ.get("FISH_HOOK_MODE", "inject")
-
-
-def log_child_stderr(tag, text):
-    """子进程 stderr 落盘（hook 里 stdout 是契约面，不能污染；但也不能丢）。"""
-    if not (text or "").strip():
-        return
-    try:
-        import datetime
-        d = DATA / "_audit"
-        d.mkdir(parents=True, exist_ok=True)
-        with open(d / "hook-stderr.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-                "tag": tag,
-                "stderr": text[-4000:],
-            }, ensure_ascii=False) + "\n")
-    except Exception as exc:       # noqa: BLE001
-        sys.stderr.write(f"[hook] hook-stderr 落盘失败（已忽略）：{exc!r}\n")
 
 
 def _emit(text: str) -> None:

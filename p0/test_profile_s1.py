@@ -321,6 +321,19 @@ class FishProfileS1Test(unittest.TestCase):
         finally:
             conn.close()
 
+        if not profile["tool_usage"]:
+            # **判不到，不是失败**：先看审计日志里到底有没有这个会话的记录。
+            # 一条都没有 → 数据不在了（2026-11-19 的事故删掉了整份 `_audit/`），
+            # 那这条判据测不了，skip 才是诚实信号。
+            # 有记录而画像仍为空 → 那是**真 bug**，必须红。
+            has_rec = any(
+                PROD_SESSION in ln for ln in
+                audit.read_text(encoding="utf-8", errors="replace").splitlines())
+            if not has_rec:
+                self.skipTest(
+                    f"审计日志里没有 {PROD_SESSION} 的任何记录"
+                    "（2026-11-19 INC-20261119-01 删掉了整份 `_audit/`）"
+                    "——判不到，不是通过")
         self.assertTrue(profile["tool_usage"],
                         f"生产库上 {PROD_SESSION} 的画像不该为空：{profile}")
 

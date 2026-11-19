@@ -28,6 +28,7 @@ fish 侧仍然生效（双保险，不是二选一）。
 与时间戳；心跳只有长度与 session 哈希（`fish_activity.heartbeat` 的 `_safe_fact`）。
 """
 from fish_common import warn_ignored
+from hook_io import log_child_stderr  # noqa: F401
 import hashlib
 import json
 import os
@@ -46,24 +47,6 @@ FISH = HERE / "fish.py"
 # 数据目录：默认本目录下的 data；可用 FISH_DATA 覆盖（与其它 hook 同口径，测试可隔离）。
 DATA = Path(os.environ.get("FISH_DATA") or (HERE / "data"))
 MIN_PROMPT_CHARS = 4
-
-
-def log_child_stderr(tag, text):
-    """子进程 stderr 落盘（hook 里 stdout 是契约面，不能污染；但也不能丢）。"""
-    if not (text or "").strip():
-        return
-    try:
-        import datetime
-        d = DATA / "_audit"
-        d.mkdir(parents=True, exist_ok=True)
-        with open(d / "hook-stderr.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "ts": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
-                "tag": tag,
-                "stderr": text[-4000:],
-            }, ensure_ascii=False) + "\n")
-    except Exception as exc:       # noqa: BLE001
-        sys.stderr.write(f"[hook] hook-stderr 落盘失败（已忽略）：{exc!r}\n")
 
 
 def _dbg(msg: str) -> None:
