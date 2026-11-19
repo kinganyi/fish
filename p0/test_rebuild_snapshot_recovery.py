@@ -100,5 +100,46 @@ class RebuildSnapshotRecoveryTest(unittest.TestCase):
                         f"补回清单是空的——那就查不到丢了什么：{rep}")
 
 
+    def test_recall_says_when_body_is_gone(self):
+        """**INC-20261119-01 之后补**：正文没了，`recall` 必须**当场说**。
+
+        事故后生产库有 335 条记录的正文文件不在盘上。如果 `recall` 只列编码+标题，
+        读者会以为它们正常，直到 `read` 才发现空白——**那等于把损失藏到第二步**。
+
+        判据造一条记忆、删掉它的正文文件、跑 `recall`，要求输出里有明确标记。
+        """
+        import contextlib
+        import io as _io
+        code, _ = fish.record_memory(
+            self.conn, self.root, project="P", title="正文会消失的条目",
+            body="这段正文待会儿删掉\n", mem_type="fact")
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT file_path FROM code_index WHERE code=?", (code,)).fetchone()
+        target = self.root / row[0]
+        self.assertTrue(target.is_file(), "夹具没写成功")
+        target.unlink()          # 抹掉正文，模拟事故现场
+
+        class _A:
+            root = str(self.root)
+            query = "正文会消失"
+            code = None
+            project = None
+            tags = None
+            limit = 10
+            by = "priority"
+            scope = "all"
+            include_dormant = True
+
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            fish.cmd_recall(_A())
+        out = buf.getvalue()
+        self.assertIn("正文缺失", out,
+                      f"recall 没标出正文缺失——损失被藏到第二步了：{out[:300]}")
+        self.assertIn("INC-20261119-01", out,
+                      "标了但没说原因——下一个人不知道这是哪次事故")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

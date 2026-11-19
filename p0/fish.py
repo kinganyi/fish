@@ -5644,10 +5644,21 @@ def cmd_recall(args):
     # 否则标签得靠读者猜。状态列走 `format_status_tag`，与 MCP 的 recall 共用
     # 同一个常量 + 同一个函数：两处各写一份必然会漂。
     print(RECALL_DIMENSION_NOTE)
+    # F-P2-9 补（2026-11-19）：**正文已经不在的行要当场说出来**。
+    # INC-20261119-01 之后生产库有 335 条记录的正文文件没了；只列编码+标题的话，
+    # 读者会以为它们是正常的，直到 `read` 才发现空——那等于把损失藏到第二步。
+    # 判的是**盘上文件在不在**（`fp` 是相对 data_root 的路径），一次 stat 的事。
+    root = Path(args.root)
+    missing = 0
     for code, title, proj, mtype, status, fp, dormant, src in rows:
+        gone = bool(fp) and not (root / fp).exists()
+        missing += 1 if gone else 0
         print(f"{code}\t{format_status_tag(mtype, status, dormant)}"
-              f"\t{title}\t{fp}\t匹配:{src}")
+              f"\t{title}\t{fp}\t匹配:{src}" + ("\t**正文缺失**" if gone else ""))
     print(stats_line)
+    if missing:
+        print(f"> ⚠ 其中 {missing} 条**正文文件不在盘上**（`fish read <编码>` 会说明）。"
+              "历史原因见 INC-20261119-01。")
     conn.close()
 
 
