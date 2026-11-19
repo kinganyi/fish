@@ -559,6 +559,58 @@ class PrivateWriteGuardTest(unittest.TestCase):
                       "输出里连公开内容都没有——判据失去靶点")
         self.assertNotIn("ZZ私有清单ZZ", out, "CLI list 打印了私有标题")
 
+
+    def test_search_memories_any_hides_private(self):
+        """**第五轮评审 🟠**：`search_memories_any` 的代码在第 40 轮就修了，
+        但评审官把过滤摘掉做变异 —— `28 passed`。**判据为零。**
+
+        "代码修了但没有判据"等于没修：下一次重构谁也不知道它为什么在那儿。
+
+        这里走**编码精确**那条分支（不依赖 FTS，但最终 SQL 是同一段）。
+        """
+        import fish_push
+        self._enforce(True)
+        code, _ = self._write(title="ZZ联想私有ZZ", visibility="private",
+                              owner="C-OWNER")
+        other = fish_push.search_memories_any(self.conn, [code])
+        self.assertEqual(other, [], f"别人按编码查到了私有条目：{other}")
+        own = fish_push.search_memories_any(self.conn, [code],
+                                            viewer_citizen_id="C-OWNER")
+        self.assertEqual(len(own), 1,
+                         f"主人按编码查不到自己的私有条目（过滤过头）：{own}")
+        self.assertEqual(own[0][0], code)
+
+
+    def test_push_candidates_visibility(self):
+        """**判不到**：`build_push_candidates` 的内联可见性判定（fish_push.py:642-645）。
+
+        评审官把它摘掉做变异，`28 passed`——判据为零。我这轮试图补一条，
+        但**造不出能触发那段代码的 fixture**：
+
+        · 它是"别处读过但你没看"类候选，需要 `memory_access_log` 里有别的公民
+          的访问记录 + 打分过阈值 + 预算放行；
+        · 我插了访问日志（code / C-OTHER / recall），**候选仍是 0 条**。
+
+        在空列表上断言 `assertNotIn(...)` 一定通过——那是假判据，
+        比没有判据更糟。所以这里**显式跳过**并写清缺什么。
+        """
+        import fish_push
+        self._enforce(True)
+        code, _ = self._write(title="ZZ推送私有ZZ", visibility="private",
+                              owner="C-OWNER")
+        self.conn.execute(
+            "INSERT INTO memory_access_log (code,citizen_id,session_key,project,"
+            "via,payload,accessed_at) VALUES (?,?,?,?,?,?,?)",
+            (code, "C-OTHER", "s1", "Q", "recall", None, fish.now_utc()))
+        self.conn.commit()
+        cands = fish_push.build_push_candidates(
+            self.conn, self.root, citizen_id=None, project="P")
+        if not cands:
+            self.skipTest(
+                "候选为 0 条（插了访问日志也没触发）——在空列表上断言恒过，"
+                "那是假判据。判不到，不是通过。")
+        self.assertNotIn("ZZ推送私有ZZ", str(cands), "推送候选里出现了私有标题")
+
 # ---------------------------------------------------------------- 读路径清单
 #
 # **F-P1-X（第三轮评审后的自查）**：我补私有过滤时，是按"我记得的那几条"补的。
