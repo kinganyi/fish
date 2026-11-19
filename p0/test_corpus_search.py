@@ -526,6 +526,10 @@ class McpProjectFilterTest(unittest.TestCase):
                 "VALUES (?,?,?,?,?,?,?,?,NULL)",
                 (_hl.sha256(self.TOKEN.encode()).hexdigest(), self.CITIZEN,
                  "dsh:test-sid", "machine", "cli", None, fish.now_utc(), None))
+            # **第六轮评审 🟠**：这一行原来没有——INSERT 之后直接 close()，
+            # 事务被回滚，session_tokens 一行都没有。三条 skip 的理由写着
+            # "子进程未拿到 token"，实际是**我漏了 commit**。
+            conn.commit()
         finally:
             conn.close()
         db = store.open_db(self.root)
@@ -574,7 +578,6 @@ class McpProjectFilterTest(unittest.TestCase):
     def _text(resp):
         return resp["result"]["content"][0]["text"]
 
-    @unittest.skip('F-P0-4：实现已直连 MCP 验证，本类子进程未拿到 token，见类首说明')
     def test_empty_project_means_unattributed_only(self):
         text = self._text(self._search(query="孤舟蓑笠翁", project=""))
         self.assertIn("sid-unma", text)
@@ -582,24 +585,38 @@ class McpProjectFilterTest(unittest.TestCase):
                          "project='' 被当成「不过滤」：未归属过滤变成了看全部（M2）")
         self.assertIn("hits=1", text)
 
-    @unittest.skip('F-P0-4：实现已直连 MCP 验证，本类子进程未拿到 token，见类首说明')
     def test_project_value_still_filters(self):
         text = self._text(self._search(query="孤舟蓑笠翁", project="PJ"))
         self.assertIn("sid-mapp", text)
         self.assertNotIn("sid-unma", text)
 
-    @unittest.skip('F-P0-4：实现已直连 MCP 验证，本类子进程未拿到 token，见类首说明')
     def test_missing_project_means_no_filter(self):
         text = self._text(self._search(query="孤舟蓑笠翁"))
         self.assertIn("hits=2", text, "不传 project 时应当不过滤")
 
-    def test_tool_description_declares_no_isolation(self):
-        """M7：语料面不做项目隔离这件事必须**写在工具描述里**（待拍板项也一样）。"""
+    def test_tool_description_matches_the_code(self):
+        """**描述必须与源码一致**——第六轮评审 🔴 的同族问题。
+
+        旧判据 `test_tool_description_declares_no_isolation` 断言
+        「单用户」「不做项目/身份隔离」「待拍板」**必须在描述里**——
+        而这三句自 2026-11-18 起**与源码相反**：语料面已强制按公民隔离。
+
+        结果是：**谁把描述改对，判据就红。**判据把一句假话锁在里面。
+
+        现在反过来锁：必须写着"按公民强制隔离"与"无凭证拒绝"，
+        并且**旧的假话不许再出现**。
+        """
         import mcp_server
         tool = [t for t in mcp_server.TOOLS if t["name"] == "corpus"][0]
-        self.assertIn("单用户", tool["description"])
-        self.assertIn("不做项目/身份隔离", tool["description"])
-        self.assertIn("待拍板", tool["description"])
+        desc = tool["description"]
+        self.assertIn("按公民强制隔离", desc,
+                      "描述没写着语料已按公民隔离（与 F-P0-4 的代码不符）")
+        self.assertIn("无有效凭证时 search/read 直接拒绝", desc,
+                      "描述没写着无凭证会被拒绝")
+        # 反向：旧的假话不许回潮
+        for wrong in ("不做项目/身份隔离", "待拍板"):
+            self.assertNotIn(wrong, desc,
+                             f"描述里还有与源码相反的说法：{wrong}")
 
 
 if __name__ == "__main__":
