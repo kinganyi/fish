@@ -295,5 +295,61 @@ class RealVaultTest(unittest.TestCase):
             conn.close()
 
 
+    def test_stats_announce_missing_dimensions(self):
+        """**F-P2-3 的存量缺口必须自己会说话**。
+
+        代码修好只让**新扫描**填尺寸；已有的行要重扫一次才补得上。
+        第七轮评审正是靠"去库里数"才发现生产库 2196 行全空——
+        任何人不该靠一次评审才知道这件事。
+
+        `asset_stats` 现在报 `missing_dims`，`dataplane stats` 把它印出来。
+        """
+        import contextlib
+        import io as _io
+        import tempfile
+        from PIL import Image
+        import fish as _fish
+        import fish_kb as _K
+        import fish_dataplane as _D
+
+        d = Path(tempfile.mkdtemp(prefix="fish-p23c-")) / "data"
+        d.mkdir(parents=True)
+        conn = _fish.connect(d)
+        try:
+            conn.executescript(_fish.SCHEMA)
+            _fish.migrate(conn)
+            conn.commit()
+            vault = d / "vault"
+            vault.mkdir()
+            Image.new("RGB", (37, 19), "red").save(vault / "a.png")
+            row = _K.kb_vault_add(conn, name="测试库", path=str(vault), mode="ro")
+            conn.commit()
+            _D.scan_vault(conn, row, dry_run=False, compute_hash=False)
+            # 造出"存量没尺寸"的现场：直接抹掉
+            conn.execute("UPDATE kb_asset SET width=NULL, height=NULL")
+            conn.commit()
+
+            st = _D.asset_stats(conn, vault_id=row["vault_id"])
+            self.assertEqual(st.get("missing_dims"), 1,
+                             f"missing_dims 没数出来：{st}")
+
+            class _A:
+                dp_action = "stats"
+                vault = "测试库"
+                json = False
+                root = str(d)
+
+            buf = _io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _D.cli(_A())
+            out = buf.getvalue()
+            self.assertIn("还没有尺寸", out,
+                          f"stats 没把存量缺口说出来：{out!r}")
+            self.assertIn("scan --apply", out,
+                          f"没给出补的命令：{out!r}")
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

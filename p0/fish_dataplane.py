@@ -553,6 +553,12 @@ def asset_stats(conn, vault_id=None) -> dict:
     for st, n in conn.execute(
             "SELECT status, COUNT(*) FROM kb_asset" + where + " GROUP BY status", args):
         out["by_status"][st] = n
+    # **F-P2-3 的"存量"必须自己会说话。** 代码修好只让**新扫描**填尺寸；
+    # 已有的 2196 行要重扫一次才补得上。这个数字不显示出来，就永远没人知道
+    # 该跑一次——第七轮评审正是这样发现生产库全空的。
+    out["missing_dims"] = conn.execute(
+        "SELECT COUNT(*) FROM kb_asset WHERE kind='image' AND width IS NULL"
+        + (where.replace("WHERE", "AND") if where else ""), args).fetchone()[0]
     return out
 
 # ============================================================== W6：压缩接缝（deliver）
@@ -765,6 +771,10 @@ def _cli_with_conn(args, conn, root, action, _json):
         ref = res.get("referenced")
         if ref is not None:
             print(f"  被引用 {ref} 条 / 无引用 {res.get('unreferenced', 0)} 条")
+        miss = res.get("missing_dims", 0)
+        if miss:
+            print(f"  **{miss} 张图还没有尺寸**（存量）：跑 "
+                  f"`fish dataplane scan --apply` 补一次，几秒的事")
         return 0
 
     if action == "scan":
