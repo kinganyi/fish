@@ -109,10 +109,17 @@ MUTATIONS = (
         "审计文件不存在不再兜住 → FileNotFoundError 冒出画像计算（判据 G 会红）",
     ),
     (
-        "M-H", "H", "fish.py", "test_H_prod_read_only_reading",
+        # **2026-11-20 换靶（第九轮审查 🟠）**：原来的靶点是
+        # `test_H_prod_read_only_reading`，它依赖**生产库里的真实审计记录**。
+        # INC-20261119-01 把 `_audit/` 删掉之后，那条判据变成诚实 skip——
+        # 而 `run_test` 把 exit 0（skip 也是 0）当通过，于是**变异后它"仍然绿"**，
+        # 这条变异体从此没有判别力（README 的「27 mutants」名不副实）。
+        # 换成 `test_A_tool_usage_splits_by_session`：它**自己合成**审计日志，
+        # 走的是同一条 `compute_session_profile` 路径，但不依赖生产数据。
+        "M-H", "H", "fish.py", "test_A_tool_usage_splits_by_session",
         '    label = (session_actor or "").strip() or None\n',
         '    label = None                     # 变异：不认入参会话名\n',
-        "会话名解析失效 → 生产库真实会话算出空画像（判据 H 会红）",
+        "会话名解析失效 → 合成会话算出空画像（判据 A 会红）",
     ),
     (
         "M-I", "I", "fish.py", "test_I_read_only_and_fixed_fields",
@@ -184,13 +191,14 @@ def main(argv=None) -> int:
         print(f"基线 {name}：{len(path.read_bytes())} 字节 / sha256 {baseline[name][:16]}…")
 
     # 环境自证：未变异时判据 A 与判据 H 都必须通过——绿了才有资格谈"变异后变红"。
-    for probe in ("test_A_tool_usage_splits_by_session",
-                  "test_H_prod_read_only_reading"):
+    # **只自证 A**：H 依赖生产审计文件，公开包/事故后它是诚实 skip，
+    # 拿它做"未变异必须绿"的自证会让整个脚本在干净树上跑不起来。
+    for probe in ("test_A_tool_usage_splits_by_session",):
         passed, tail = run_test(probe)
         if not passed:
             print(f"[X] 环境自证失败：未变异时 {probe} 都没过（{tail}）——先修环境再看变异")
             return 2
-    print("环境自证：未变异时判据 A / H 均通过 [OK]\n")
+    print("环境自证：未变异时判据 A 通过 [OK]\n")
 
     rows = []
     failures = []

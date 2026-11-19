@@ -330,10 +330,21 @@ class FishProfileS1Test(unittest.TestCase):
                 PROD_SESSION in ln for ln in
                 audit.read_text(encoding="utf-8", errors="replace").splitlines())
             if not has_rec:
+                # **三态分明**：审计文件存在但**一条 tool 记录都没有** = 数据损坏，
+                # 判红；有别人的记录、只是没有这个会话的 = 那条会话没被测到，
+                # 判不到（skip）。第九轮审查指出：不清这个区分，清空日志就能让
+                # 这条判据**永远静默通过**。
+                all_lines = [ln for ln in audit.read_text(
+                    encoding="utf-8", errors="replace").splitlines() if ln.strip()]
+                if not all_lines:
+                    self.fail(
+                        f"审计文件 {audit} 存在但**一条记录都没有**——"
+                        "那是数据损坏，不是\"判不到\"。"
+                        "2026-11-19 INC-20261119-01 删掉过整份 `_audit/`。")
                 self.skipTest(
                     f"审计日志里没有 {PROD_SESSION} 的任何记录"
-                    "（2026-11-19 INC-20261119-01 删掉了整份 `_audit/`）"
-                    "——判不到，不是通过")
+                    "（但有别人的 {len(all_lines)} 行）——这个会话没被测到，"
+                    "判不到，不是通过")
         self.assertTrue(profile["tool_usage"],
                         f"生产库上 {PROD_SESSION} 的画像不该为空：{profile}")
 
