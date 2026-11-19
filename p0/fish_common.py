@@ -143,6 +143,12 @@ def fts_match_expr(query: str):
     return " AND ".join('"' + t.replace('"', '""') + '"' for t in toks)
 
 
+# F-P2-1：注入标记原来定义在 `fish_activity`（上层），而 `clean_prompt` 在本模块
+# （基层）要用它——于是有个函数内 `import fish_activity`。那是**隐藏的上行依赖**：
+# 写进代码不留痕，J2 也看不见。下沉后方向是 `fish_activity → fish_common`，单向。
+INJECTION_MARKERS = ("fsh_", "【当前状态", "[fish]", "登记身份")
+
+
 # ============================================================
 # 基础层下沉（T02，2026-10-27）：配置/时间/衰减/别名/FTS/看板辅助
 # 为什么下沉：fish_push 的闭包（1,048 行）依赖这些，而新模块不许 import fish（J2）。
@@ -735,11 +741,8 @@ def clean_prompt(text, *, max_len=4000) -> str:
     再压平空白。原始 prompt **绝不落盘**（这里只返回处理后的文本，不写日志）。
     """
     kept = []
-    # 延迟导入：`fish_common` 是基础层，`fish_activity` 是领域层；顶层 import 会把
-    # "基础→领域"写死，局部导入只在实际用到时建立依赖（T02 拆包后 clean_prompt 随之下沉）。
-    import fish_activity
     for line in str(text or "").splitlines():
-        if any(marker in line for marker in fish_activity.INJECTION_MARKERS):
+        if any(marker in line for marker in INJECTION_MARKERS):
             continue
         kept.append(line.strip())
     return " ".join(part for part in kept if part)[:max_len]

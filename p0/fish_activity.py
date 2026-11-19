@@ -90,7 +90,9 @@ CONFIG_FALLBACK = {
 # 撤回「提示词里含 fish 注入标记」的判据（与 fish.clean_prompt 共用同一份）。
 # 放在这里而不是 fish.py：prompt hook 必须在**不 import fish** 的前提下先筛一遍，
 # 否则每条用户消息都要付 400ms 去发现"这条是注入块"。
-INJECTION_MARKERS = ("fsh_", "【当前状态", "[fish]", "登记身份")
+# **F-P2-1**：定义已下沉到 `fish_common`（基层），这里 re-export，
+# 依赖方向变成 `fish_activity → fish_common`，单向。
+from fish_common import INJECTION_MARKERS  # noqa: F401
 
 SNAPSHOT_RELPATH = Path("_audit") / "hooks" / "active_surfaces.json"
 # 快照条目硬上限（设计 45 §4.4 / R5）：PreToolUse 每次写之前都要读它，

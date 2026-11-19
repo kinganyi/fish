@@ -267,6 +267,7 @@ def _imported_names(tree: ast.Module) -> set[str]:
     return names
 
 
+
 class SplitSurfaceTest(unittest.TestCase):
     """J1 家族：调用面零变化（名字、对象身份、清单对齐）。"""
 
@@ -335,6 +336,56 @@ class SplitSurfaceTest(unittest.TestCase):
 
 class SplitDependencyTest(unittest.TestCase):
     """J2 / J3 / J5：依赖方向、漏 import、模块身份。"""
+
+    def test_j2b_no_function_internal_upward_import(self):
+        """**F-P2-1**：`food_common` 里原来有个**函数内** `import fish_activity`。
+
+        J2 的两条判据（静态 + 运行时）只看**模块级** import——函数内的
+        "延迟导入"写着"只有实际用到才爆"，实际效果是**隐藏的上行依赖**：
+        写进代码不留痕，静态检查看不见，只有那条路径被调用时才炸。
+
+        这条判据扫**所有** `import fish_activity`（含函数内的），
+        要求它只能出现在测试里、或在本模块顶层（那才是正常方向）。
+        """
+        import ast as _ast
+        import re as _re
+        # **只查真正的底层模块**：`fish_common` 是 J2 链底，它 import 上层
+        # 才是"上行依赖"。`daily_report.py` 之类在 `fish_activity` 之上，
+        # 它们 import `fish_activity` 是**正常方向**——第一版判据只看"函数内"
+        # 不看"方向"，把 `daily_report.py:113` 误报成了违规。
+        offenders = []
+        for p in [P0 / "fish_common.py"]:
+            if not p.is_file():
+                continue
+            src = p.read_text(encoding="utf-8")
+            try:
+                tree = _ast.parse(src)
+            except SyntaxError:
+                continue
+            # 模块级：正常方向（fish_activity 是上层，可以 import 基层）
+            toplevel = set()
+            for node in tree.body:
+                if isinstance(node, _ast.Import):
+                    toplevel |= {a.name for a in node.names}
+                elif isinstance(node, _ast.ImportFrom):
+                    toplevel.add(node.module or "")
+            for node in _ast.walk(tree):
+                if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef,
+                                     _ast.ClassDef)):
+                    for sub in _ast.walk(node):
+                        if isinstance(sub, _ast.Import):
+                            for a in sub.names:
+                                if a.name == "fish_activity":
+                                    offenders.append(
+                                        f"{p.name}:{getattr(sub, 'lineno', '?')}")
+                        elif (isinstance(sub, _ast.ImportFrom)
+                              and (sub.module or "") == "fish_activity"):
+                            offenders.append(
+                                f"{p.name}:{getattr(sub, 'lineno', '?')}")
+        self.assertEqual(
+            offenders, [],
+            "这些地方在**函数体内部** import 了 fish_activity——那是隐藏的上行依赖，"
+            "J2 的模块级判据看不见它：\n  " + "\n  ".join(offenders))
 
     def test_j2_no_back_import_static(self):
         """J2（静态）：两份新模块都不许 import `fish`；`fish_common` 也不许 import `fish_kb`。
