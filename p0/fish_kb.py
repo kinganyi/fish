@@ -3457,6 +3457,32 @@ def _kb_cmd_vault(conn, args) -> int:
             print("提示：rw = 允许 AI 写入。每次写都会先备份，可用 "
                   "`fish kb rollback <write_id>` 撤回。")
         return 0
+    if act == "relocate":
+        # **F-P1-5**：`kb_vault_relocate` 早就实现了（W2，含三模式/哈希校验/
+        # 断点 journal），但**从没接到命令行**——只被测试调用过。
+        # 产品里够不着的能力等于没有，这正是"让 W1-W4 的数据结果可用产品命令复现"。
+        try:
+            res = kb_vault_relocate(
+                conn, args.key, args.new_path,
+                move_files=bool(getattr(args, "move", False)),
+                copy_files=bool(getattr(args, "copy", False)),
+                dry_run=not bool(getattr(args, "apply", False)),
+                verify=not bool(getattr(args, "no_verify", False)))
+        except KBError as exc:
+            print(f"✗ {exc.code}：{exc}")
+            if getattr(exc, "hint", None):
+                print(f"  {exc.hint}")
+            return 1
+        # 返回是**平铺**的（不是嵌套 plan）——按 test_vault_w2 的实际契约取。
+        print(f"库「{args.key}」→ {res.get('new_path') or args.new_path}")
+        print(f"  文件 {res.get('files', 0)} 个 / {res.get('bytes', 0)} 字节")
+        if "enough_space" in res:
+            print(f"  目标盘余量够用：{'是' if res['enough_space'] else '**不够，已拒绝**'}")
+        if res.get("dry_run"):
+            print("  **这是 dry-run**（只报计划，什么都没动）。真搬加 `--apply`。")
+        else:
+            print(f"  已完成；校验={'通过' if res.get('verified') else '跳过'}")
+        return 0
     if act == "scan":
         res = kb_vault_scan(conn, args.key)
         print(f"扫描完成：{res['vault']['name']} → {res['files']} 文件 / "

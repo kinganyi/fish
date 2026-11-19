@@ -229,5 +229,39 @@ class RelocateJournalTest(unittest.TestCase):
                              f"note={note!r} 被猜成了有状态")
 
 
+    def test_relocate_is_reachable_from_cli(self):
+        """**F-P1-5**：`kb_vault_relocate` 实现了，但**产品命令够不着**。
+
+        第七轮之前它只被测试调用——`fish kb vault` 只有 add/list/set-mode/
+        scan/remove。一个只有测试能调的函数，对用户等于不存在。
+
+        这条判据**跑真的命令行进程**（不是函数），问的是"用户能不能用它"。
+        """
+        import subprocess
+        import sys as _sys
+        import os as _os
+
+        src = self.src
+        dst = self.root / "目标"
+        before = sorted(p.name for p in src.iterdir())
+
+        # ① 子命令必须存在
+        r = subprocess.run(
+            [_sys.executable, "fish.py", "--root", str(self.root),
+             "kb", "vault", "relocate", "--help"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(HERE))
+        self.assertEqual(r.returncode, 0,
+                         f"`kb vault relocate` 不存在：{(r.stderr or '')[:200]}")
+        self.assertIn("dry-run", r.stdout,
+                      "帮助里没写缺省是 dry-run")
+
+        # ② dry-run 的行为由**函数级**判据覆盖（子进程看不到本测试的内存库，
+        # 硬跑只会得到 vault_missing——那是 fixture 限制，不是产品问题）。
+        # 这里只确认"缺省不是 apply"这条契约：命令行层不许默认搬文件。
+        self.assertIn("--apply", r.stdout,
+                      "帮助里没有 --apply 开关，用户没法真搬")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

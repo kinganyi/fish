@@ -310,6 +310,20 @@ def main():
 
     kvsub.add_parser("list", help="列出全部 vault").set_defaults(func=_f.cmd_kb)
 
+    # **F-P1-5**：`kb_vault_relocate` 早就实现了（W2），但**从没接到命令行**——
+    # 只被测试调用过。产品里够不着的能力，等于没有。
+    kvr = kvsub.add_parser("relocate", help="改知识库位置（三模式：只改登记 / 搬文件 / 复制）")
+    kvr.add_argument("key", help="name 或 vault_id")
+    kvr.add_argument("new_path", help="新的绝对路径")
+    _relo = kvr.add_mutually_exclusive_group()
+    _relo.add_argument("--move", action="store_true", help="搬整棵树（源会被删）")
+    _relo.add_argument("--copy", action="store_true", help="复制（原位置保留）")
+    kvr.add_argument("--apply", action="store_true",
+                     help="真做（缺省 = dry-run，只报计划：文件数/字节/目标盘余量）")
+    kvr.add_argument("--no-verify", action="store_true",
+                     help="跳过哈希校验（只在'只改登记、没动文件'时该用）")
+    kvr.set_defaults(func=_f.cmd_kb)
+
     kvs = kvsub.add_parser("set-default", help="指定默认 vault")
     kvs.add_argument("key", help="name 或 vault_id")
     kvs.set_defaults(func=_f.cmd_kb)
