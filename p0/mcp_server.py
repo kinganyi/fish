@@ -573,12 +573,13 @@ TOOLS = [
                        "（corpus.sqlite），不进 recall / 注入包 / 全文索引。门牌 `log:` 可直接"
                        "粘进对话；`conv:` 是推送用的短址（同一个段）。source.missing=true 表示"
                        "源日志已不在，正文来自投影——**不猜、不摘要顶替**。"
-                       "【隔离声明 · 2026-11-18 起】语料面**按公民强制隔离**："
-                       "无有效凭证时 search/read 直接拒绝（不会静默降级成\"只看未归属\"）；"
-                       "有凭证时**只能读自己的段**，未归属的段也读不到——它们同样可能是别人的会话。"
-                       "需要按项目收窄时另传 project。"
-                       "（这段文字在 2026-11-18 前写着'不做隔离'，那不是现在的事实："
-                       "F-P0-4 已落地，第六轮评审指出旧描述与源码相反，已改。）",
+                       "【凭证与可见范围 · 2026-11-19 用户澄清】"
+                       "**无有效凭证时 search/read 直接拒绝**，并指引取得 token"
+                       "（不静默降级成\"只看未归属\"——那会让查不到看起来像没有）。"
+                       "**有凭证即可正常使用全部功能、读它需要的任何内容**："
+                       "本系统是为多 Agent 协作设计的，默认**不限制持票人的可见范围**。"
+                       "想收窄的人可以打开 `corpus.citizen_isolation` 开关（默认关），"
+                       "打开后只返回自己名下的段。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2182,9 +2183,11 @@ class FishServer:
                 if key != "project" and value == "":
                     continue
                 filters[key] = [str(value)]
-            # F-P0-4：强制按公民过滤。调用方给的 filters 里即使有 citizen
-            # 也一律以凭证为准——否则「参数覆盖」就是新的绕过口。
-            filters["citizen"] = [str(citizen)]
+            # **2026-11-19 用户澄清**：持票人**不做默认限制**——他能正常用
+            # fish 全功能、读它需要的任何内容。2026-11-18 拍板的只有
+            # "无 token 要引导获取 token"。收窄是可选开关，默认关。
+            if fish.get_config(self.conn, "corpus.citizen_isolation"):
+                filters["citizen"] = [str(citizen)]
             res = fish_corpus.search(
                 query, filters=filters or None,
                 limit=self._kb_int_arg(a, "limit", default=8, lo=1,
@@ -2223,7 +2226,8 @@ class FishServer:
         # F-P0-4：pointer 是「任意公民的任意段」的地址，读之前必须校验归属。
         # 比「能读到再算」少泄露一次存在性。
         seg_citizen = str(res.get("citizen_id") or "")
-        if seg_citizen != str(citizen):
+        if (fish.get_config(self.conn, "corpus.citizen_isolation")
+                and seg_citizen != str(citizen)):
             raise ValueError(
                 "这个 pointer 指向的段落不属于当前公民，拒绝读取。\n"
                 "　（未归属的段落也不给读：它们同样可能是别人的会话。）")

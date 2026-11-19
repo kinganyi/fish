@@ -143,7 +143,9 @@ FISH_COMMON_LINES_MIN = 550
 # 它是**新增能力**不是搬家——但值得占这 30 行：把散落各处的
 # `SELECT 1 FROM citizens WHERE citizen_id=?` 收敛到一个可审计的地方，
 # 正是这次"归档后 rebuild 改写归属"缺陷的根因所在。
-FISH_COMMON_LINES_MAX = 950
+# 2026-11-19：950 → 960。加 `corpus.citizen_isolation` 配置键（默认 False）。
+# 那个键是用户澄清「持票人不做默认限制」的落地位置——收窄改成可选。
+FISH_COMMON_LINES_MAX = 960
 # 2026-11-11 新模块 · `rebuild_projection`（404 行 + 说明）：fish.py 里最长也最危险的
 # 函数，外部审查 🔴9 就出在它身上。给它自己的窗口，防它再长成第二个巨石。
 FISH_REBUILD_LINES_MIN = 380

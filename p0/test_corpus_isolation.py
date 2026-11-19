@@ -132,6 +132,19 @@ class CorpusIsolationTest(unittest.TestCase):
         return resp["result"]["content"][0]["text"]
 
     # ------------------------------------------------------------- 主判据
+    def _set_iso(self, on):
+        """把 `corpus.citizen_isolation` 开关设成 on。"""
+        import fish as _fish
+        conn = _fish.connect(self.root)
+        try:
+            conn.execute("INSERT OR REPLACE INTO config (key,value,type,updated_at) "
+                         "VALUES (?,?,?,?)",
+                         ("corpus.citizen_isolation", "true" if on else "false",
+                          "bool", _fish.now_utc()))
+            conn.commit()
+        finally:
+            conn.close()
+
     def test_no_token_is_rejected_with_guidance(self):
         """**无 token 必须明确拒绝，并告诉调用方怎么拿 token。**"""
         text = self._text(self._corpus(action="search", query="独有词"))
@@ -149,32 +162,42 @@ class CorpusIsolationTest(unittest.TestCase):
         self.assertNotIn("青梅煮酒", text, "被拒绝的调用却泄露了甲的正文")
         self.assertNotIn("围魏救赵", text, "被拒绝的调用却泄露了乙的正文")
 
-    def test_citizen_a_cannot_see_citizen_b(self):
-        """**核心判据**：甲搜"独有词"，只能命中甲的段，乙的一个字都不许出现。
+    def test_default_is_no_isolation(self):
+        """**2026-11-19 用户澄清**：持票人**不做默认限制**。
 
-        如果实现只是把 citizen 记进日志而不过滤，乙的文本会照样出现。
+        > 有 token 是可以正常使用 fish 全功能，并进行它所需要的阅读的，
+        > 目前没有规划要默认限制它的可见范围。
+        > 之前"拍板"的内容是"无 token 要被引导获取 token"。
+
+        所以默认（`corpus.citizen_isolation=False`）下，甲的检索**能看到**
+        乙的段——这是**设计**，不是泄露。
         """
         text = self._text(self._corpus(action="search", query="独有词", token=TOK_A))
         self.assertIn("青梅煮酒", text, f"甲看不到自己的段：{text[:300]}")
+        self.assertIn("围魏救赵", text,
+                      f"默认应当不做隔离（用户 2026-11-19 澄清），"
+                      f"但乙的段没出现：{text[:300]}")
+
+    def test_isolation_switch_still_works(self):
+        """开关打开后确实收窄——**可选能力保留，只是默认关**。"""
+        self._set_iso(True)
+        text = self._text(self._corpus(action="search", query="独有词", token=TOK_A))
+        self.assertIn("青梅煮酒", text, f"甲看不到自己的段：{text[:300]}")
         self.assertNotIn("围魏救赵", text,
-                         f"**跨公民泄露**：甲搜到了乙的段落\n{text[:400]}")
-        self.assertIn("hits=1", text, f"命中数不对（应只有 1 条）：{text[:300]}")
+                         f"开关打开后仍跨公民泄露：{text[:400]}")
 
-    def test_each_citizen_sees_only_their_own(self):
-        """对称性：乙也只能看到自己的。"""
-        text = self._text(self._corpus(action="search", query="独有词", token=TOK_B))
-        self.assertIn("围魏救赵", text)
-        self.assertNotIn("青梅煮酒", text, f"乙搜到了甲的段落\n{text[:400]}")
+    def test_default_can_read_other_pointer(self):
+        """默认不隔离：乙的门牌甲也能读（用户 2026-11-19 澄清）。"""
+        text = self._text(self._corpus(action="read", pointer="log:dsh:sid-B#seq=1",
+                                       token=TOK_A))
+        self.assertIn("围魏救赵", text, f"默认应当可读：{text[:300]}")
 
-    def test_reading_another_citizens_pointer_is_refused(self):
-        """`pointer` 是「任意段的地址」，读之前必须校验归属。"""
-        resp = self._corpus(action="read", pointer="log:dsh:sid-B#seq=1", token=TOK_A)
-        body = json.dumps(resp, ensure_ascii=False)
-        self.assertNotIn("围魏救赵", body,
-                         f"甲用 pointer 读到了乙的段落：{body[:400]}")
-        self.assertTrue(
-            resp.get("result", {}).get("isError") or "不属于" in body,
-            f"读别人的段落没被拒绝：{body[:300]}")
+    def test_isolation_switch_refuses_other_pointer(self):
+        """开关打开后，跨公民指读被拒。"""
+        self._set_iso(True)
+        text = self._text(self._corpus(action="read", pointer="log:dsh:sid-B#seq=1",
+                                       token=TOK_A))
+        self.assertNotIn("围魏救赵", text, f"开关打开后仍读到：{text[:300]}")
 
     def test_own_pointer_is_readable(self):
         """对照组：读自己的段落必须成功，不能为了安全把功能砍掉。"""
@@ -183,48 +206,31 @@ class CorpusIsolationTest(unittest.TestCase):
         self.assertIn("青梅煮酒", body, f"读自己的段落失败了：{body[:400]}")
 
 
-    def test_cli_path_is_isolated_too(self):
-        """**第六轮评审 🔴-1**：隔离原来只装在 MCP 门口。
+    def test_cli_path_follows_the_same_switch(self):
+        """**执行层与 MCP 同一套口径**（默认开、开关收窄）。
 
-        评审官现场演示：同一个库、两个公民的语料，给甲的身份跑 CLI——
-
-            fish corpus read log:dsh:<乙的 sid>#seq=1  → rc=0，拿到乙的原话
-
-        **执行层没有锁，只有一个调用方有锁。** 而可见性清单里
-        `get_segment` 的豁免理由正是"走 F-P0-4 的 citizen 隔离"——
-        **那条豁免的地基是假的。**
-
-        这条判据走**执行层**（`fish_corpus.run_cli`），不经过 MCP，
-        所以它测的是"锁在不在执行层"，不是"MCP 记不记得上锁"。
+        第六轮评审 🔴-1 的教训保留：隔离要装在**执行层**，不能只装在一个门口。
+        现在三处（MCP search / MCP read / CLI）都由同一个开关控制。
         """
         import fish_corpus
-        from fish_corpus import store as _store
 
         def _actor(cid):
             return lambda: cid
 
-        # ① search：甲的检索结果里不许出现乙的独有词
-        rc, lines, _acc = fish_corpus.run_cli(
+        # 默认（开关关）：甲能看到乙
+        _rc, lines, _a = fish_corpus.run_cli(
             "search", root=self.root, target="独有词", actor_citizen=_actor(CIT_A))
         blob = "\n".join(lines)
-        self.assertNotIn("围魏救赵", blob, "CLI search 把乙公民的语料给了甲")
-        self.assertIn("青梅煮酒", blob, "甲连自己的都搜不到（过滤过头）")
+        self.assertIn("青梅煮酒", blob, else_msg := f"甲看不到自己的：{blob[:200]}")
+        self.assertIn("围魏救赵", blob, "默认不做隔离，乙的段应当可见")
 
-        # ② read：甲读乙的门牌必须被拒
-        rc2, l2, _a2 = fish_corpus.run_cli(
-            "read", root=self.root, target="log:dsh:sid-B#seq=1",
-            actor_citizen=_actor(CIT_A))
-        self.assertNotIn("围魏救赵", "\n".join(l2),
-                         "CLI read 读到了别的公民的正文原文")
-        self.assertNotEqual(rc2, 0, "跨公民读取居然返回成功")
-
-        # ③ 甲读自己的门牌必须成功（否则是过滤过头）
-        _rc3, l3, _a3 = fish_corpus.run_cli(
-            "read", root=self.root, target="log:dsh:sid-A#seq=1",
-            actor_citizen=_actor(CIT_A))
-        self.assertIn("青梅煮酒", "\n".join(l3),
-                      "甲读自己的语料也被挡了（过滤过头）")
-
+        # 开关打开：甲只能看到自己的
+        _rc2, lines2, _a2 = fish_corpus.run_cli(
+            "search", root=self.root, target="独有词", actor_citizen=_actor(CIT_A),
+            citizen_isolation=True)
+        blob2 = "\n".join(lines2)
+        self.assertNotIn("围魏救赵", blob2, "开关打开后仍跨公民")
+        self.assertIn("青梅煮酒", blob2, "开关打开后连自己的都看不到（过滤过头）")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -609,10 +609,14 @@ class McpProjectFilterTest(unittest.TestCase):
         import mcp_server
         tool = [t for t in mcp_server.TOOLS if t["name"] == "corpus"][0]
         desc = tool["description"]
-        self.assertIn("按公民强制隔离", desc,
-                      "描述没写着语料已按公民隔离（与 F-P0-4 的代码不符）")
+        # **2026-11-19 用户澄清**：持票人不做默认限制。描述必须说这一条，
+        # 并且必须写着"可选开关"，否则读者会以为默认就被限。
         self.assertIn("无有效凭证时 search/read 直接拒绝", desc,
-                      "描述没写着无凭证会被拒绝")
+                      "描述没写着无凭证会被拒绝（这是用户真正拍板的那一条）")
+        self.assertIn("默认**不限制持票人的可见范围**", desc,
+                      "描述没写「持票人不受默认限制」——那是 2026-11-19 的澄清")
+        self.assertIn("corpus.citizen_isolation", desc,
+                      "描述没提可选开关的名字，读者没法自己收窄")
         # 反向：旧的假话不许回潮
         for wrong in ("不做项目/身份隔离", "待拍板"):
             self.assertNotIn(wrong, desc,

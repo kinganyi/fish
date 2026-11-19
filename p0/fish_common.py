@@ -340,6 +340,11 @@ CONFIG_DEFAULTS = {
     "corpus.daily_retag": (False, "bool", None),
     # 单帧解压上限（A①）：首采里 10+ 个帧超过旧的 8 MiB 被降级，实测最大帧 152 KB。
     "corpus.max_frame_bytes": (64 << 20, "int", None),
+    # **2026-11-19 用户澄清**：有 token 就能正常使用 fish 全功能、
+    # 读它需要的任何内容——**没有规划要默认限制持票人的可见范围**。
+    # 2026-11-18 拍板的只有"无 token 要被引导获取 token"这一条。
+    # 这个开关默认 **False**：不按公民过滤。想收窄的人自己打开。
+    "corpus.citizen_isolation": (False, "bool", None),
 
     # ── 动作采集（2026-10-26 · hooks 深度利用 T02）───────────────────────────
     # 事实表 `tool_activity` 的开关与保留策略。**只记写类**（读不改变任何东西，
