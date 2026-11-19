@@ -540,6 +540,7 @@ class PrivateWriteGuardTest(unittest.TestCase):
         """
         import subprocess, sys as _sys
         self._enforce(True)
+        self._write(title="公开清单条目")          # 失靶守卫需要一条公开的
         self._write(title="ZZ私有清单ZZ", visibility="private", owner="C-OWNER")
         # **`--root` 必须在子命令前面**：写成 `list --root X` 会 exit=2，
         # 输出里永远没有标题——第一版就是这么写的，于是判据恒绿
@@ -551,9 +552,12 @@ class PrivateWriteGuardTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0,
                          f"CLI 没跑起来（exit={r.returncode}）：{(r.stderr or '')[:200]}")
         out = (r.stdout or "") + (r.stderr or "")
-        # 失靶守卫：公开条目必须出现在输出里，否则"没打印私有"可能只是"什么都没打印"
-        self.assertIn("ZZ私有清单ZZ" if False else "列表", out + "列表",
-                      "输出里连公开内容都没有——判据失去靶点")
+        # 失靶守卫：**必须真的打印了一条公开条目**。
+        # 第一版写的是 `assertIn(..., out + "列表")`——"列表"两个字是拼上去的，
+        # 恒真；评审官让 cmd_list 什么都不打印（exit 0、空输出）仍然 1 passed。
+        self.assertIn("共 ", out, f"输出里没有清单表头——判据失去靶点：{out[:200]}")
+        self.assertIn("公开清单条目", out,
+                      f"公开条目没打印出来——'没打印私有'可能只是'什么都没打印'：{out[:200]}")
         self.assertNotIn("ZZ私有清单ZZ", out, "CLI list 打印了私有标题")
 
 
@@ -664,6 +668,62 @@ class PrivateWriteGuardTest(unittest.TestCase):
         self.assertNotIn("主人私有的错题乙", other,
                          "错题本段把别人的私有 lesson 列出来了")
 
+
+    def test_every_filtered_entry_really_filters(self):
+        """**判据的判据**：`FILTERED` 里的每个函数，体内必须真的有过滤。
+
+        第六轮评审指出：原来的 `test_filtered_list_matches_reality` 只检查
+        **理由文本里出现 `_visibility_sql` 的条目**——于是四条假理由
+        （`cmd_list` / `cmd_report` / 两个渲染器）在构造上**永远不会被抓**。
+        理由怎么写都行，只要不含那个字符串就豁免。
+
+        现在不看理由，看**函数体**：`FILTERED` 名下每个函数，
+        体内必须出现 `_visibility_sql` 或 `_visibility_enforced`
+        （AST 级的名字引用，不是文本搜索）。
+
+        系统级/管理员工具不属于这一档——它们在 `BY_EXACT_CODE` 里另写理由。
+        """
+        import ast as _ast
+        import re as _re
+
+        def body_names(fname):
+            """这个函数（含方法与嵌套）体内引用到的名字集合。"""
+            names = set()
+            for p in sorted(HERE.glob("*.py")):
+                if p.name.startswith(("test_", "mutation_", "_")):
+                    continue
+                try:
+                    tree = _ast.parse(p.read_text(encoding="utf-8"))
+                except (SyntaxError, UnicodeDecodeError):
+                    continue
+                for node in _ast.walk(tree):
+                    if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                        continue
+                    if node.name != fname:
+                        continue
+                    for n in _ast.walk(node):
+                        if isinstance(n, _ast.Name):
+                            names.add(n.id)
+                        elif isinstance(n, _ast.Attribute):
+                            names.add(n.attr)
+            return names
+
+        offenders = []
+        for fname in sorted(FILTERED):
+            names = body_names(fname)
+            if not names:
+                continue      # 名字在别处（如渲染器被调用方过滤），下一轮再说
+            # 两个合法的过滤入口：SQL 级（_visibility_sql）与后置过滤
+            # （_filter_by_visibility）。`search_memories` 走后者。
+            if ({"_visibility_sql", "_visibility_enforced", "_filter_by_visibility"}
+                    & names):
+                continue
+            offenders.append(fname)
+        self.assertEqual(
+            offenders, [],
+            f"这些函数在 FILTERED 里，但体内没有任何可见性过滤：{offenders}\n"
+            "  要么接线，要么把它挪到 BY_EXACT_CODE 并写明为什么安全")
+
 # ---------------------------------------------------------------- 读路径清单
 #
 # **F-P1-X（第三轮评审后的自查）**：我补私有过滤时，是按"我记得的那几条"补的。
@@ -686,10 +746,10 @@ FILTERED = {
     "neighbors":              "_visibility_sql",
     "distill_clusters":       "_visibility_sql（自带 SQL，第三轮评审补的）",
     "build_injection_pack":   "_visibility_sql（最近三件事）",
-    "cmd_list":               "只是渲染 list_memories 的结果，不自己查",
-    "cmd_report":             "只渲染聚合计数，不返回标题",
-    "render_memory_index":    "渲染器，输入已过滤",
-    "render_memory_recent":   "渲染器，输入已过滤",
+    "cmd_list":               "_visibility_sql（第 43 轮补：它**自己**查标题并逐行打印）",
+    "cmd_report":             "_visibility_sql（第 43 轮补：它打印 hot 前 5 与全部反馈标题）",
+    "render_memory_index":    "_visibility_sql（第 41 轮补：它自跑 SQL 并写成落盘明文）",
+    "render_memory_recent":   "_visibility_sql（第 41 轮补：同上，写 20-记忆库/最近.md）",
     "_lesson_rows":           "lesson 免凭证可写但不进 private 语义（见 F-P0-3 的信任门）",
     "_rule_rows":             "rule 有授权门（见 fish_trust），不是 visibility 语义",
     "find_similar_memories":  "按精确 code 排除自身后取相似；结果仍走 search 口径",
