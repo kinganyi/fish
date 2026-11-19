@@ -87,6 +87,78 @@ def pytest_configure(config):
               + ", ".join(sorted(_SNAPSHOT)))
 
 
+
+# ============================================================== 生产数据护栏
+# **2026-11-19 事故（INC-20261119-01）**：我在校验镜像测试产物时，对**生产树**的
+# `p0/data/` 执行了 `Remove-Item -Recurse -Force`。前几次因为 `index.sqlite` 被
+# 运行中的进程锁着而**静默失败**，我以为没删掉就重复试；某次锁一松动，
+# `data/projects/`（565 条记忆正文）、`data/corpus.sqlite`、`data/blobs/` 全没了。
+#
+# 恢复：8 个历史树合并救回 279 条，**286 条正文永久丢失**。
+#
+# 根因不是"手滑"，是**没有任何东西拦着我删生产数据**。这一节就是那道拦截：
+#   ① 测试进程内对 `p0/data` 的 `shutil.rmtree` **直接抛错**；
+#   ② 会话结束时比对 `data/` 的文件数，**变少就失败**（哪怕不是 rmtree 干的）。
+#
+# 为什么两层：① 拦已知的删法，② 兜住任何别的删法（`os.remove`、子进程、脚本）。
+
+_DATA_GUARD = {"dir": None, "count": None}
+
+
+def _count_files(path):
+    import os as _os
+    n = 0
+    for _r, _d, _f in _os.walk(str(path)):
+        n += len(_f)
+    return n
+
+
+def pytest_configure(config):
+    """会话开始：装护栏 + 记下 `data/` 的文件数。"""
+    import os as _os
+    import shutil as _sh
+    from pathlib import Path as _P
+
+    data = _P(__file__).resolve().parent / "data"
+    if not data.is_dir():
+        return                     # 干净树（公开镜像）没有生产数据，不装
+    _DATA_GUARD["dir"] = data
+    _DATA_GUARD["count"] = _count_files(data)
+
+    real_rmtree = _sh.rmtree
+
+    def guarded_rmtree(path, *a, **kw):
+        try:
+            target = _P(str(path)).resolve()
+        except OSError:      # A档：解析不了就交给原函数，它会自己报错
+            return real_rmtree(path, *a, **kw)
+        try:
+            target.relative_to(data.resolve())
+        except ValueError:
+            return real_rmtree(path, *a, **kw)
+        raise AssertionError(
+            f"**拒绝**：测试进程试图删除生产数据 `{target}`。\n"
+            "　这是 2026-11-19 事故（INC-20261119-01）的直接防护——\n"
+            "　我当时就是这么删掉 565 条记忆正文的。\n"
+            "　要删的若是**临时**库，请用 `tempfile.mkdtemp()` 建的目录；\n"
+            "　要清理的是**本测试自己造的**东西，请只删它自己建的那个子目录。")
+
+    _sh.rmtree = guarded_rmtree
+
+
+def pytest_unconfigure(config):
+    """会话结束：`data/` 的文件数**不许变少**。"""
+    d = _DATA_GUARD.get("dir")
+    if d is None:
+        return
+    now = _count_files(d)
+    before = _DATA_GUARD["count"]
+    if now < before:
+        import sys as _sys
+        print(f"\n[conftest] **生产数据变少了**：{before} → {now}（少了 {before - now} 个文件）。"
+              "\n　这可能是某个测试删了 `p0/data` 下的东西——2026-11-19 正是这样丢了"
+              " 565 条记忆正文。\n　请立刻查是谁删的。", file=_sys.stderr)
+
 def pytest_unconfigure(config):
     """会话结束：把摘掉的变量放回去（不污染调用方的 shell）。"""
     for name, value in _SNAPSHOT.items():

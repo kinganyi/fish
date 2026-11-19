@@ -100,6 +100,12 @@ _MD_RE = re.compile(r"([\w\u4e00-\u9fff./\\-]+\.md)")
 _WEAK_RE = re.compile(r"(原话|原文|quote)", re.I)
 
 
+# **第八轮复核 🟠**：`test_frozen_list_only_shrinks` 原来只验"名单里的每一条
+# 现在仍然无锚点"——**往名单里加一条新的无锚点声明也是绿的**，等于棘轮可以变长。
+# 这个数字是外部锚点：FROZEN 集合的大小必须**小于等于**它，且它只许降。
+EXPECTED_FROZEN_LEN_MAX = 25
+
+
 def _md_exists(ref):
     """这个 .md 在仓库、工作区、或上层目录里真的存在吗？"""
     ref = ref.replace("\\", "/")
@@ -201,6 +207,26 @@ class DecisionAnchorTest(unittest.TestCase):
                         "存在的 md 被判成不存在")
         self.assertFalse(_md_exists("绝对不存在的文件名-xyz.md"),
                          "不存在的 md 被判成存在")
+
+
+    def test_frozen_list_never_grows(self):
+        """**第八轮复核 🟠**：棘轮能一行加长就等于没有棘轮。
+
+        `test_frozen_list_only_shrinks` 的名字说"只许变短"，但它只验
+        "名单里的每一条现在仍然无锚点"——**往名单里加一条新的无锚点声明也是绿的**。
+
+        这条用外部常量 `EXPECTED_FROZEN_LEN_MAX` 卡住集合大小：
+        补好一条就把它改小；**加长就红**。
+        """
+        self.assertLessEqual(
+            len(FROZEN), EXPECTED_FROZEN_LEN_MAX,
+            f"FROZEN 从 {EXPECTED_FROZEN_LEN_MAX} 涨到 {len(FROZEN)}——"
+            "棘轮只许变短。新写的声明必须带锚点，不许塞进冻结名单")
+        self.assertGreater(
+            len(FROZEN), 0,
+            "FROZEN 空了——要么真补完了（那就把这条判据改成断言空集），"
+            "要么集合被误删")
+
 
 
 if __name__ == "__main__":

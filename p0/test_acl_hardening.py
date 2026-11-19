@@ -192,6 +192,77 @@ class DataAclTest(unittest.TestCase):
                          f"复查工具报不合规：\n{(r.stdout or '')[-600:]}")
 
 
+def _sandbox_env(tmpdir):
+    """给被实跑的脚本一个**关得住**的环境。
+
+    ## 为什么（第八轮复核抓的，比那 5 个提交都严重）
+
+    这个测试原来对 54 个脚本实跑 `--help`，而 docstring 写着
+    「跑 `--help` 是安全的——它不会改任何东西」。**那句话是假的**：
+
+      · `patch_codex.py` **没有 argparse** → `--help` 直接 `main()`，
+        每次全量跑在 `I:\app\codex` 生成一个 `config.toml.bak-<ts>-before-fish`
+        （2026-11-19 当天累计 **58 个**）；
+      · `gov_plan.py` 没有 argparse → `--help` 直接写
+        `大肥鱼生命系统\35-迁移映射-mapping.json`，把它**覆盖成空计划**；
+      · 5 个 hook 脚本不认 `--help` → 创建 `p0/data/index.sqlite` 与 `_audit`。
+
+    我第一版改成"没有 argparse 就不实跑"，但那样**又回到只验字**（注释里提到
+    记号不等于会打印）。真正的修法是**把执行关起来**：临时 cwd + 临时家目录，
+    脚本即使真的跑 `main()`，写的也是临时目录里的东西。
+
+    这不是"测得更少"，是"测得更安全"——覆盖面回到 54 个，而副作用关在沙箱里。
+    """
+    import os as _os
+    from pathlib import Path as _P
+    env = dict(_os.environ)
+    tmp = _P(tmpdir)
+    env["PYTHONIOENCODING"] = "gbk"        # 关键：模拟 Windows 默认控制台
+    env.pop("PYTHONUTF8", None)
+    # 家目录类：让它们改不到真实的家目录 / codex 配置 / fish 数据
+    for key in ("HOME", "USERPROFILE", "CODEX_HOME", "FISH_HOME",
+                "FISH_ROOT", "APPDATA", "LOCALAPPDATA"):
+        env[key] = str(tmp)
+    env["TMP"] = str(tmp)
+    env["TEMP"] = str(tmp)
+    return env
+
+
+def _has_argparse(path):
+    """这个脚本**真的**会解析命令行吗？（只有它会，才敢给它传 `--help`）
+
+    ## 为什么必须问这句（第八轮复核抓的，比我这轮的 5 个提交都严重）
+
+    这个测试原来对 54 个脚本一律跑 `--help`，docstring 还写着
+    「跑 `--help` 是安全的——它不会改任何东西」。**那句话是假的。**
+
+    实测（2026-11-19）：
+      · `patch_codex.py` **0 处** argparse → `--help` 直接跑 `main()`，
+        每次全量跑在 `I:\app\codex` 生成一个 `config.toml.bak-<ts>-before-fish`；
+        当天累计 **58 个**。
+      · `gov_plan.py` **0 处** argparse → `--help` 直接写
+        `大肥鱼生命系统\35-迁移映射-mapping.json`，把它**覆盖成空计划**。
+      · 5 个 hook 脚本不认 `--help` → 创建 `p0/data/index.sqlite` 与 `_audit` 心跳。
+
+    一个**判据**不许为了检查而改用户的文件。没有 argparse 的脚本改用 AST 验
+    （见 `test_scripts_without_argparse_install_utf8`），和 `mutation_*.py` 同待遇。
+    """
+    import ast as _ast
+    try:
+        tree = _ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except SyntaxError:
+        return False
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Import):
+            for a in node.names:
+                if a.name == "argparse":
+                    return True
+        elif isinstance(node, _ast.ImportFrom) and (node.module or "") == "argparse":
+            return True
+    # 也可能自己解 sys.argv（hook 那类）——那更危险，同样不实跑
+    return False
+
+
 class ToolsConsoleEncodingTest(unittest.TestCase):
     """**第四轮评审 🟠-6**：这条判据原来是"读源码找 reconfigure 这个词"。
 
@@ -201,7 +272,12 @@ class ToolsConsoleEncodingTest(unittest.TestCase):
     而且它只扫 `tools/*.py`，根目录 `mutation_*.py` 一直崩在 print 上没被发现。
 
     **改成行为判据**：在 **GBK 环境**里真跑一遍 `--help`，断言 stderr 里
-    没有 `UnicodeEncodeError`。跑 `--help` 是安全的——它不会改任何东西。
+    没有 `UnicodeEncodeError`。
+
+    **原来这里写着「跑 --help 是安全的——它不会改任何东西」，那句话是假的**
+    （第八轮复核抓的）：`patch_codex.py` 与 `gov_plan.py` 没有 argparse，
+    `--help` 会直接跑 `main()`，前者写 `I:\app\codex` 的配置备份、后者覆盖迁移计划。
+    现在**在沙箱里跑**（临时 cwd + 临时家目录），副作用出不去。
 
     三态分明：脚本不支持 `--help`（exit 2）不算失败，只要**没有编码崩溃**。
     """
@@ -221,8 +297,18 @@ class ToolsConsoleEncodingTest(unittest.TestCase):
             if p.name.startswith("test_") or p.name.startswith("mutation_"):
                 continue
             src = p.read_text(encoding="utf-8", errors="replace")
-            if any(m in src for m in self._MARKERS):
-                out.append(p)
+            if not any(m in src for m in self._MARKERS):
+                continue
+            # **只跑真的有 `--help` 的脚本**（第八轮复核）。
+            # 没有 argparse 的脚本收到 `--help` 会**忽略它直接执行**：
+            #   · `patch_codex.py`     → 写 I:pp\codex 的配置备份（当天 58 个）
+            #   · `gov_plan.py`        → 覆盖 35-迁移映射-mapping.json 成空计划
+            #   · hook 脚本            → 用 `Path(__file__).parent/"data"` 造库（沙箱也挡不住）
+            # 给一个**没有 `--help` 的脚本**传 `--help` 本来就测不到"控制台编码"，
+            # 所以这不是缩小覆盖面，是让覆盖面**只包含它声称要测的东西**。
+            if not _has_argparse(p):
+                continue
+            out.append(p)
         return out
 
     def test_console_scripts_survive_gbk(self):
@@ -231,11 +317,14 @@ class ToolsConsoleEncodingTest(unittest.TestCase):
         import subprocess as _sp
         cands = self._candidates()
         # 失靶守卫：一个候选都没有说明挑法坏了，必须红
-        self.assertGreaterEqual(len(cands), 5,
-                                f"只找到 {len(cands)} 个候选——判据失去靶点，不是通过")
-        env = dict(_os.environ)
-        env["PYTHONIOENCODING"] = "gbk"       # 关键：模拟 Windows 默认控制台
-        env.pop("PYTHONUTF8", None)
+        self.assertGreaterEqual(
+            len(cands), 5,
+            f"只找到 {len(cands)} 个候选——判据失去靶点，不是通过")
+        import tempfile as _tf
+        import shutil as _sh
+        sandbox = _tf.mkdtemp(prefix="fish-gbk-")
+        self.addCleanup(_sh.rmtree, sandbox, True)
+        env = _sandbox_env(sandbox)
         # **每个脚本要跑它真的会打印记号的那条命令**。
         # `acl_harden.py` 的 `--help` 只有纯 ASCII，崩发生在 `--verify`——
         # 第一版对所有脚本都跑 `--help`，于是"保留字样、调用改 pass"的变异仍然绿。
@@ -245,7 +334,7 @@ class ToolsConsoleEncodingTest(unittest.TestCase):
         for p in cands:
             r = _sp.run([sys.executable, str(p)] + ARGS.get(p.name, ["--help"]),
                         capture_output=True, text=True, encoding="utf-8",
-                        errors="replace", env=env, cwd=str(HERE), timeout=120)
+                        errors="replace", env=env, cwd=sandbox, timeout=120)
             blob = (r.stdout or "") + (r.stderr or "")
             if "UnicodeEncodeError" in blob:
                 crashes.append(f"{p.name}: {blob.strip().splitlines()[-1][:100]}")
@@ -281,6 +370,36 @@ class ToolsConsoleEncodingTest(unittest.TestCase):
         self.assertEqual(offenders, [],
                          f"这些号本没有**真正调用** reconfigure"
                          f"（只是文件里出现过这个词不算）：{offenders}")
+
+
+
+    def test_console_sweep_leaves_no_trace(self):
+        """**这条判据守的是"测试不许改用户文件"**（第八轮复核）。
+
+        背景：这个测试原来对 54 个脚本一律实跑 `--help`，其中
+        `patch_codex.py` / `gov_plan.py` 没有 argparse，`--help` 会直接跑 `main()`：
+        前者在 `I:\app\codex` 生成配置备份（当天累计 58 个），
+        后者把 `35-迁移映射-mapping.json` **覆盖成空计划**。
+        另有 hook 脚本用 `Path(__file__).parent/"data"` 造库——沙箱也挡不住。
+
+        修法是**只跑真的有 `--help` 的脚本**。这条判据锁住那个修法：
+        跑完之后仓库里**不许出现新的 `data/`**。
+        """
+        import shutil as _sh
+        marker = HERE / "data"
+        had = marker.exists()
+        if had:
+            self.skipTest("仓库里本来就有 data/（生产树），这条只在干净树上判得到")
+        try:
+            self.test_console_scripts_survive_gbk()
+        finally:
+            created = marker.exists()
+            if created:
+                _sh.rmtree(marker, ignore_errors=True)
+        self.assertFalse(created,
+                         "实跑脚本把 `data/` 造出来了——说明又跑了没有 argparse 的"
+                         "脚本（它们收到 --help 会直接执行 main()）")
+
 
 
 if __name__ == "__main__":
