@@ -137,12 +137,20 @@ def pytest_configure(config):
     real_rmtree = _sh.rmtree
 
     def guarded_rmtree(path, *a, **kw):
-        # **每次调用现读** `_DATA_GUARD["dir"]`，不用闭包里的 `data`：
-        # 判据要用假根当靶子测这道护栏（真路径当靶子的话，护栏一失效
-        # 判据自己就删掉了生产数据——2026-11-19 我就是这么又删了一次）。
+        # **fail-safe，不是 fail-open**（第九轮审查 🔴，2026-11-20）。
+        #
+        # `_DATA_GUARD` 是**模块级可变 dict**，而任何 `importlib.reload(conftest)`
+        # 都会把它重置成 `{"dir": None}`——那一刻起护栏就**不再拦任何东西**，
+        # 而 `pytest_unconfigure` 那句"文件数变少"也会因 `dir is None` 提前 return。
+        # 实测：`test_env_isolation` 里有一句裸 reload，于是全量跑中它之后的
+        # **上千条判据全在无护栏状态下跑**——INC-20261119-01 那个洞又开了。
+        #
+        # 所以这里**不再把 None 当"不设防"**：拿不到登记的目录就回落到**真实
+        # data 根**（本文件所在目录下的 `data`）。只有显式指向别处（假根，供判据
+        # 测试用）才走别的路径。护栏宁可多拦，不许因为状态被清空就默默放行。
         guard_dir = _DATA_GUARD.get("dir")
         if guard_dir is None:
-            return real_rmtree(path, *a, **kw)
+            guard_dir = _P(__file__).resolve().parent / "data"
         try:
             target = _P(str(path)).resolve()
         except OSError:      # A档：解析不了就交给原函数，它会自己报错

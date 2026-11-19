@@ -41,6 +41,8 @@ src/codec.ts:115-130`；两条缺一，宿主静默丢弃整块且不报错（�
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import sys
 
 # 决策词表（`hook-protocol/src/codec.ts:97-133` 只认这三个值）。
@@ -83,6 +85,19 @@ def emit_decision(hook_event_name: str, decision: str, reason: str) -> None:
         }
     }, ensure_ascii=True) + "\n")
     sys.stdout.flush()
+
+
+# **DATA 必须在本模块定义**（第九轮审查 🟠，2026-11-20）。
+#
+# 我把三份逐字相同的 `log_child_stderr` 搬进来时，只搬了函数体，没搬它依赖的
+# 模块级 `DATA`——于是这个函数**在 hook_io 里永远 NameError**，被内部的
+# `except Exception` 吞掉，只写一行 stderr。三个 hook 都 import 它，
+# 等于子进程 stderr 从此**静默丢失**。
+#
+# 口径与两个 hook 原来的写法一致：`FISH_DATA` 环境变量优先，否则本文件旁边的 `data`。
+# hook_io.py 在 `p0/` 下，所以 `HERE/"data"` 与 hook 自己的 `DATA` 是同一个目录。
+HERE = Path(__file__).resolve().parent
+DATA = Path(os.environ.get("FISH_DATA") or (HERE / "data"))
 
 
 def log_child_stderr(tag, text):

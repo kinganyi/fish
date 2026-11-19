@@ -44,7 +44,23 @@ class PollutingPredicateTest(unittest.TestCase):
     def setUp(self):
         import importlib
         import conftest
+        # **不许裸 reload**（第九轮审查 🔴，2026-11-20）：
+        # `conftest` 的模块级 dict `_DATA_GUARD` 存着"生产数据护栏指向哪个目录"，
+        # `importlib.reload` 会把它重置成 `{"dir": None, ...}` ——护栏从此**不再拦**
+        # `p0/data` 下的删除，而 `pytest_unconfigure` 里那句"文件数变少"的检查
+        # 也会因为 `dir is None` 提前 return。
+        #
+        # 实测后果：`pytest --collect-only` 的顺序里 `test_data_guard` 排在
+        # `test_env_isolation` **之前**，所以全量跑中这个类之后的**上千条判据
+        # 全部处于无护栏状态**——正是 INC-20261119-01 那个洞又开了。
+        #
+        # 这里要的只是 `_is_polluting`（纯函数，不依赖模块状态），
+        # 所以 reload 之前把状态存下来、之后原样放回去。
+        saved = {k: conftest._DATA_GUARD.get(k) for k in ("dir", "count")}
+        saved_snap = dict(conftest._SNAPSHOT)
         self.c = importlib.reload(conftest)
+        conftest._DATA_GUARD.update(saved)
+        conftest._SNAPSHOT.update(saved_snap)
 
     def test_session_id_envs_are_polluting(self):
         for name in ("DSH_SESSION_ID", "CODEBUDDY_SESSION_ID",
@@ -145,6 +161,44 @@ class ReproducibleUnderPollutionTest(unittest.TestCase):
         body = m.group(1)
         self.assertIn("_is_polluting", body, "configure 里没有环境隔离")
         self.assertIn("guarded_rmtree", body, "configure 里没有数据护栏")
+
+
+    def test_reload_does_not_disable_the_guard(self):
+        """**运行时判据**：reload 之后护栏必须还指向真目录（第九轮审查 🔴）。
+
+        源码字符串判据（`test_conftest_has_both_responsibilities`）抓不到这个——
+        它只看"源码里有没有 guarded_rmtree"，而 `_DATA_GUARD["dir"]` 被 reload
+        重置成 `None` 是**运行期**的事。
+
+        这条用的是 `setUp` 里 reload 过的那个模块，直接问它状态。
+        """
+        import conftest
+        if not (HERE / "data").is_dir():
+            # 公开包没有生产数据，`pytest_configure` 会提前返回，
+            # 那时 `dir is None` 是**正确**的——判不到，不是通过。
+            self.skipTest("这棵树没有 data/（公开包）——判不到，不是通过")
+        self.assertIsNotNone(
+            conftest._DATA_GUARD.get("dir"),
+            "reload 之后 `_DATA_GUARD['dir']` 变成 None——"
+            "**护栏从这一刻起不再拦 `p0/data` 下的删除**，"
+            "而全量跑里这个类之后的判据全都在无护栏状态下跑")
+        # 再确认护栏**真的**还在拦：拿假根当靶子，删它必须抛
+        import shutil as _sh
+        import tempfile as _tf
+        from pathlib import Path as _P
+        fake = _P(_tf.mkdtemp(prefix="fish-reload-guard-")) / "data"
+        (fake / "projects").mkdir(parents=True)
+        (fake / "projects" / "x.md").write_text("x", encoding="utf-8")
+        real = conftest._DATA_GUARD["dir"]
+        conftest._DATA_GUARD["dir"] = fake
+        try:
+            with self.assertRaises(AssertionError):
+                _sh.rmtree(fake / "projects")
+            self.assertTrue((fake / "projects" / "x.md").is_file(),
+                            "抛了错但文件还是被删了")
+        finally:
+            conftest._DATA_GUARD["dir"] = real
+            _sh.rmtree(fake.parent, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -169,5 +169,46 @@ class HookStdoutScanTest(unittest.TestCase):
                          "决策字段只能出现在 hook_io 里（否则又有一份协议实现）")
 
 
+    def test_hook_io_log_child_stderr_works(self):
+        """**回归判据**（第九轮审查 🟠）：`hook_io.log_child_stderr` 曾永远 NameError。
+
+        我把三份逐字相同的实现搬进 `hook_io.py` 时只搬了函数体，没搬它依赖的
+        模块级 `DATA`——于是这个函数一调用就 `NameError`，被内部
+        `except Exception` 吞掉，只写一行 stderr。三个 hook 都 import 它，
+        等于子进程 stderr **静默丢失**，而没有任何判据覆盖它。
+
+        这条走**行为**：真的调一次，看日志文件有没有写出来、内容对不对。
+        """
+        import json as _json
+        import tempfile as _tf
+        from pathlib import Path as _P
+        import hook_io
+        t = _P(_tf.mkdtemp(prefix="fish-hio-"))
+        self.addCleanup(__import__("shutil").rmtree, t, True)
+        old = hook_io.DATA
+        hook_io.DATA = t          # 指到临时目录，别写生产
+        try:
+            hook_io.log_child_stderr("probe", "第一行\n第二行")
+        finally:
+            hook_io.DATA = old
+        f = t / "_audit" / "hook-stderr.jsonl"
+        self.assertTrue(f.is_file(),
+                        "log_child_stderr 没写出日志——大概率又是 NameError 被吞了")
+        rec = _json.loads(f.read_text(encoding="utf-8").strip().split("\n")[-1])
+        self.assertEqual(rec.get("tag"), "probe")
+        self.assertIn("第二行", rec.get("stderr") or "",
+                      f"日志内容不对：{rec}")
+
+    def test_hook_io_has_the_data_it_needs(self):
+        """静态那一半：`hook_io` 里用到 `DATA` 就必须**自己定义**它。
+
+        只验行为不够——如果哪天有人把 `log_child_stderr` 改成不写盘，
+        行为判据会绿而"我到底有没有那个变量"没人问。
+        """
+        import hook_io
+        self.assertTrue(hasattr(hook_io, "DATA"),
+                        "hook_io 用了 DATA 却没定义它——被 except 吞掉就是静默失败")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
