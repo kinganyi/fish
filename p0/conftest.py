@@ -129,8 +129,13 @@ def pytest_configure(config):
     from pathlib import Path as _P
 
     data = _P(__file__).resolve().parent / "data"
+    # **会话开始时 `data/` 在不在**要记下来：没在的树（公开包）跑完必须**回到没在**。
+    # 这是"测试不许留痕"的那半——第八轮抓到过"只能绿一次"：
+    # 第一次跑干净树 0 failed，它自己造出 `data/`，第二次跑 `test_acl_hardening`
+    # 就撞上一个没做 ACL 加固的目录变红。**判据不该改变它下次的起跑线。**
+    _DATA_GUARD["existed_at_start"] = data.is_dir()
     if not data.is_dir():
-        return                     # 干净树（公开镜像）没有生产数据，不装
+        return                     # 干净树（公开镜像）没有生产数据，不装护栏
     _DATA_GUARD["dir"] = data
     _DATA_GUARD["count"] = _count_files(data)
 
@@ -182,6 +187,33 @@ def pytest_unconfigure(config):
     # ---- 二、生产数据变少就报错（INC-20261119-01）----
     d = _DATA_GUARD.get("dir")
     if d is None:
+        # 干净树：会话开始时没有 `data/`。跑完若**造出来了**，就删掉——
+        # "测试不许留痕"。不删的话下一次跑会撞上它（"只能绿一次"）。
+        import shutil as _sh2
+        from pathlib import Path as _P2
+        made = _P2(__file__).resolve().parent / "data"
+        if not _DATA_GUARD.get("existed_at_start") and made.is_dir():
+            real = getattr(_sh2.rmtree, "__wrapped__", None)
+            try:
+                _sh2.rmtree(made)
+            except AssertionError:
+                # 被我们自己的护栏拦住了——那也说明它**存在**，手动清
+                import os as _os2
+                for _r, _dd, _ff in _os2.walk(str(made), topdown=False):
+                    for _f in _ff:
+                        try:
+                            _os2.unlink(_os2.path.join(_r, _f))
+                        except OSError:      # A档：删不掉就算了，不挡收尾
+                            pass
+                    for _x in _dd:
+                        try:
+                            _os2.rmdir(_os2.path.join(_r, _x))
+                        except OSError:      # A档：同上
+                            pass
+                try:
+                    _os2.rmdir(str(made))
+                except OSError:      # A档：同上
+                    pass
         return
     now = _count_files(d)
     before = _DATA_GUARD["count"]

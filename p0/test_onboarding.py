@@ -145,6 +145,9 @@ class OnboardingJudgeTest(unittest.TestCase):
     def _run_cli(self, *args):
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
+        # 同 test_session_cwd：hook 脚本的 `DATA` 回落到 `p0/data`，
+        # 测试必须把它指到临时目录，否则在生产的 `p0/data` 留审计文件。
+        env["FISH_DATA"] = str(self.tmp / "fishdata")
         return subprocess.run(
             [PY, FISH_PY, "--root", str(self.data), *args],
             capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
@@ -154,6 +157,7 @@ class OnboardingJudgeTest(unittest.TestCase):
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
         env["FISH_ROOT"] = str(self.data if root is None else root)
+        env["FISH_DATA"] = str(self.tmp / "fishdata")
         r = subprocess.run([PY, HOOK_PY], input=json.dumps(payload),
                            capture_output=True, text=True, encoding="utf-8",
                            errors="replace", env=env)

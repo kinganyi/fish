@@ -63,6 +63,10 @@ class SessionCwdTest(unittest.TestCase):
     def _run_cli(self, *args):
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = "utf-8"
+        # **子进程里的 hook 脚本会往 `HERE/data` 写审计**（`HERE` 是 `p0/`），
+        # 所以测试必须声明自己不在生产环境，否则全量跑完在 `p0/data` 留下空壳，
+        # 让下一次跑 `test_acl_hardening` 假红（"只能绿一次"）。
+        env["FISH_DATA"] = str(self.tmp / "fishdata")
         # 关键：--root 传 **data 目录本身**（connect(root) 的 root 就是 data）
         return subprocess.run(
             [PY, FISH_PY, "--root", str(self.data), "session", "start", *args],
