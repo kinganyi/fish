@@ -6489,25 +6489,6 @@ _PUSH_KIND_RATIO = {"rule": 0.50, "association": 0.25,
 
 
 
-def _unset_or_zero(conn, key):
-    """读一个"0 = 关闭"语义的整数配置（0 不是错误值，是合法选择）。"""
-    return int(get_config(conn, key))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def _fold_presence_for_inject(pres, limit=3):
     """注入包看板段**按公民折叠**：同公民多会话只占一格（后附 `（+N 会话）`）。
 

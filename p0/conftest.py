@@ -76,18 +76,6 @@ def _is_polluting(name: str) -> bool:
     return any(name.startswith(p) for p in _PREFIXES) and "SESSION" in name.upper()
 
 
-def pytest_configure(config):
-    """会话开始：摘掉宿主遗留的会话类 env，记录以便还原。"""
-    for name in list(os.environ):
-        if _is_polluting(name):
-            _SNAPSHOT[name] = os.environ.pop(name)
-    if _SNAPSHOT:
-        # 打一行，让"这次跑在什么环境下"成为可读事实而不是猜测
-        print("\n[conftest] 已隔离宿主环境变量（否则读数不可复现）："
-              + ", ".join(sorted(_SNAPSHOT)))
-
-
-
 # ============================================================== 生产数据护栏
 # **2026-11-19 事故（INC-20261119-01）**：我在校验镜像测试产物时，对**生产树**的
 # `p0/data/` 执行了 `Remove-Item -Recurse -Force`。前几次因为 `index.sqlite` 被
@@ -114,8 +102,29 @@ def _count_files(path):
 
 
 def pytest_configure(config):
-    """会话开始：装护栏 + 记下 `data/` 的文件数。"""
-    import os as _os
+    """会话开始：**先**摘宿主会话 env，**再**装生产数据护栏。
+
+    ## 为什么是一个函数而不是两个（2026-11-19 的教训）
+
+    pytest 只认**最后定义**的那个 `pytest_configure`。我加数据护栏时新写了一个，
+    于是先前的环境隔离钩子被**静默顶掉**——没有报错、没有警告，
+    只有 `test_env_isolation` 那句「conftest 要报告隔离动作」变红才发现。
+
+    **这是"加功能顺手把旧功能顶掉"的典型。** 判据在这里起了它该起的作用：
+    它测的不是"新功能有没有加"，而是"旧承诺还在不在"。
+
+    顺序有意义：隔离必须在最前，否则后面的逻辑读到的是脏 env。
+    """
+    # ---- 一、环境隔离（F-P1-8）----
+    for name in list(os.environ):
+        if _is_polluting(name):
+            _SNAPSHOT[name] = os.environ.pop(name)
+    if _SNAPSHOT:
+        # 打一行，让"这次跑在什么环境下"成为可读事实而不是猜测
+        print("\n[conftest] 已隔离宿主环境变量（否则读数不可复现）："
+              + ", ".join(sorted(_SNAPSHOT)))
+
+    # ---- 二、生产数据护栏（INC-20261119-01）----
     import shutil as _sh
     from pathlib import Path as _P
 
@@ -153,7 +162,16 @@ def pytest_configure(config):
 
 
 def pytest_unconfigure(config):
-    """会话结束：`data/` 的文件数**不许变少**。"""
+    """会话结束：先还原 env，再检查 `data/` 文件数没有变少。
+
+    检查放最后：那时所有测试都跑完了，删没删才看得出来。
+    """
+    # ---- 一、还原环境变量（不污染调用方的 shell）----
+    for name, value in _SNAPSHOT.items():
+        os.environ.setdefault(name, value)
+    _SNAPSHOT.clear()
+
+    # ---- 二、生产数据变少就报错（INC-20261119-01）----
     d = _DATA_GUARD.get("dir")
     if d is None:
         return
@@ -164,9 +182,3 @@ def pytest_unconfigure(config):
         print(f"\n[conftest] **生产数据变少了**：{before} → {now}（少了 {before - now} 个文件）。"
               "\n　这可能是某个测试删了 `p0/data` 下的东西——2026-11-19 正是这样丢了"
               " 565 条记忆正文。\n　请立刻查是谁删的。", file=_sys.stderr)
-
-def pytest_unconfigure(config):
-    """会话结束：把摘掉的变量放回去（不污染调用方的 shell）。"""
-    for name, value in _SNAPSHOT.items():
-        os.environ.setdefault(name, value)
-    _SNAPSHOT.clear()

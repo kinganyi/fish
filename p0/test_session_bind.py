@@ -28,10 +28,18 @@ class SessionBindTest(unittest.TestCase):
         self.conn = fish.connect(self.tmp / "data")
         self.conn.executescript(fish.SCHEMA)
         fish.migrate(self.conn)
-        # 清掉宿主注入的 DSH_*：它们会让 session_key 变成不可猜的 dsh:...，测不到 self: 路径
+        # 清掉**所有**宿主会话 env：它们会让 session_key 变成 `dsh:…` / `claude:…`，
+        # 测不到 `self:` 那条路径。
+        #
+        # **2026-11-19 修（第八轮复核 + F-P1-8）**：原来只清 `DSH_*`，于是
+        # 在 Claude Code 之类的宿主里跑测试时，残留的 `CLAUDE_SESSION_ID`
+        # 会把 session_key 顶成 `claude:…`，S-1/S-5 假红。
+        # 现在**从代码自己的常量**取名单——以后加新宿主不用再改这里。
+        _clear = [env for _, env in fish.HOST_SESSION_ENVS] + list(
+            fish.SESSION_ALIAS_ENVS)
         self._env = mock.patch.dict(
             os.environ, {k: v for k, v in os.environ.items()
-                         if not k.startswith("DSH_")}, clear=True)
+                         if k not in _clear}, clear=True)
         self._env.start()
 
     def tearDown(self):

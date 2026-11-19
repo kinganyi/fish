@@ -129,12 +129,6 @@ PROFILE_REL_DIR = "profile"
 PROFILE_FILE = "画像.md"
 
 
-def profile_catalog():
-    """`{组名: {"permanence":…, "slots": (...)}}`，给 CLI 的报错/帮助用。"""
-    return {g: {"permanence": p, "slots": tuple(x[0] for x in s)}
-            for g, p, s in PROFILE_GROUPS}
-
-
 def profile_all_slot_keys():
     """全部合法 slot_key（`组.槽名`），有序。"""
     return [f"{g}.{name}" for g, _p, slots in PROFILE_GROUPS
@@ -202,11 +196,6 @@ def list_slots(conn, group=None):
             if k in got:
                 out.append(got[k])
     return out
-
-
-def filled_count(conn):
-    """已填槽位数（CLI `profile show` 与体检用）。"""
-    return conn.execute("SELECT COUNT(*) FROM profile_slots").fetchone()[0]
 
 
 # ============================================================== 写（**人通道**）
@@ -603,15 +592,6 @@ def sync_from_text(conn, text, *, actor=None, commit=True):
         changed.append(slot_key)
     return {"changed": changed, "cleared": cleared, "unchanged": unchanged,
             "parsed": len(parsed)}
-
-
-def file_digest(path):
-    """文件内容指纹（用于"人被改过没有"的判断）。不存在返回 None。"""
-    try:
-        b = Path(path).read_bytes()
-    except OSError:
-        return None
-    return hashlib.sha256(b).hexdigest()
 
 
 # ============================================================== 重建（D-10 纪律）

@@ -106,8 +106,3 @@ def sha256_of_file(path) -> str:
             h.update(chunk)
     return h.hexdigest()
 
-
-def sha256_of_text(text, *, encoding="utf-8") -> str:
-    """正文的哈希——写进事件里，让"正文被改过"变成可判定。"""
-    import hashlib
-    return hashlib.sha256(text.encode(encoding)).hexdigest()

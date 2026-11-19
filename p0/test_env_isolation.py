@@ -106,5 +106,46 @@ class ReproducibleUnderPollutionTest(unittest.TestCase):
                          f"干净 shell 下判据红了：\n{(r.stdout or '')[-600:]}")
 
 
+    def test_conftest_hooks_are_defined_once(self):
+        """**pytest 只认最后定义的那个钩子**——重复定义等于前一个被静默顶掉。
+
+        ## 这条判据的来历（2026-11-19）
+
+        我加"生产数据护栏"时往 conftest 里新写了一个 `pytest_configure`，
+        于是先前的**环境隔离钩子被顶掉了**：不报错、不警告，
+        只是 `CLAUDE_SESSION_ID` 不再被清，S-1/S-5 在宿主 shell 里假红。
+
+        抓到它的不是"新功能有没有加"，而是**"旧承诺还在不在"**那句断言。
+        所以这里补一条直指病根的：钩子函数**不许重名**。
+        """
+        import re as _re
+        src = (HERE / "conftest.py").read_text(encoding="utf-8")
+        for hook in ("pytest_configure", "pytest_unconfigure"):
+            n = len(_re.findall(rf"^def {hook}\(", src, _re.M))
+            self.assertEqual(
+                n, 1,
+                f"conftest 里 `{hook}` 定义了 {n} 次——pytest 只认最后一个，"
+                f"前面的会被**静默顶掉**（2026-11-19 环境隔离就是这么丢的）")
+
+    def test_conftest_has_both_responsibilities(self):
+        """合并之后的那个钩子必须**两件事都还在做**。
+
+        只验"没有重复"不够：把环境隔离整段删掉也不重复。
+        所以要同时验两件事各自的**实质**都还在。"""
+        src = (HERE / "conftest.py").read_text(encoding="utf-8")
+        self.assertIn("_is_polluting", src,
+                      "环境隔离的逻辑不在了")
+        self.assertIn("guarded_rmtree", src,
+                      "生产数据护栏的逻辑不在了")
+        # 两者必须在**同一个** configure 里
+        import re as _re
+        m = _re.search(r"^def pytest_configure\(config\):(.*?)(?=^def )", src,
+                       _re.M | _re.S)
+        self.assertIsNotNone(m, "找不到 pytest_configure")
+        body = m.group(1)
+        self.assertIn("_is_polluting", body, "configure 里没有环境隔离")
+        self.assertIn("guarded_rmtree", body, "configure 里没有数据护栏")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

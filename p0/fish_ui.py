@@ -126,19 +126,6 @@ def split_surface(path: str) -> list[str]:
     return [seg for seg in p.split("/") if seg]
 
 
-def surfaces_overlap(a: str, b: str) -> bool:
-    """**按路径分量**比较，不是字符串前缀。
-
-    `p0` 与 `p0/_audit` 算重叠；`src/a` 与 `src/ab` **不算**——
-    后者正是字符串前缀比较的经典误报（与 `fish_surface.py` 语义一致）。
-    """
-    pa, pb = split_surface(a), split_surface(b)
-    if not pa or not pb:
-        return False
-    n = min(len(pa), len(pb))
-    return pa[:n] == pb[:n]
-
-
 # ── 数据读取 ────────────────────────────────────────────────────────────
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     row = conn.execute(
