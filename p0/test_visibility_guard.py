@@ -608,6 +608,38 @@ class PrivateWriteGuardTest(unittest.TestCase):
                 "那是假判据。判不到，不是通过。")
         self.assertNotIn("ZZ推送私有ZZ", str(cands), "推送候选里出现了私有标题")
 
+
+    def test_mcp_tool_resolve_hides_private(self):
+        """**第五轮评审 ⚪**：口径不一致——正文拒绝了，标题却还给。
+
+        `read_body_path` 对私有正文返回 `forbidden`，而 MCP 的 `tool_resolve`
+        把标题/归属/正文路径原样返回给匿名调用方。
+
+        "拿到编号 ≠ 能读它"这条纪律在正文上立住了，在解析上没立住。
+        现在统一：无权限者拿到的话与"不存在"**完全一样**（不泄露存在性）。
+        """
+        import mcp_server as M
+        self._enforce(True)
+        code, _ = self._write(title="ZZ解析私有ZZ", visibility="private",
+                              owner="C-OWNER")
+        srv = M.FishServer(self.root)
+        try:
+            anon = srv.tool_resolve({"code": code}, M.IDENTITY_ANONYMOUS)
+            self.assertNotIn("ZZ解析私有ZZ", str(anon),
+                             "匿名调用方从 tool_resolve 拿到了私有标题")
+            other = M.Identity(citizen_id="C-OTHER", session_key="s",
+                               evidence=None, status="ok")
+            self.assertNotIn("ZZ解析私有ZZ",
+                             str(srv.tool_resolve({"code": code}, other)),
+                             "别人从 tool_resolve 拿到了私有标题")
+            owner = M.Identity(citizen_id="C-OWNER", session_key="s",
+                               evidence=None, status="ok")
+            self.assertIn("ZZ解析私有ZZ",
+                          str(srv.tool_resolve({"code": code}, owner)),
+                          "主人自己也解析不到（过滤过头）")
+        finally:
+            srv.conn.close()
+
 # ---------------------------------------------------------------- 读路径清单
 #
 # **F-P1-X（第三轮评审后的自查）**：我补私有过滤时，是按"我记得的那几条"补的。

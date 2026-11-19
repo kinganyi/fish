@@ -1165,9 +1165,20 @@ class FishServer:
 
     def tool_resolve(self, a, ident):
         code = a["code"]
+        # **口径统一（第五轮评审 ⚪）**：`read_body_path` 对私有正文已经拒绝，
+        # 而这里把标题/归属/路径原样返回给匿名调用方——同一件事两套口径。
+        # 拿到编号 ≠ 能读它：这里按 viewer 判一次，私有且不匹配就当作"不存在"。
         row = self.conn.execute(
             "SELECT code,title,project,mem_type,status,file_path,occurred_at,recorded_at,"
-            "attachments,session_actor FROM code_index WHERE code=?", (code,)).fetchone()
+            "attachments,session_actor,visibility,owner FROM code_index WHERE code=?",
+            (code,)).fetchone()
+        if (row is not None
+                and str(row[10] or "shared").strip().lower() == "private"
+                and fish._visibility_enforced(self.conn)
+                and str(row[11] or "") != str(ident.citizen_id or "")):
+            row = None   # 对无权限者与"不存在"同一句话，不泄露存在性
+        if row is not None:
+            row = row[:10]   # 裁掉判定用的两列，下游按 10 个解包
         renamed_note = ""
         if not row:
             # 2026-10-25 修（外部评估 `EVAL-261025-06`）：**先查改名映射再判不存在**。
