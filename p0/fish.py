@@ -11114,7 +11114,8 @@ def _short_citizen_id(citizen_id) -> str:
     return s if len(s) <= 12 else s[:12] + "…"
 
 
-def render_memory_index(conn, home_root, *, as_of, data_root) -> dict:
+def render_memory_index(conn, home_root, *, as_of, data_root,
+                         viewer_citizen_id=None) -> dict:
     """`20-记忆库/索引-YYYY-MM.md`：**只列索引，不写正文副本**（HOME-3）。
 
     ## 2026-10-26 R1 修订（主理人裁决；原因是实测文件 65 KB / 246 行）
@@ -11142,10 +11143,15 @@ def render_memory_index(conn, home_root, *, as_of, data_root) -> dict:
         "",
     ]
     try:
+        # 第五轮评审 🔴：这两个渲染器把 code + 标题 + 归属 + 正文路径
+        # **写成持久化明文**落进 `20-记忆库/`，每个会话读记忆时都会读到。
+        # 比 `fish://index`（一次性响应）严重——必须过滤。
+        _riv, _rip = _visibility_sql(conn, viewer_citizen_id)
         rows = conn.execute(
             "SELECT code, title, owner, status, file_path FROM code_index "
-            "WHERE substr(recorded_at,1,7)=? AND recorded_at<=? ORDER BY code",
-            (month, _as_of_utc_z(as_of))).fetchall()
+            "WHERE substr(recorded_at,1,7)=? AND recorded_at<=?" + _riv
+            + " ORDER BY code",
+            (month, _as_of_utc_z(as_of)) + tuple(_rip)).fetchall()
     except sqlite3.Error as exc:
         text = "\n".join(head + ["", _degraded_section("code_index", exc), ""])
         res = _layout_write(home, rel, text, data_root=data_root)
@@ -11205,7 +11211,8 @@ def render_memory_index(conn, home_root, *, as_of, data_root) -> dict:
     return _layout_write(home, rel, "\n".join(lines), data_root=data_root)
 
 
-def render_memory_recent(conn, home_root, *, as_of, limit=30, data_root) -> dict:
+def render_memory_recent(conn, home_root, *, as_of, limit=30, data_root,
+                          viewer_citizen_id=None) -> dict:
     """`20-记忆库/最近.md`：as-of 之前最近 N 条（默认 30），同样只列索引。"""
     home = Path(home_root)
     rel = f"{LAYOUT_MEMORY_DIR}/最近.md"
@@ -11217,10 +11224,12 @@ def render_memory_recent(conn, home_root, *, as_of, limit=30, data_root) -> dict
         "",
     ]
     try:
+        _rcv, _rcp = _visibility_sql(conn, viewer_citizen_id)   # 同上，必须过滤
         rows = conn.execute(
             "SELECT recorded_at, code, title, owner, file_path FROM code_index "
-            "WHERE recorded_at<=? ORDER BY recorded_at DESC, code DESC LIMIT ?",
-            (_as_of_utc_z(as_of), int(limit))).fetchall()
+            "WHERE recorded_at<=?" + _rcv
+            + " ORDER BY recorded_at DESC, code DESC LIMIT ?",
+            (_as_of_utc_z(as_of),) + tuple(_rcp) + (int(limit),)).fetchall()
     except sqlite3.Error as exc:
         text = "\n".join(head + ["", _degraded_section("code_index", exc), ""])
         res = _layout_write(home, rel, text, data_root=data_root)
@@ -11476,7 +11485,8 @@ def render_system_pages(conn, data_root, home_root, *, as_of, written) -> list:
 
 
 def render_layout(conn, data_root, *, as_of, home_root=None, only=None,
-                  force_readme=False, allow_external_home=False) -> dict:
+                  force_readme=False, allow_external_home=False,
+                  viewer_citizen_id=None) -> dict:
     """渲染整座门面（§4.6）。返回 §3.4 的形状 + `failed`（写盘失败逐条列，供 exit 1）。
 
     七类产物：五目录骨架、五个 README、记忆索引 / 最近、知识库登记投影、
@@ -11551,10 +11561,12 @@ def render_layout(conn, data_root, *, as_of, home_root=None, only=None,
     if want(f"{LAYOUT_MEMORY_DIR}/"):
         attempt(_memory_index_relpath(as_of),
                 lambda: render_memory_index(conn, home, as_of=as_of,
-                                            data_root=data_root))
+                                            data_root=data_root,
+                                            viewer_citizen_id=viewer_citizen_id))
         attempt(f"{LAYOUT_MEMORY_DIR}/最近.md",
                 lambda: render_memory_recent(conn, home, as_of=as_of,
-                                             data_root=data_root))
+                                             data_root=data_root,
+                                             viewer_citizen_id=viewer_citizen_id))
 
     # ④ 知识库登记投影
     if want("30-知识库/"):

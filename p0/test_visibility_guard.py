@@ -454,6 +454,42 @@ class PrivateWriteGuardTest(unittest.TestCase):
         self.assertIn("ZZ未闭合私有ZZ", str(own),
                       "主人自己也看不到自己的私有未闭合事项（过滤过头）")
 
+
+    def test_renderers_do_not_persist_private(self):
+        """**第五轮评审 🔴**：两个渲染器把私有标题**写成持久化明文**。
+
+        `render_memory_index` → `20-记忆库/索引-YYYY-MM.md`
+        `render_memory_recent` → `20-记忆库/最近.md`
+
+        这比 `fish://index`（一次性响应）严重得多：写进 `20-记忆库/` 的
+        明文会在**每个会话读记忆时**被读到，而且含 code + 标题 + 归属 + 正文路径。
+
+        我第 40 轮把这两个标成"渲染器，输入已过滤"——**理由与源码相反**：
+        它们自己跑 SQL，输入没经过任何过滤。
+        """
+        import datetime as _dt
+        self._enforce(True)
+        self._write(title="ZZ私有落盘ZZ", visibility="private", owner="C-OWNER")
+        home = Path(self._tmp) / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        now = _dt.datetime.now(_dt.timezone.utc)
+        for fn, kw in (("render_memory_recent", {"as_of": now, "data_root": self.root}),
+                       ("render_memory_index", {"as_of": now, "data_root": self.root})):
+            getattr(fish, fn)(self.conn, home, **kw)
+        leaked = [str(p) for p in home.rglob("*.md")
+                  if "ZZ私有落盘ZZ" in p.read_text(encoding="utf-8", errors="replace")]
+        self.assertEqual(leaked, [],
+                         f"私有标题被写进持久化文件：{leaked}")
+        # 主人视角必须仍然看得到（否则是过滤过头）
+        home2 = Path(self._tmp) / "home2"
+        home2.mkdir(parents=True, exist_ok=True)
+        for fn, kw in (("render_memory_recent", {"as_of": now, "data_root": self.root}),
+                       ("render_memory_index", {"as_of": now, "data_root": self.root})):
+            getattr(fish, fn)(self.conn, home2, viewer_citizen_id="C-OWNER", **kw)
+        kept = [str(p) for p in home2.rglob("*.md")
+                if "ZZ私有落盘ZZ" in p.read_text(encoding="utf-8", errors="replace")]
+        self.assertTrue(kept, "主人自己的私有条目也没写进去（过滤过头）")
+
 # ---------------------------------------------------------------- 读路径清单
 #
 # **F-P1-X（第三轮评审后的自查）**：我补私有过滤时，是按"我记得的那几条"补的。
@@ -511,6 +547,17 @@ BY_EXACT_CODE = {
 
 class VisibilityReadPathInventoryTest(unittest.TestCase):
     """**别靠记忆数读路径**——让判据替你数。
+
+    ## 这个方法能做什么、不能做什么（第 40 轮实测）
+
+    能：把"新加一个读路径忘了过滤"变成一条会红的判据。
+    不能：**可靠地找出全部读路径**。回溯"这行 SELECT 属于哪个 def"是启发式，
+    第 40 轮扩到全库之后它先后误报了三类——模块级语句被归给上一个函数、
+    缩进的方法（`    def read_resource`）被漏掉、`kb_index` 的查询被当成
+    `code_index`。每一次都是判据红了我才发现归属错了。
+
+    所以这条判据的真实价值是**"名单里必须有决定"**，不是"名单完整"。
+    完整要靠人看，而这里只保证：**没做决定的地方会响**。
 
     这条判据不证明过滤逻辑对（那由其它 15 条行为判据负责），
     它证明的是：**每一个查标题的地方都被显式分过类**。
