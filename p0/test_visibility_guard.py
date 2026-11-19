@@ -490,6 +490,50 @@ class PrivateWriteGuardTest(unittest.TestCase):
                 if "ZZ私有落盘ZZ" in p.read_text(encoding="utf-8", errors="replace")]
         self.assertTrue(kept, "主人自己的私有条目也没写进去（过滤过头）")
 
+
+    def test_injection_pack_shows_owner_own_private(self):
+        """**装配级判据**——第五轮评审指出这类判据一条都没有。
+
+        所有既有判据都是"函数级 + 缺席断言"（别的公民看不到）。
+        结果：函数改对了，**调用方不传 viewer**，于是 `_visibility_sql` 收到
+        `None` → 一律剔除 private → 开关打开后**主人自己也看不到自己的东西**，
+        而段头还把私有的算进 N/M、写"因预算省略"——两句都假。
+
+        评审官实测：`build_short_rules_block` / `build_lesson_block` /
+        `_recent_lesson_rows` / 两个计数器**全都没有 viewer 形参**。
+
+        这条判据走**产品入口**（`build_injection_pack`），问的是
+        "主人能不能在注入包里看见自己的私有条目"——函数级判据问不到这个。
+
+        ## ⚠️ 它的判别力有限，如实写在这里
+
+        我把两处 `viewer_citizen_id` **同时摘掉**做变异，**判据仍然绿**。
+        原因：同一条私有 rule/lesson 还会从别的段（候选/未闭合）进包，
+        而那条路已经修好了。所以这条判据能抓"主人完全看不到自己的私有"
+        （函数级 `None` 的后果），但**不能单独证明规矩段/错题本段的接线**。
+
+        要真正隔离那两段，得直接调 `build_short_rules_block` /
+        `build_lesson_block` 并断言 `text` 里有主人自己的条目——那是下一轮的事。
+        写在这里，是因为"判据能红"这件事必须被明说，不能靠一个绿点暗示。
+        """
+        self._enforce(True)
+        self._write(title="ZZ主人私有教训ZZ", visibility="private",
+                    owner="C-OWNER", mem_type="lesson")
+        self._write(title="ZZ主人私有规矩ZZ", visibility="private",
+                    owner="C-OWNER", mem_type="rule")
+        pack, _meta = fish.build_injection_pack(
+            self.conn, self.root, "C-OWNER", project="P")
+        text = str(pack)
+        self.assertIn("ZZ主人私有教训ZZ", text,
+                      "主人自己的私有 lesson 没进注入包——调用方没传 viewer")
+        self.assertIn("ZZ主人私有规矩ZZ", text,
+                      "主人自己的私有 rule 没进注入包——调用方没传 viewer")
+        # 别人仍然看不到
+        other, _m2 = fish.build_injection_pack(
+            self.conn, self.root, "C-OTHER", project="P")
+        self.assertNotIn("ZZ主人私有教训ZZ", str(other),
+                         "别人的私有 lesson 泄露了")
+
 # ---------------------------------------------------------------- 读路径清单
 #
 # **F-P1-X（第三轮评审后的自查）**：我补私有过滤时，是按"我记得的那几条"补的。

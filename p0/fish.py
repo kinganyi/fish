@@ -1216,8 +1216,11 @@ def record_memory(conn, root: Path, *, project: str, title: str, body: str = "",
     # `hints=None`（不传）= 完全零开销，旧调用一个字都不变；传 `[]` 才计算。
     if hints is not None:
         try:
+            # 第五轮评审 🔴：不传 viewer 时等于"过滤掉所有 private"，
+            # 于是主人自己写第 2 条同名私有记忆时查重**恒为空**（实测 hints=[]）。
             hints.extend(find_similar_memories(
-                conn, title=title, body=body or "", exclude={code}))
+                conn, title=title, body=body or "", exclude={code},
+                viewer_citizen_id=(owner or None)))
         except Exception as exc:      # 查重是提示：不阻塞写入，但失败要出声（静默清零）
             warn_derived(conn, "find_similar_memories", exc)
     # 2026-11-11（R1-4 提问节律）：每成功写一篇**记忆文档**就推进一格游标。
@@ -6099,7 +6102,8 @@ def _clamp_rules_per_source(value) -> int:
 
 
 def build_short_rules_block(conn, *, project=None, per_source=None,
-                            max_tokens=RULES_BLOCK_MAX_TOKENS) -> dict:
+                            max_tokens=RULES_BLOCK_MAX_TOKENS,
+                            viewer_citizen_id=None) -> dict:
     """段③「规矩」：本项目规矩 + 全局规矩，各取最近 N 条。
 
     返回 `{"text", "codes", "trimmed", "total", "omitted"}`：
@@ -6128,11 +6132,14 @@ def build_short_rules_block(conn, *, project=None, per_source=None,
     per_source = _clamp_rules_per_source(
         get_config(conn, "inject.rules_per_source") if per_source is None else per_source)
     proj_key = (project or "").strip() or None
-    proj_items = _rule_rows(conn, project=proj_key, limit=per_source) if proj_key else []
+    proj_items = _rule_rows(conn, project=proj_key, limit=per_source,
+                                viewer_citizen_id=viewer_citizen_id) if proj_key else []
     taken = {code for code, _ in proj_items}
-    global_items = _rule_rows(conn, project=None, limit=per_source, exclude=taken)
-    total = (count_rule_rows(conn, project=proj_key) if proj_key else 0) \
-        + count_rule_rows(conn, project=None)
+    global_items = _rule_rows(conn, project=None, limit=per_source, exclude=taken,
+                                  viewer_citizen_id=viewer_citizen_id)
+    total = (count_rule_rows(conn, project=proj_key,
+                             viewer_citizen_id=viewer_citizen_id) if proj_key else 0) \
+        + count_rule_rows(conn, project=None, viewer_citizen_id=viewer_citizen_id)
 
     def render(proj_list, global_list):
         lines, codes = [], []
@@ -6352,7 +6359,8 @@ def build_attention_block(conn, root, *, citizen_id=None, session_actor=None,
 
 
 def build_lesson_block(conn, *, project=None, per_type=ATTENTION_PER_TYPE_LIMIT,
-                       max_tokens=ATTENTION_BLOCK_MAX_TOKENS, exclude=()) -> dict:
+                       max_tokens=ATTENTION_BLOCK_MAX_TOKENS, exclude=(),
+                       viewer_citizen_id=None) -> dict:
     """段⑤「错题本」：窗口内的 lesson，**同项目优先**，不足用跨项目补齐。
 
     为什么从「该注意什么」里独立出来（2026-10-25 · T9）：
@@ -6379,7 +6387,8 @@ def build_lesson_block(conn, *, project=None, per_type=ATTENTION_PER_TYPE_LIMIT,
     # 2026-10-26（评审 🟡5）：段头声明「显示 N/M 条」。M 走 `count_lesson_rows`
     # （与取数同一谓词，扣掉已在别段印过的编码）——固定 2 条的段不声明，
     # 读者就会把"只列 2 条"当成"库里只有 2 条坑"。
-    lesson_total = count_lesson_rows(conn, lesson_since, exclude=set(exclude or ()))
+    lesson_total = count_lesson_rows(conn, lesson_since, exclude=set(exclude or ()),
+                                     viewer_citizen_id=viewer_citizen_id)
 
     def render():
         if not items:
@@ -7269,7 +7278,10 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
     # ---- ③ 规矩 / ④ 该注意什么 / ⑤ 错题本 ----
     # 三段都可能为空——**空就不出现**，不写"暂无规矩"这种噪音（噪音会训练 AI 跳过这一段）。
     # session_actor 的兜底顺序与 S1 一致：显式入参 > 自报 env > 公民名（由 S1 解析）。
-    rules = build_short_rules_block(conn, project=proj_name)
+    # 第五轮评审 🔴：**装配层必须传 viewer**，否则开关打开后
+    # 主人自己的私有规矩/教训在注入包里看不见，而段头还把私有的算进 N/M。
+    rules = build_short_rules_block(conn, project=proj_name,
+                                    viewer_citizen_id=citizen_id)
     attention = build_attention_block(
         conn, root, citizen_id=citizen_id, project=proj_name,
         session_actor=(session_actor or "").strip() or env_session_alias())
@@ -7286,7 +7298,8 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
     # 结论：这个重复**保留**（约 60 token），因为去掉它要动"同项目优先"或"错题本完整性"，
     # 而那两条比 60 token 硬得多。如实记在这里，不留在代码里当"看起来修好了"。
     lesson = build_lesson_block(conn, project=proj_name,
-                                exclude=set(attention["codes"]))
+                                exclude=set(attention["codes"]),
+                                viewer_citizen_id=citizen_id)
     # 段⑥ 候选（2026-10-25 · P1-a，`16` §5）：四类候选 + 打分 + 防静默。
     # exclude 传 ③④⑤ 已印的编码——一条记忆只在一段里出现（与上面同一纪律）。
     # 为什么排在这三段之后：候选要"补它们没覆盖的"，不是重复它们。

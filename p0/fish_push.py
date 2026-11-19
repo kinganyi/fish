@@ -620,7 +620,10 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
     # ── A 规则（50%）：未闭合事项。key=True → 不受静默降权 ──────────────
     since = (now_dt - datetime.timedelta(days=ATTENTION_OPEN_WINDOW_DAYS)).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
-    for code, title in _open_loop_rows(conn, since, 3, exclude=skip):
+    # 第五轮评审 🔴：同一个函数里，上面用 citizen_id 判可见性、这里却不传
+    # viewer——同函数两套口径。统一。
+    for code, title in _open_loop_rows(conn, since, 3, exclude=skip,
+                                       viewer_citizen_id=citizen_id):
         out.append(_cand(conn, code, "rule", title=title, current_project=project,
                          seen=seen(code), key=True, now=now_dt,
                          reason="未闭合：开了头还没有结尾"))

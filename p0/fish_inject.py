@@ -68,7 +68,7 @@ def _rule_rows(conn, *, project=None, limit=RULES_PER_SOURCE_LIMIT, exclude=(),
     return out
 
 
-def count_rule_rows(conn, *, project=None) -> int:
+def count_rule_rows(conn, *, project=None, viewer_citizen_id=None) -> int:
     """某一栏**总共有多少条**规矩（不受 limit 限制）——段头「显示 N/M 条」的 M。
 
     为什么要单独一条 count：`_rule_rows` 已经按 limit 截过，从返回值里数不出
@@ -82,15 +82,19 @@ def count_rule_rows(conn, *, project=None) -> int:
         clause, params = "project IS NULL", []
     else:
         clause, params = "project = ?", [key]
+    # 第五轮评审 🔴：段头 N/M 的 M 也必须过滤，否则它把私有的算进总数、
+    # 再说"因预算省略"——那两句都是假的。
+    _crsql, _crparams = _visibility_sql(conn, viewer_citizen_id)
     try:
         return int(conn.execute(
             "SELECT COUNT(*) FROM code_index WHERE mem_type='rule' "
-            "AND status='active' AND dormant=0 AND " + clause, params).fetchone()[0])
+            "AND status='active' AND dormant=0 AND " + clause + _crsql,
+            list(params) + _crparams).fetchone()[0])
     except sqlite3.Error:
         return 0
 
 
-def count_lesson_rows(conn, since_z, exclude=()):
+def count_lesson_rows(conn, since_z, exclude=(), viewer_citizen_id=None):
     """窗口内 lesson 的**总条数**（不受 `per_type` 限制）——段⑤ 段头 N/M 的 M。
 
     谓词与 `_lesson_rows(same_project=None)` 一致（lesson / active / 未休眠 / 窗口内），
@@ -114,6 +118,10 @@ def count_lesson_rows(conn, since_z, exclude=()):
     if extra:
         sql += " AND code NOT IN (" + ",".join("?" * len(extra)) + ")"
         params += extra
+    # 第五轮评审 🔴：M 也要过滤（同 count_rule_rows）。
+    _clsql, _clparams = _visibility_sql(conn, viewer_citizen_id)
+    sql += _clsql
+    params += _clparams
     try:
         return int(conn.execute(sql, params).fetchone()[0])
     except sqlite3.Error:
@@ -173,7 +181,8 @@ def _lesson_rows(conn, since_z, limit, exclude=(), same_project=None,
     return out
 
 
-def _recent_lesson_rows(conn, since_z, limit, exclude=(), project=None):
+def _recent_lesson_rows(conn, since_z, limit, exclude=(), project=None,
+                        viewer_citizen_id=None):
     """B 类「最近的坑」：窗口内的 lesson，**同项目优先**，不足再用跨项目补齐。
 
     排序键 = (是否同项目 DESC, recorded_at DESC)（2026-10-25 改）。
@@ -189,8 +198,10 @@ def _recent_lesson_rows(conn, since_z, limit, exclude=(), project=None):
     limit = int(limit)
     exclude = set(exclude)
     key = (project or "").strip() or None
-    out = _lesson_rows(conn, since_z, limit, exclude, same_project=key) if key else []
+    out = _lesson_rows(conn, since_z, limit, exclude, same_project=key,
+                             viewer_citizen_id=viewer_citizen_id) if key else []
     if len(out) < limit:
         taken = exclude | {code for code, _ in out}
-        out += _lesson_rows(conn, since_z, limit - len(out), taken, same_project=None)
+        out += _lesson_rows(conn, since_z, limit - len(out), taken, same_project=None,
+                             viewer_citizen_id=viewer_citizen_id)
     return out
