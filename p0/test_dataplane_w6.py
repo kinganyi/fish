@@ -176,5 +176,30 @@ class InvariantGrepTest(unittest.TestCase):
         self.assertIn("def set_compressor", src, "注入点没了")
 
 
+    def test_deliver_seam_is_declared(self):
+        """**F-P2-4**：`deliver` 没有生产调用方——这件事必须**写在代码里**。
+
+        审查方给的选项是"删除或接真实调用+handle 判据"。核实后：
+        **8 处测试、0 处生产调用**。删掉会删掉已验证的代码，接上要先有压缩器。
+
+        所以取中间那条：**登记例外**。项目的 I3 原则不许空接缝——
+        例外可以存在，但必须是**被登记的**例外，不能是"没人注意到它空着"。
+
+        这条判据守的是"登记"本身：docstring 里必须写着它没有生产调用方，
+        以及让它活起来需要什么。**判据不管它有没有被调用**（那是产品决定），
+        只管**读代码的人会不会被误导**。
+        """
+        import fish_dataplane as D
+        doc = D.deliver.__doc__ or ""
+        self.assertIn("没有生产调用方", doc,
+                      "deliver 的 docstring 没写明它没有生产调用方——"
+                      "读代码的人会以为它在用")
+        self.assertIn("set_compressor", doc,
+                      "没写让它活起来需要什么（压缩器注入）")
+        # 原文被换行与加粗拆开了，查短的片段即可（长串在 docstring 里会跨行）
+        self.assertIn("0 处生产调用", doc,
+                      "没给出核实后的数量——那句话是这条登记的凭据")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
