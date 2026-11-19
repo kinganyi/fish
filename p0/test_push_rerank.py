@@ -1247,7 +1247,16 @@ class RealCorpusTest(RerankCase):
         for suffix in ("", "-wal", "-shm"):
             path = Path(str(src) + suffix)
             if path.exists():
-                shutil.copy2(path, self.root / (src.name + suffix))
+                try:
+                    shutil.copy2(path, self.root / (src.name + suffix))
+                except (PermissionError, OSError) as exc:
+                    # **判不到，不是失败**：`corpus.sqlite` 正被一个 ingest 占着，
+                    # 拷不动。那是"文件在用"，不是"代码坏了"。
+                    # 2026-11-20 补：我上一版让它在那种情况下硬红，
+                    # 而当时正好有后台 ingest 在跑——一条只因"别人在用文件"
+                    # 就变红的判据，会训练人忽略它。
+                    self.skipTest(f"corpus.sqlite 被占用，拷不动（{type(exc).__name__}）"
+                                  "——判不到，不是通过")
         corpus_conn = sqlite3.connect(
             "file:%s?mode=ro" % (self.root / src.name).as_posix(), uri=True)
         try:
