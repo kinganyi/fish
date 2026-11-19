@@ -44,20 +44,17 @@ import fish_common  # noqa: E402  —— _open_loop_rows 在链底
 
 
 def _all_domain_src():
-    """`fish.py` + 拆分出去的模块的源码拼接。
+    """**全仓**源码拼接：所有非 test / 非 mutation 的顶层 `.py`。
 
-    第四轮评审 🟠-4 指出清单只扫 `fish.py`——F-P1-10 把 `_lesson_rows` /
-    `_rule_rows` 搬到 `fish_inject.py` 之后，这条范围问题被暴露出来了。
+    第五轮评审指出：原来只拼 8 个模块却叫"全库"，而外面还有 7 个 title 查询。
+    现在真的全仓——多找出 8 个函数（34 / 14 个文件）。
     """
     out = []
-    for name in ("fish.py", "fish_inject.py", "fish_push.py", "fish_common.py",
-                 "mcp_server.py", "fish_kb_index.py", "fish_corpus_store.py",
-                 "fish_maintenance.py"):
-        p = HERE / name
-        if p.is_file():
-            out.append(p.read_text(encoding="utf-8"))
+    for p in sorted(HERE.glob("*.py")):
+        if p.name.startswith(("test_", "mutation_", "_")):
+            continue
+        out.append(p.read_text(encoding="utf-8"))
     return "\n".join(out)
-
 class PrivateWriteGuardTest(unittest.TestCase):
 
     def setUp(self):
@@ -656,13 +653,23 @@ BY_EXACT_CODE = {
     "reindex_fts":           "FTS 索引重建：同上，系统级",
     "get_segment":           "语料段：走 F-P0-4 的 citizen 隔离（另一套机制）",
     "read_resource":         "_visibility_sql 无 viewer（mcp_server:2311，第 38 轮修）",
-    "tool_resolve":          "按精确 code 取完整记录——**待复核**：MCP 工具面无身份时取不取",
-    "seen":                  "实际是 build_push_candidates 内联的查标题（已加判定，见附录）",
     # 下面两个是**扫描的假阳性**：归属回溯到了错的函数（`add` / `read_jsonl`
     # 是 mcp_server 里的 JSONL 读写辅助，体内没有 code_index 查询）。
     # 如实登记它们而不是改判据让它们消失——判据的"找得全"本来就不保证。
-    "add":                   "★ 扫描假阳性（JSONL 辅助，无 code_index 查询）",
-    "read_jsonl":            "★ 扫描假阳性（同上）",
+    # ---- 第 45 轮 AST 扫描新找出的（正则版完全看不见）----
+    "rebuild_projection":    "重建投影：管理员身份跑，系统级，无 viewer 概念",
+    "stage5_verify":         "治理校验（gov_apply）：本机管理员跑，读全量做核对",
+    "load_rows":             "命名预览（preview_naming）：本机管理员工具",
+    # `main` 是五个独立脚本的入口（gen_index_md / gov_plan / gov_migrate_late /
+    # merge_cdql / rename_bodies_to_slug）。**名单按函数名索引，同名会互相覆盖**——
+    # 这是这条判据的已知局限（AST 扫得出，但表装不下重名）。
+    # gen_index_md 那条第 43 轮已加过滤（默认剔除 private）；其余是本机管理员工具。
+    "main":                  "脚本入口（同名 5 处；gen_index_md 已过滤，其余本机管理员）",
+    # AST 找出来的真函数（正则版把它归到了错的名字上）。
+    # **`tool_resolve` 目前返回私有标题给匿名调用方，而 `read_body_path`
+    # 对正文已经拒绝——口径不一致，待修。**
+    "tool_resolve":          "按精确 code 取完整记录（MCP 工具面，⚪ 待复核）",
+    "read_resource":         "_visibility_sql 无 viewer（mcp_server，第 38 轮修）",
 }
 
 
@@ -684,34 +691,45 @@ class VisibilityReadPathInventoryTest(unittest.TestCase):
     它证明的是：**每一个查标题的地方都被显式分过类**。
     """
 
+    @staticmethod
+    def _modules():
+        return sorted(p.name for p in HERE.glob("*.py")
+                      if not p.name.startswith(("test_", "mutation_", "_")))
+
     def _querying_title_funcs(self):
+        """**AST 版**：谁在查 `code_index` 的 `title`。
+
+        第五轮评审证明正则回溯不可靠——它把模块级语句归给上一个函数、
+        认不出缩进的方法、把 `kb_index` 当成 `code_index`，于是 `add` /
+        `read_jsonl` / `seen` 三个嵌套辅助成了"假阳性"白占名额，
+        而 `build_push_candidates` 反过来**永久不可见**。
+
+        AST 不用猜归属：`ast.walk` 直接给出每个函数（含方法、含嵌套）的
+        字符串常量集合，再在**同一段 SQL 文本里**同时找 `code_index` 与
+        `title`。零假阳性，且比正则多找出 8 个（34 个函数 / 14 文件）。
+        """
+        import ast as _ast
         import re as _re
-        src = _all_domain_src()
-        lines = src.split("\n")
         out = set()
-        for i, ln in enumerate(lines):
-            if not _re.search(r"SELECT .*\btitle\b", ln):
+        for name in self._modules():
+            p = HERE / name
+            if not p.is_file():
                 continue
-            # **只认 `code_index`**：`visibility` 列只在那张表上。
-            # 不设这条时 `kb_index`（知识库，另有自己的隔离）也会被算进来，
-            # `search_kb` 就是这么被误报的。语句可能跨行，所以看后面 8 行。
-            if not _re.search(r"code_index", "\n".join(lines[i:i + 8])):
+            try:
+                tree = _ast.parse(p.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError):
                 continue
-            for k in range(i, -1, -1):
-                # **不许跨过模块级语句**：顶格且不是 def/class/@/注释/空的行
-                # 说明函数已经结束了。不设这条边界时，模块级或别的函数里的
-                # SELECT 会被归到上一个 def 头上——`_inject_sections_arg` 与
-                # `search_kb` 就是这么被误报的（实测它们体内没有这条 SQL）。
-                if (lines[k] and not lines[k][0].isspace()
-                        and not _re.match(r"^(def |class |@|#)", lines[k])):
-                    break
-                # **要认缩进的 `def`**：`mcp_server.py` 里读路径是方法
-                # （`    def read_resource`），只认顶格 def 会把它们全归到
-                # 上一个顶层函数头上——`_inject_sections_arg` 就是这么被误报的。
-                m = _re.match(r"^\s*def ([A-Za-z_][A-Za-z0-9_]*)", lines[k])
-                if m:
-                    out.add(m.group(1))
-                    break
+            for node in _ast.walk(tree):
+                if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    continue
+                blob = "\n".join(
+                    n.value for n in _ast.walk(node)
+                    if isinstance(n, _ast.Constant) and isinstance(n.value, str))
+                for m in _re.finditer(r"SELECT[^;]*", blob, _re.I | _re.S):
+                    seg = m.group(0)
+                    if _re.search(r"\bcode_index\b", seg) and _re.search(r"\btitle\b", seg):
+                        out.add(node.name)
+                        break
         return out
 
     def test_every_title_query_func_is_classified(self):
