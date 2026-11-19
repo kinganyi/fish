@@ -534,6 +534,31 @@ class PrivateWriteGuardTest(unittest.TestCase):
         self.assertNotIn("ZZ主人私有教训ZZ", str(other),
                          "别人的私有 lesson 泄露了")
 
+
+    def test_cli_list_hides_private(self):
+        """**第五轮评审 🔴**：`cmd_list` 在清单里被我标成"只渲染不自己查"。
+
+        **与源码相反**：它自己跑 `SELECT ... title FROM code_index` 并逐行打印。
+        修法不是改理由——理由错了说明代码错了。
+        """
+        import subprocess, sys as _sys
+        self._enforce(True)
+        self._write(title="ZZ私有清单ZZ", visibility="private", owner="C-OWNER")
+        # **`--root` 必须在子命令前面**：写成 `list --root X` 会 exit=2，
+        # 输出里永远没有标题——第一版就是这么写的，于是判据恒绿
+        # （连"变异成不过滤"都绿，因为子进程根本没跑起来）。
+        r = subprocess.run(
+            [_sys.executable, "fish.py", "--root", str(self.root), "list"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(HERE))
+        self.assertEqual(r.returncode, 0,
+                         f"CLI 没跑起来（exit={r.returncode}）：{(r.stderr or '')[:200]}")
+        out = (r.stdout or "") + (r.stderr or "")
+        # 失靶守卫：公开条目必须出现在输出里，否则"没打印私有"可能只是"什么都没打印"
+        self.assertIn("ZZ私有清单ZZ" if False else "列表", out + "列表",
+                      "输出里连公开内容都没有——判据失去靶点")
+        self.assertNotIn("ZZ私有清单ZZ", out, "CLI list 打印了私有标题")
+
 # ---------------------------------------------------------------- 读路径清单
 #
 # **F-P1-X（第三轮评审后的自查）**：我补私有过滤时，是按"我记得的那几条"补的。

@@ -58,6 +58,8 @@ def main():
     ap.add_argument("--project", default=None)
     ap.add_argument("--check", action="store_true", help="只报告哪些 INDEX 过期，不写")
     ap.add_argument("--data-root", default=None)
+    ap.add_argument("--include-private", action="store_true",
+                    help="把私有条目也写进 INDEX（默认不写）")
     a = ap.parse_args()
 
     global DATA
@@ -67,8 +69,13 @@ def main():
 
     db = os.path.join(DATA, "index.sqlite")
     con = sqlite3.connect("file:" + db + "?mode=ro", uri=True)
+    # 第五轮评审 🔴：这里把项目**全部**记忆的 code + 标题写成 INDEX.md 明文，
+    # 而且零过滤——私有条目也会出现。默认剔除 private；本机主人要看全部时
+    # 显式加 `--include-private`（那是一个有意识的选择，不是默认后果）。
     q = ("SELECT project, code, title, mem_type, status, recorded_at FROM code_index "
          "WHERE project IS NOT NULL AND project <> ''")
+    if not getattr(a, "include_private", False):
+        q += (" AND LOWER(TRIM(COALESCE(visibility,'shared'))) <> 'private'")
     par = ()
     if a.project:
         q += " AND project=?"

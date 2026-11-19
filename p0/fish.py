@@ -5668,8 +5668,13 @@ def cmd_list(args):
     conn = connect(Path(args.root))
     conn.executescript(SCHEMA)
     migrate(conn)
+    # 第五轮评审 🔴：清单里我写"只是渲染 list_memories 的结果，不自己查"——
+    # **与源码相反**：这里自己跑 SQL 并把每一行的标题打印出来。
+    # 修法不是改理由，是让它过滤。理由错了说明代码错了。
+    _clv, _clp = _visibility_sql(conn, token_actor_citizen_id(conn))
     rows = conn.execute(
-        "SELECT code,mem_type,status,dormant,title FROM code_index ORDER BY code").fetchall()
+        "SELECT code,mem_type,status,dormant,title FROM code_index WHERE 1=1"
+        + _clv + " ORDER BY code", _clp).fetchall()
     print(f"共 {len(rows)} 条")
     for code, mt, st, dm, title in rows:
         print(f"{code}\t{mt}\t{st}\t{'休眠' if dm else '活跃'}\t{title}")
@@ -8486,10 +8491,13 @@ def cmd_report(args):
     by_session_mem = conn.execute(
         "SELECT COALESCE(session_actor,'(未标注)'), COUNT(*) FROM code_index "
         "WHERE recorded_at >= ? GROUP BY 1 ORDER BY 2 DESC", (since,)).fetchall()
+    _rpv, _rpp = _visibility_sql(conn, token_actor_citizen_id(conn))  # 第五轮评审 🔴
     hot = conn.execute("SELECT code,title,access_count FROM code_index "
-                       "WHERE access_count>0 ORDER BY access_count DESC LIMIT 5").fetchall()
+                       "WHERE access_count>0" + _rpv
+                       + " ORDER BY access_count DESC LIMIT 5", _rpp).fetchall()
     feedback = conn.execute("SELECT code,title FROM code_index "
-                            "WHERE tags LIKE '%fish-feedback%' ORDER BY recorded_at DESC").fetchall()
+                            "WHERE tags LIKE '%fish-feedback%'" + _rpv
+                            + " ORDER BY recorded_at DESC", _rpp).fetchall()
     citizens = conn.execute("SELECT display_name,kind,status FROM citizens "
                             "WHERE status='active' ORDER BY created_at").fetchall()
 
