@@ -6386,8 +6386,12 @@ def build_lesson_block(conn, *, project=None, per_type=ATTENTION_PER_TYPE_LIMIT,
     now_dt = datetime.datetime.now(datetime.timezone.utc)
     lesson_since = (now_dt - datetime.timedelta(days=ATTENTION_LESSON_WINDOW_DAYS)).strftime(
         "%Y-%m-%dT%H:%M:%SZ")
+    # **第六轮评审 🔴**：第 42 轮把 viewer 接进了 rules 与两个计数器，
+    # **漏了这一行**——于是段头把主人的私有 lesson 算进 M、却不列出，
+    # 也不说原因。三行之外 `count_lesson_rows` 传了 viewer，同一函数两套口径。
     rows = _recent_lesson_rows(conn, lesson_since, per_type,
-                               exclude=set(exclude or ()), project=project)
+                               exclude=set(exclude or ()), project=project,
+                               viewer_citizen_id=viewer_citizen_id)
     items = [(code, title) for code, title in rows if code]
     # 2026-10-26（评审 🟡5）：段头声明「显示 N/M 条」。M 走 `count_lesson_rows`
     # （与取数同一谓词，扣掉已在别段印过的编码）——固定 2 条的段不声明，

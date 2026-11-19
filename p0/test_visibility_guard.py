@@ -640,6 +640,30 @@ class PrivateWriteGuardTest(unittest.TestCase):
         finally:
             srv.conn.close()
 
+
+    def test_lesson_block_via_block_builder(self):
+        """**直调段构造器**——第六轮评审给的办法。
+
+        既有的 `test_injection_pack_shows_owner_own_private` 摘掉 viewer 仍绿，
+        因为同一条私有 lesson 从别的段（候选）进包。**它证明不了错题本段的接线。**
+
+        这条不经过 `build_injection_pack`，直接调 `build_lesson_block`：
+        主人必须看到自己的私有 lesson，别人必须看不到。
+        """
+        self._enforce(True)
+        self._write(title="公开的错题甲", mem_type="lesson")
+        self._write(title="主人私有的错题乙", visibility="private",
+                    owner="C-OWNER", mem_type="lesson")
+        own = fish.build_lesson_block(self.conn, project="P",
+                                      viewer_citizen_id="C-OWNER").get("text") or ""
+        self.assertIn("主人私有的错题乙", own,
+                      "错题本段没列出主人自己的私有 lesson（viewer 没接进来）")
+        self.assertIn("公开的错题甲", own, "公开条目也不在（过滤过头）")
+        other = fish.build_lesson_block(self.conn, project="P",
+                                        viewer_citizen_id="C-OTHER").get("text") or ""
+        self.assertNotIn("主人私有的错题乙", other,
+                         "错题本段把别人的私有 lesson 列出来了")
+
 # ---------------------------------------------------------------- 读路径清单
 #
 # **F-P1-X（第三轮评审后的自查）**：我补私有过滤时，是按"我记得的那几条"补的。

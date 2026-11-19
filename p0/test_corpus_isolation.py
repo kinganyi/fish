@@ -135,8 +135,16 @@ class CorpusIsolationTest(unittest.TestCase):
     def test_no_token_is_rejected_with_guidance(self):
         """**无 token 必须明确拒绝，并告诉调用方怎么拿 token。**"""
         text = self._text(self._corpus(action="search", query="独有词"))
-        self.assertIn("凭证", text, f"没说要凭证：{text[:200]}")
-        self.assertIn("token", text.lower(), "没给取 token 的指引")
+        # **第六轮评审 🔴**：原来只断言"凭证"/"token"两个词——而这两个词
+        # 来自 `call_tool` 给**每个**响应追加的通用归属提示，不是语料门的拒绝文案。
+        # 评审官把门整个摘掉，这条判据 **5 passed**。
+        #
+        # 现在断言**门自己的那句话**（只有它会这么说），并且断言
+        # "没有命中"那条**不许出现**——否则"查不到"会冒充"拒绝"。
+        self.assertIn("语料检索需要有效凭证", text,
+                      f"没有拒绝（这句话只有门会说）：{text[:300]}")
+        self.assertNotIn("没有命中", text,
+                         "把'查不到'当成了'拒绝'——用户拍板要杜绝的正是这个")
         # 拒绝时**不许泄露任何正文**
         self.assertNotIn("青梅煮酒", text, "被拒绝的调用却泄露了甲的正文")
         self.assertNotIn("围魏救赵", text, "被拒绝的调用却泄露了乙的正文")
