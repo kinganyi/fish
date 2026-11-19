@@ -82,6 +82,50 @@ def _claim_key(fname, line):
     return fname + "|" + re.sub(r"\s+", "", line.strip())[:60]
 
 
+# ---------------------------------------------------------------- 锚点必须是真的
+# **第七轮评审**：第一版的 ANCHOR_RE 里有 `\.md`，于是**任意 `.md` 字样**都算锚点
+# ——连文件存不存在都不查。评审官实测：
+#   `# 用户拍板：有 token 只能读自己与未归属段（见 notes.md）` -> **绿**
+#   同一句去掉 `（见 notes.md）` -> 红
+# 它验的是"有没有像引用的东西"，不是"引用说的是不是这回事"。
+#
+# 现在分三类：
+#   ① 真实存在的 .md 文件      -> strong（可自证）
+#   ② 记忆编码 大肥鱼生命系统-YYMMDD-NN -> weak（格式对，存在性这里判不到）
+#   ③ 原话 / 原文 / quote      -> weak（只是承诺，最弱但明确）
+# 不存在的 .md 路径**不算锚点**——那正是评审官用来骗过判据的那一招。
+
+_MEM_CODE_RE = re.compile(r"大肥鱼生命系统-\d{6}-\d+")
+_MD_RE = re.compile(r"([\w\u4e00-\u9fff./\\-]+\.md)")
+_WEAK_RE = re.compile(r"(原话|原文|quote)", re.I)
+
+
+def _md_exists(ref):
+    """这个 .md 在仓库、工作区、或上层目录里真的存在吗？"""
+    ref = ref.replace("\\", "/")
+    for base in (HERE, HERE.parent, HERE.parent.parent):
+        try:
+            if (base / ref).is_file():
+                return True
+        except OSError:      # A档：畸形路径当不存在
+            continue
+    if "/" not in ref:
+        return any(p.name == ref for p in HERE.glob("*.md"))
+    return False
+
+
+def _anchor_quality(ctx):
+    """返回 strong / weak / None。只有 None 算没有锚点。"""
+    for ref in _MD_RE.findall(ctx):
+        if _md_exists(ref):
+            return "strong"
+    if _MEM_CODE_RE.search(ctx):
+        return "weak"
+    if _WEAK_RE.search(ctx):
+        return "weak"
+    return None
+
+
 def _scan():
     found = []
     for p in sorted(HERE.glob("*.py")):
@@ -96,7 +140,7 @@ def _scan():
                 continue
             ctx = "\n".join(lines[max(0, k - 2):k + 3])
             found.append((_claim_key(p.name, x), p.name, k + 1,
-                          ANCHOR_RE.search(ctx) is not None))
+                          _anchor_quality(ctx)))
     return found
 
 
@@ -106,7 +150,7 @@ class DecisionAnchorTest(unittest.TestCase):
         """**新增**的"用户拍板"声明必须能指到原话。"""
         new_unanchored = [f"{f}:{ln}  {key.split('|', 1)[1][:50]}"
                           for key, f, ln, ok in _scan()
-                          if not ok and key not in FROZEN]
+                          if ok is None and key not in FROZEN]
         self.assertEqual(
             new_unanchored, [],
             "这些注释声称「用户拍板」却指不到原话——\n"
@@ -126,6 +170,37 @@ class DecisionAnchorTest(unittest.TestCase):
         """失靶守卫：扫不到任何声明说明扫描逻辑坏了，不是通过。"""
         self.assertGreaterEqual(len(_scan()), 20,
                                 "只扫到很少的声明——判据大概率失去靶点")
+
+
+    def test_a_fake_anchor_is_not_an_anchor(self):
+        """**第七轮评审**：第一版的 `.md` 匹配让**任意 `.md` 字样**都算锚点。
+
+        评审官实测：往源码里加一句
+        `# 用户拍板：有 token 只能读自己与未归属段（见 notes.md）`
+        ——`notes.md` **根本不存在**，判据却**绿**。去掉那半就成了红。
+
+        也就是说它验的是"有没有像引用的东西"，不是"引用是不是真的"。
+        这条判据直接调 `_anchor_quality`，问三种情况的判定：
+        """
+        # ① 不存在的 .md -> 不算锚点（这正是骗过判据的那一招）
+        self.assertIsNone(
+            _anchor_quality("用户拍板：只能读自己（见 notes.md）"),
+            "指向不存在的 .md 被当成了锚点——评审官就是这样骗过的")
+        # ② 真实存在的 .md -> 算锚点（strong）
+        self.assertEqual(
+            _anchor_quality("用户拍板：只能读自己（原文见 ../README.md）"),
+            "strong", "真实存在的 .md 没被认成锚点——判据会误伤")
+        # ③ 记忆编码 -> 弱锚点（存在性这里判不到，不假装验过）
+        self.assertEqual(
+            _anchor_quality("用户拍板：大肥鱼生命系统-261119-02"),
+            "weak", "记忆编码没被认成锚点")
+
+    def test_md_exists_checks_the_file_system(self):
+        """`_md_exists` 必须**真的去文件系统问**，不是猜。"""
+        self.assertTrue(_md_exists("../README.md"),
+                        "存在的 md 被判成不存在")
+        self.assertFalse(_md_exists("绝对不存在的文件名-xyz.md"),
+                         "不存在的 md 被判成存在")
 
 
 if __name__ == "__main__":
