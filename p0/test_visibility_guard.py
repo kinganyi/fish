@@ -739,53 +739,46 @@ class PrivateWriteGuardTest(unittest.TestCase):
 # 判据要求：源码里每个查 title 的函数都必须在两张名单之一。
 # **新加一个读路径忘了过滤 → 它自己会红**，不用等评审。
 FILTERED = {
-    "search_memories":        "调 _filter_by_visibility（后置过滤，含 FTS 结果）",
-    "list_memories":          "_visibility_sql 插进 WHERE",
-    "count_memories":         "_visibility_sql（与 list 同口径）",
-    "recent_fallback":        "_visibility_sql",
-    "neighbors":              "_visibility_sql",
-    "distill_clusters":       "_visibility_sql（自带 SQL，第三轮评审补的）",
-    "build_injection_pack":   "_visibility_sql（最近三件事）",
-    "cmd_list":               "_visibility_sql（第 43 轮补：它**自己**查标题并逐行打印）",
-    "cmd_report":             "_visibility_sql（第 43 轮补：它打印 hot 前 5 与全部反馈标题）",
-    "render_memory_index":    "_visibility_sql（第 41 轮补：它自跑 SQL 并写成落盘明文）",
-    "render_memory_recent":   "_visibility_sql（第 41 轮补：同上，写 20-记忆库/最近.md）",
-    "_lesson_rows":           "lesson 免凭证可写但不进 private 语义（见 F-P0-3 的信任门）",
-    "_rule_rows":             "rule 有授权门（见 fish_trust），不是 visibility 语义",
-    "find_similar_memories":  "按精确 code 排除自身后取相似；结果仍走 search 口径",
+    # ---- 有过滤的读路径（键改成 `模块:函数`，第五轮指出的 `main` 重名洞）----
+    "fish.py:search_memories":            "调 _filter_by_visibility（后置过滤，含 FTS 结果）",
+    "fish.py:list_memories":              "_visibility_sql 插进 WHERE",
+    "fish.py:recent_fallback":            "_visibility_sql",
+    "fish.py:neighbors":                  "_visibility_sql",
+    "fish.py:distill_clusters":           "_visibility_sql（自带 SQL，第 25 轮补）",
+    "fish.py:build_injection_pack":       "_visibility_sql（最近三件事）",
+    "fish.py:cmd_list":                   "_visibility_sql（第 43 轮补：它自己查标题并逐行打印）",
+    "fish.py:cmd_report":                 "_visibility_sql（第 43 轮补：hot 前 5 + 全部反馈标题）",
+    "fish.py:render_memory_index":        "_visibility_sql（第 41 轮补：自跑 SQL 且写成落盘明文）",
+    "fish.py:render_memory_recent":       "_visibility_sql（第 41 轮补：同上，写 20-记忆库/最近.md）",
+    "fish.py:find_similar_memories":      "内联可见性判定（第 39 轮补：查重提示会显示标题）",
+    "fish.py:search_by_relevance":        "按精确 code 集合取相关性（push 用）",
+    "fish_inject.py:_lesson_rows":        "_visibility_sql（第 32 轮补）",
+    "fish_inject.py:_rule_rows":          "_visibility_sql（第 32 轮补）",
+    "fish_common.py:_open_loop_rows":     "_visibility_sql（第 39 轮补；helper 搬到链底才解开循环）",
+    "fish_push.py:build_push_candidates": "内联可见性判定（第 40 轮补：推送候选会显示标题）",
+    "fish_push.py:search_memories_any":   "_visibility_sql（第 40 轮补：联想候选会显示标题）",
+    "mcp_server.py:read_resource":        "_visibility_sql 无 viewer（第 38 轮补 fish://index）",
+    "mcp_server.py:tool_resolve":         "内联可见性判定（第 46 轮补：编号 ≠ 能读）",
+    "gen_index_md.py:main":               "默认剔除 private（第 43 轮补；--include-private 可显式放行）",
 }
+
 BY_EXACT_CODE = {
-    "_titles_of":        "按精确 code 批量取标题——编号不是枚举出来的",
-    "archive_body":      "按精确 code 取正文",
-    "read_body_path":    "按精确 code 取正文路径",
-    "supersede_memory":  "按精确 code 改状态",
-    "withdraw_memory":   "按精确 code 改状态",
-    "search_by_relevance": "push 用：按精确 code 集合取相关性",
-    # ---- 第 40 轮：扫描扩到全库后补的分类（这 6 个此前从未被看见）----
-    "_open_loop_rows":       "_visibility_sql（fish_common；第 40 轮补，原来会泄露）",
-    "build_push_candidates": "内联可见性判定（fish_push；第 40 轮补，原来会泄露）",
-    "search_memories_any":   "_visibility_sql（fish_push；第 40 轮补，原来会泄露）",
-    "_task_links_rebuild":   "维护任务重建链接：管理员身份跑，无 viewer 概念",
-    "reindex_fts":           "FTS 索引重建：同上，系统级",
-    "get_segment":           "语料段：走 F-P0-4 的 citizen 隔离（另一套机制）",
-    "read_resource":         "_visibility_sql 无 viewer（mcp_server:2311，第 38 轮修）",
-    # 下面两个是**扫描的假阳性**：归属回溯到了错的函数（`add` / `read_jsonl`
-    # 是 mcp_server 里的 JSONL 读写辅助，体内没有 code_index 查询）。
-    # 如实登记它们而不是改判据让它们消失——判据的"找得全"本来就不保证。
-    # ---- 第 45 轮 AST 扫描新找出的（正则版完全看不见）----
-    "rebuild_projection":    "重建投影：管理员身份跑，系统级，无 viewer 概念",
-    "stage5_verify":         "治理校验（gov_apply）：本机管理员跑，读全量做核对",
-    "load_rows":             "命名预览（preview_naming）：本机管理员工具",
-    # `main` 是五个独立脚本的入口（gen_index_md / gov_plan / gov_migrate_late /
-    # merge_cdql / rename_bodies_to_slug）。**名单按函数名索引，同名会互相覆盖**——
-    # 这是这条判据的已知局限（AST 扫得出，但表装不下重名）。
-    # gen_index_md 那条第 43 轮已加过滤（默认剔除 private）；其余是本机管理员工具。
-    "main":                  "脚本入口（同名 5 处；gen_index_md 已过滤，其余本机管理员）",
-    # AST 找出来的真函数（正则版把它归到了错的名字上）。
-    # **`tool_resolve` 目前返回私有标题给匿名调用方，而 `read_body_path`
-    # 对正文已经拒绝——口径不一致，待修。**
-    "tool_resolve":          "按精确 code 取完整记录（MCP 工具面，⚪ 待复核）",
-    "read_resource":         "_visibility_sql 无 viewer（mcp_server，第 38 轮修）",
+    # ---- 按精确 code 取单条：持有编号即访问检查（**前提：编号不可枚举**）----
+    "fish.py:_titles_of":       "按精确 code 批量取标题",
+    "fish.py:archive_body":     "按精确 code 取正文",
+    "fish.py:read_body_path":   "按精确 code 取正文（第 39 轮起另有 viewer 判定做二次确认）",
+    "fish.py:supersede_memory": "按精确 code 改状态",
+    "fish.py:withdraw_memory":  "按精确 code 改状态",
+    # ---- 本机管理员 / 治理 / 维护工具：没有 viewer 概念 ----
+    "fish_rebuild.py:rebuild_projection":   "重建投影：管理员身份跑，系统级",
+    "fish_maintenance.py:_task_links_rebuild": "维护任务重建链接：系统级",
+    "fish_common.py:reindex_fts":           "FTS 索引重建：系统级",
+    "gov_apply.py:stage5_verify":           "治理校验：本机管理员跑，读全量做核对",
+    "gov_migrate_late.py:main":             "治理迁移脚本：本机管理员跑",
+    "gov_plan.py:main":                     "治理计划脚本：本机管理员跑",
+    "merge_cdql.py:main":                   "CDQL 合并脚本：本机管理员跑",
+    "preview_naming.py:load_rows":          "命名预览：本机管理员工具",
+    "rename_bodies_to_slug.py:main":        "批量改名脚本：本机管理员跑",
 }
 
 
@@ -844,7 +837,7 @@ class VisibilityReadPathInventoryTest(unittest.TestCase):
                 for m in _re.finditer(r"SELECT[^;]*", blob, _re.I | _re.S):
                     seg = m.group(0)
                     if _re.search(r"\bcode_index\b", seg) and _re.search(r"\btitle\b", seg):
-                        out.add(node.name)
+                        out.add(f"{name}:{node.name}")
                         break
         return out
 
@@ -865,34 +858,55 @@ class VisibilityReadPathInventoryTest(unittest.TestCase):
 
     def test_declared_funcs_still_exist(self):
         """反向判据：名单里点名的函数必须还在（改名/删除要同步）。"""
-        src = _all_domain_src()
         import re as _re
-        defs = set(_re.findall(r"^\s*def ([A-Za-z_][A-Za-z0-9_]*)", src, _re.M))
+        # 按 `模块:函数` 校验存在性（第 50 轮；函数名会被 `main` 之类重名吃掉）。
+        defs = set()
+        for p in sorted(HERE.glob("*.py")):
+            if p.name.startswith(("test_", "mutation_", "_")):
+                continue
+            for fn in _re.findall(r"^\s*def ([A-Za-z_][A-Za-z0-9_]*)",
+                                  p.read_text(encoding="utf-8"), _re.M):
+                defs.add(f"{p.name}:{fn}")
         missing = sorted((set(FILTERED) | set(BY_EXACT_CODE)) - defs)
         self.assertEqual(missing, [],
-                         f"名单里这些函数在 fish.py 里找不到了：{missing}")
+                         f"名单里这些 模块:函数 在仓里找不到了：{missing}")
 
     def test_filtered_list_matches_reality(self):
         """**名单不许撒谎**：声称用了 `_visibility_sql` 的必须真的调了它。
 
-        否则名单会退化成"我说它过滤了"——正是这一路踩过的坑。
+        第六轮评审指出的旧版问题：它只扫**理由文本里含该字符串**的条目，
+        且 callers 用**函数名**（`main` 一个名字吃掉 5 个脚本）。
+        现在按 `模块:函数`、用 AST 取体内名字，不读文本。
         """
-        src = _all_domain_src()
-        lines = src.split("\n")
-        callers = set()
-        for i, ln in enumerate(lines):
-            if "_visibility_sql(" not in ln or ln.lstrip().startswith("def "):
-                continue
-            for k in range(i, -1, -1):
-                import re as _re
-                m = _re.match(r"^def ([A-Za-z_][A-Za-z0-9_]*)", lines[k])
-                if m:
-                    callers.add(m.group(1))
-                    break
-        declared_sql = {k for k, v in FILTERED.items() if "_visibility_sql" in v}
-        liars = sorted(declared_sql - callers)
-        self.assertEqual(liars, [],
-                         f"名单说这些函数用 _visibility_sql，但源码里没调用：{liars}")
+        import ast as _ast
 
+        def refs(mod, fname):
+            p = HERE / mod
+            if not p.is_file():
+                return set()
+            try:
+                tree = _ast.parse(p.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError):
+                return set()
+            out = set()
+            for node in _ast.walk(tree):
+                if (isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+                        and node.name == fname):
+                    for n in _ast.walk(node):
+                        if isinstance(n, _ast.Name):
+                            out.add(n.id)
+                        elif isinstance(n, _ast.Attribute):
+                            out.add(n.attr)
+            return out
+
+        liars = []
+        for key, reason in FILTERED.items():
+            if "_visibility_sql" not in reason:
+                continue
+            mod, _, fname = key.partition(":")
+            if "_visibility_sql" not in refs(mod, fname):
+                liars.append(key)
+        self.assertEqual(liars, [],
+                         f"名单说这些用了 _visibility_sql，但体内没调用：{liars}")
 if __name__ == "__main__":
     unittest.main(verbosity=2)
