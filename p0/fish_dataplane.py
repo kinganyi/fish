@@ -771,8 +771,16 @@ def _cli_with_conn(args, conn, root, action, _json):
         res = scan_vault(conn, vault, dry_run=not getattr(args, "apply", False),
                          compute_hash=getattr(args, "hash", False),
                          limit=getattr(args, "limit", None))
-        print(f"  扫描 {res.get('scanned', 0)} 个文件 / 新增 {res.get('added', 0)} / "
-              f"更新 {res.get('updated', 0)} / 跳过 {res.get('skipped', 0)}")
+        # **第七轮评审 🟠**：这里原来读 `scanned/added/updated/skipped`，
+        # 而 `scan_vault` 返回的键是 `files/notes/assets/written`——
+        # **四个键一个都对不上，于是永远打印 0/0/0**。
+        #
+        # 后果不是"显示不好看"：`dataplane scan --apply` 正是补 kb_asset 存量
+        # （2196 行 width/height 全空）的**唯一命令**。跑的人看到"扫描 0 个文件"，
+        # 会以为没生效——而库其实已经被填满了。**一条会撒谎的补救命令。**
+        print(f"  扫描 {res.get('files', 0)} 个文件 / 资产 {res.get('assets', 0)} / "
+              f"笔记 {res.get('notes', 0)} / 写入 {res.get('written', 0)}"
+              + ("（dry-run 未写）" if res.get('dry_run') else ""))
         if not getattr(args, "apply", False):
             print("  （dry-run：一个字节都没写；加 --apply 才落库）")
         return 0

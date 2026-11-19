@@ -236,5 +236,64 @@ class RealVaultTest(unittest.TestCase):
             conn.close()
 
 
+    def test_scan_cli_reports_real_counts(self):
+        """**第七轮评审 🟠**：`dataplane scan` 的输出键名与返回值**一个都对不上**。
+
+        `fish_dataplane.py` 读 `scanned/added/updated/skipped`，
+        而 `scan_vault` 返回 `files/notes/assets/written` —— 于是**永远打印 0/0/0**。
+
+        后果不是"显示不好看"：这条命令正是补 `kb_asset` 存量
+        （2196 行 width/height 全空）的**唯一入口**。跑的人看到"扫描 0 个文件"，
+        会以为没生效——而库其实已经被填满了。**一条会撒谎的补救命令。**
+
+        判据走**真命令行入口**，问的是"扫描了 N 个文件，输出里是不是 N"。
+        """
+        import contextlib
+        import io as _io
+        import tempfile
+        from PIL import Image
+        import fish as _fish
+        import fish_kb as _K
+        import fish_dataplane as _D
+
+        d = Path(tempfile.mkdtemp(prefix="fish-p23b-")) / "data"
+        d.mkdir(parents=True)
+        conn = _fish.connect(d)
+        try:
+            conn.executescript(_fish.SCHEMA)
+            _fish.migrate(conn)
+            conn.commit()
+            vault = d / "vault"
+            vault.mkdir()
+            Image.new("RGB", (37, 19), "red").save(vault / "a.png")
+            Image.new("RGB", (11, 13), "blue").save(vault / "b.png")
+            _K.kb_vault_add(conn, name="测试库", path=str(vault), mode="ro")
+            conn.commit()
+
+            class _A:
+                dp_action = "scan"
+                apply = True
+                hash = False
+                limit = None
+                vault = "测试库"
+                root = str(d)
+
+            buf = _io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                _D.cli(_A())
+            out = buf.getvalue()
+            # 2 个图片文件 → 输出里必须出现 2，不能是 0
+            self.assertNotIn("扫描 0 个文件", out,
+                             f"扫描了文件却报 0 —— 键名又对不上去了：{out!r}")
+            self.assertIn("扫描 2 个文件", out,
+                          f"输出里的文件数不是实测的 2：{out!r}")
+            got = conn.execute(
+                "SELECT COUNT(*) FROM kb_asset WHERE width IS NOT NULL"
+            ).fetchone()[0]
+            self.assertEqual(got, 2, f"尺寸没写进库：{got} 条非空")
+        finally:
+            conn.close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

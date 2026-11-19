@@ -886,10 +886,20 @@ class PushModuleContractTest(unittest.TestCase):
         src = (P0 / "fish.py").read_text(encoding="utf-8")
         self.assertIn("F-P2-2", src,
                       "fish.py 里没有 F-P2-2 的登记说明")
-        self.assertIn("identity` 无读取路径", src,
-                      "登记说明没写清「无读取路径」这件事")
-        self.assertIn("定优先级", src,
-                      "没写接线需要先定什么（与 citizens 的冲突优先级）")
+        # **第七轮评审 🟠**：这条原来断言"identity` 无读取路径"——
+        # 而那句话是**错的**（`search_memories`/`list_memories`/`read_body_path`
+        # 都读得到 identity）。判据把假话锁死了：谁改成真话它就红。
+        # 现在断言的是**真话**：不进 L0、不进注入包。
+        self.assertIn("不进 L0", src,
+                      "登记说明没写清「不进 L0 / 不进注入包」这件事")
+        self.assertIn("按 identity 特殊处理", src,
+                      "没写清准确口径：是没有专门处理，不是读不到")
+        self.assertIn("定 identity 与 citizens.display_name 的优先级", src,
+                      "没写接线需要先定什么")
+        # 反向：**错的措辞不许回潮**
+        self.assertNotIn("identity` 无读取路径", src,
+                         "「无读取路径」是错的——普通检索读得到它，"
+                         "别再把这句话写回去")
 
 
 if __name__ == "__main__":

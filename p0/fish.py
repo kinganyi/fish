@@ -7096,8 +7096,16 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
     want = normalize_injection_sections(sections)
 
     # ---- L0 身份（主人 / 行动者 必须分开）----
-    # F-P2-2：`identity` 无读取路径（L0 从 citizens 表建，实测 0 处查询），
-    # 设计文档却说它「L0 常驻」。接线需单独一轮：定优先级 + 加段 + 判据。
+    # F-P2-2：**identity 记忆不进 L0、也不进注入包**（实测：12 条 identity，注入包 0 条），
+    # 而设计文档说它该「L0 常驻」。**但它并不是读不到**——`search_memories` /
+    # `list_memories` / `read_body_path` 走普通路径照样能读到它。所以准确说法是：
+    # 「没有任何代码**按 identity 特殊处理**」，不是「没有读取路径」。
+    #
+    # 我上一版这里写的是「无读取路径」，那是**错的**：我用 grep 找"以 identity 为条件的
+    # 查询"、找到 0 条，就把"没有专门查询"当成了"读不到"——正是验收纪律禁止的
+    # 自建解析器代替实测。**真去 recall 一条就知道它读得到。**
+    #
+    # 接线需单独一轮：定 identity 与 citizens.display_name 的优先级 + L0 加段 + 判据。
     owner_id = resolve_owner(conn)
     actor = None
     if citizen_id:
