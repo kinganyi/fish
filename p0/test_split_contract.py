@@ -268,6 +268,7 @@ def _imported_names(tree: ast.Module) -> set[str]:
 
 
 
+
 class SplitSurfaceTest(unittest.TestCase):
     """J1 家族：调用面零变化（名字、对象身份、清单对齐）。"""
 
@@ -514,10 +515,10 @@ class SplitDependencyTest(unittest.TestCase):
 #
 # 这不是密码学意义上的防篡改（人能重算并改字面量），但它把"改一个数字"
 # 变成"必须动一个看起来就不是数据文件的测试文件"。**诚实地说，这是威慑，不是证明。**
-EXPECTED_CHAIN_HEAD = "201fda8fd4e606057b519ea3ac284d3e23a559659c4df6544a2ba73ceb06b1aa"
-EXPECTED_HISTORY_LEN = 3
+EXPECTED_CHAIN_HEAD = "a24d0176fc35cb3f38f3099e62d82b33804d0a0202ab89307048656cce947761"
+EXPECTED_HISTORY_LEN = 4
 # 与上面链头同一时刻的 max。新增历史前，max 不许偏离它。
-EXPECTED_RATCHET_MAX_AT_ANCHOR = 12630
+EXPECTED_RATCHET_MAX_AT_ANCHOR = 12640
 
 class J4RatchetTest(unittest.TestCase):
     """J4 窗口的**棘轮**（F-P1-10，2026-11-18 外部审查）。
@@ -870,6 +871,25 @@ class PushModuleContractTest(unittest.TestCase):
                 changed.append(name)
         self.assertEqual(changed, [],
                          f"这些定义在 T02 拆分中变了（且未登记原因）：{changed[:10]}（来源 {origin}）")
+
+    def test_unread_mem_types_are_registered(self):
+        """**F-P2-2**：写进去却没人读的记忆类型，必须**登记在代码里**。
+        外部审查指出 `identity` 这个 mem_type 没有任何读取路径。
+        核实：设计文档 `03-规格补充与修订-v0.2.md:142` 说它「L0 常驻」，
+        但 L0 段是从 `citizens` 表建的，`code_index` 里 identity 行
+        **一次都没被读过**（全仓查询 0 处）。
+        判据守的不是"必须接线"（那是产品决定），而是：
+        **代码里必须写着它没接线**，以及接线需要什么。
+        没有这句话，读代码的人会以为写一条 identity 记忆就能影响 L0——
+        而它实际只写不读。
+        """
+        src = (P0 / "fish.py").read_text(encoding="utf-8")
+        self.assertIn("F-P2-2", src,
+                      "fish.py 里没有 F-P2-2 的登记说明")
+        self.assertIn("identity` 无读取路径", src,
+                      "登记说明没写清「无读取路径」这件事")
+        self.assertIn("定优先级", src,
+                      "没写接线需要先定什么（与 citizens 的冲突优先级）")
 
 
 if __name__ == "__main__":

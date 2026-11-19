@@ -7096,6 +7096,8 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
     want = normalize_injection_sections(sections)
 
     # ---- L0 身份（主人 / 行动者 必须分开）----
+    # F-P2-2：`identity` 无读取路径（L0 从 citizens 表建，实测 0 处查询），
+    # 设计文档却说它「L0 常驻」。接线需单独一轮：定优先级 + 加段 + 判据。
     owner_id = resolve_owner(conn)
     actor = None
     if citizen_id:
