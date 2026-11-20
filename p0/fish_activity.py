@@ -1124,6 +1124,29 @@ def build_snapshot(conn, *, out_path, window_min=90, now=None, project=None) -> 
         # 表缺失（老库还没升到带 session_context 的版本）：cwd 全空，撞车判定退化。
         # 不是致命，但不许静默——走统一出口，出事时 stderr 有话说。
         warn_ignored('fish_activity.py build_snapshot session_context', exc)
+    # P5-1（2026-11-20）：仓库锚点。把 checkout 表一次读进来，在内存里按
+    # 「最长前缀」把 cwd 归到 repo_id —— **不额外 spawn git**。
+    # 为什么要它：撞车判定的旧口径只有路径。两个不同仓库里同名的 `src/lib/`
+    # 会被判成撞车（J7 的假撞车），而同一个仓库里的两个嵌套子目录又该归并（J8）。
+    checkout_rows = []
+    try:
+        checkout_rows = conn.execute(
+            "SELECT repo_id, path FROM git_checkout "
+            "WHERE missing_since IS NULL").fetchall()
+    except sqlite3.Error as exc:
+        warn_ignored('fish_activity.py build_snapshot git_checkout', exc)
+
+    def _repo_id_of(cwd):
+        if not cwd:
+            return None
+        best = None
+        for rid, path in checkout_rows:
+            base = (path or "").rstrip("/")
+            if base and (cwd == base or cwd.startswith(base + "/")):
+                if best is None or len(base) > len(best[1]):
+                    best = (rid, base)
+        return best[0] if best else None
+
     entries = []
     for (session_col, cid, agent, surface, status, last_seen, auto_surface, auto_seen,
          auto_source, scope, scope_key, _dname, _host, _created) in rows:
@@ -1140,6 +1163,8 @@ def build_snapshot(conn, *, out_path, window_min=90, now=None, project=None) -> 
             "session_key_source": sk_src,
             "agent_id": agent or "",       # 旧字段保留（外部读者可能还在用）
             "cwd": cwds.get(sk, ""),   # P1-3：会话级 cwd（session_context 表；没有就是空，不编）
+            # P5-1：仓库锚点。判不到就是 None——下游据此判断要不要标注「未锚定」。
+            "repo_id": _repo_id_of(cwds.get(sk, "")),
             "project": proj or "",
             "declared": declared,
             "declared_abs": _abs_list(declared, base),
@@ -1216,7 +1241,7 @@ def read_snapshot(path, *, max_age_sec: int = 3600):
 
 def find_collisions(snapshot, *, target_abs, own_session_key, min_segments: int = 2,
                     now=None, declared_window_min: int = 90,
-                    auto_window_min: int = 30) -> list:
+                    auto_window_min: int = 30, target_repo_id=None) -> list:
     """在快照里找「别人正在写、我也要写」的重叠，返回可读清单。
 
     五条边界（设计 §6.6）：
@@ -1226,6 +1251,20 @@ def find_collisions(snapshot, *, target_abs, own_session_key, min_segments: int 
       · `path_hit(min_segments)`：只认分量边界与 ≥2 段后缀，1 段的面到处同名；
       · **每会话最多 1 条**（取最具体的那一条），避免一个人报三遍；
       · 绝不返回 ULID，绝不返回内容。
+
+    ## P5-2（2026-11-20）：仓库前置过滤
+
+    追加一条**先于路径**的判据（方案 §6 缺口三）：
+
+    ```
+    同 repo_id      → 按现有 surface_hit 判分量边界（逻辑不变）
+    不同 repo_id    → 一律不冲突（两个仓库里的同名 `src/lib/` 不是撞车，J7）
+    repo_id 未知    → 退化路径匹配，但结果标 repo_unanchored=True
+    ```
+
+    最后那条是**诚实的代价**：判不到仓库时我们仍然报，但必须让读者知道
+    「这条可能只是同名路径」。不标的话，假撞车会被当成真撞车，而
+    「警告掺假就会被学会忽视」（本文件里已有的原话）。
     """
     now_dt = _dt(now)
     entries = (snapshot or {}).get("entries") or []
@@ -1246,6 +1285,12 @@ def find_collisions(snapshot, *, target_abs, own_session_key, min_segments: int 
         # 都会给自己报一条撞车（那正是这一轮要根治的误报源）。
         if not own_session_key and not entry_session:
             continue
+        # ── P5-2：仓库前置过滤（先于任何路径比较）──────────────────────────
+        entry_repo_id = entry.get("repo_id")
+        if target_repo_id and entry_repo_id and target_repo_id != entry_repo_id:
+            continue                    # 不同仓库：无论路径多像都不算撞车（J7）
+        # 任一侧没有仓库锚点 = 退化到纯路径匹配，结果要标注（不标就是假撞车温床）
+        repo_unanchored = not (target_repo_id and entry_repo_id)
         # 会话未标注（`''`）：照报，但标注出来（设计 §3.3 的不对称代价原则：
         # 漏报 > 多一句"可能是你自己"）。文案由 `describe_hits` 负责。
         unlabeled = not entry_session
@@ -1260,6 +1305,8 @@ def find_collisions(snapshot, *, target_abs, own_session_key, min_segments: int 
                             "projects": list(entry.get("projects") or ()),
                             "surface": hit, "session_key": entry_session,
                             "session_unlabeled": unlabeled,
+                            # P5-2：判不到仓库锚点时，这条结果只是「同名路径」的猜测
+                            "repo_unanchored": repo_unanchored,
                             "citizen_id": entry.get("citizen_id") or "",
                             "at": declared_at, "kind": "declared"}
         for item in entry.get("auto") or ():
@@ -1275,6 +1322,8 @@ def find_collisions(snapshot, *, target_abs, own_session_key, min_segments: int 
                         "projects": list(entry.get("projects") or ()),
                         "surface": hit, "session_key": entry_session,
                         "session_unlabeled": unlabeled,
+                        # P5-2：同上，没锚点的结果要能被文案标出来
+                        "repo_unanchored": repo_unanchored,
                         "citizen_id": entry.get("citizen_id") or "",
                         "at": item.get("last"), "kind": "auto"}
         if not best:

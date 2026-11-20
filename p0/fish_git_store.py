@@ -157,7 +157,7 @@ def record_obs(conn, *, checkout_id, probe, shallow=False, now=None, probe_ms=No
     return cur.lastrowid
 
 
-def record_commit(conn, *, root, repo_id, branch=None, now=None):
+def record_commit(conn, *, root, repo_id, branch=None, now=None, session_key=None):
     """采集 HEAD 的提交，写事件（真源）+ 投影（派生表）。返回 dict 或 None。
 
     ## 幂等与增量：**用 sha，不用时间**
@@ -185,7 +185,9 @@ def record_commit(conn, *, root, repo_id, branch=None, now=None):
     stamp = now or fish_common.now_utc()
     event_id = fish_db.append_event(
         conn, "git.commit",
-        actor={"kind": "system", "id": "fish_git"},
+        # P5-3：actor 带上会话键——别的 agent 这才看得出「是谁提交的」。
+        # 不带的话，提交事件只能说明「有人提交了」，协作上没多大用。
+        actor={"kind": "system", "id": "fish_git", "session_key": session_key},
         subject={"repo_id": repo_id, "sha": sha},
         payload={"sha": sha, "repo_id": repo_id,
                  "content_root": info["content_root"],

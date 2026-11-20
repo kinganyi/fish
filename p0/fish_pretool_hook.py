@@ -101,6 +101,11 @@ def describe_hits(hits, target_abs, *, limit: int = 2, question: bool = True) ->
             note = "（会话未标注：可能是你自己的另一条路径）"
         else:
             note = ""
+        # P5-2（2026-11-20）：判不到仓库锚点时，这条命中**可能只是同名路径**。
+        # 必须标出来——「警告掺假就会被学会忽视」是这个文件里已有的原话，
+        # 而不标注的后果正是把假撞车当成真撞车。
+        if hit.get("repo_unanchored"):
+            note += "（未锚定仓库，可能是误报：两边至少一侧没有仓库信息）"
         parts.append(f"{hit['label']}{suffix}{where} {when}写过 {surface}{note}")
     if len(hits) > limit:
         parts.append(f"另有 {len(hits) - limit} 个会话")
@@ -177,9 +182,18 @@ def evaluate(payload, *, host="dsh", data_dir=None, now=None) -> dict:
         return result
     result["target_abs"] = target_abs
     min_segments = int(fish_activity.read_cfg(data_dir, "board.collision_min_segments"))
+    # ── P5-2（2026-11-20）：我自己的仓库锚点 ──────────────────────────────
+    # 从**快照**里取（不额外连库）：如果我自己的 entry 里带 repo_id，就按它做
+    # 「不同仓库一律不冲突」的前置过滤；取不到就传 None，判定退化为纯路径匹配，
+    # 且结果会被标注「未锚定仓库，可能是误报」。
+    target_repo_id = None
+    for _entry in (snapshot.get("entries") or ()):
+        if isinstance(_entry, dict) and _entry.get("session_key") == session_key:
+            target_repo_id = _entry.get("repo_id")
+            break
     hits = fish_activity.find_collisions(
         snapshot, target_abs=target_abs, own_session_key=session_key,
-        min_segments=min_segments, now=now,
+        min_segments=min_segments, now=now, target_repo_id=target_repo_id,
         declared_window_min=int(fish_activity.read_cfg(data_dir, "board.overlap_window_min")),
         auto_window_min=int(fish_activity.read_cfg(data_dir, "board.collision_window_min")))
     if not hits:

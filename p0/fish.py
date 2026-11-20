@@ -313,21 +313,13 @@ def normalize_occurred_at(value):
 # ------------------------------------------------------ 身份层 P1-a DDL（纯结构）
 # 依据：身份层设计（账号 → 会话 → 凭证 → 档期 → 归档 → 合并视图）。
 #
-# **本轮只建结构，一句既有查询都不改。** 这不是保守：`citizens` 表被 28 条 SQL 引用
-# （fish.py 25 条 / mcp_server.py 2 条 / daily_report.py 1 条），其中 fish.py 的
-# cmd_healthcheck 与 rebuild_projection 两处是「校验 owner 是不是有效公民」。
-# 在这张表上顺手改查询，风险会顺着全部调用点扩散；结构先就位、逻辑下一轮单独切，
-# 出问题时才能一刀切开「结构错」还是「逻辑错」。这 28 条由 test_identity_p1a 的
-# 判据 G 逐条冻结——语句改一个字就红（空白归一后比对）。
-#
-# 本轮只做 6 件事：citizens 加 5 列 / 建 agent_accounts / 建 session_tokens /
-# 建 project_stints / 建 citizens_archive / 建 citizens_all 视图。
-# **不实现**归档、不实现 token 签发与校验、不改任何工具签名。
-#
-# 沿用推送地基的同一套纪律（见 _ACCESS_LOG_DDL 的说明）：
-#   · 表 DDL 提成常量，`SCHEMA`（新库）与 `migrate()`（旧库）共用一份；
-#   · **索引与视图只放 migrate()**：SCHEMA 先于 migrate 执行，此刻旧库的列还没补齐；
-#   · 顺序硬纪律：先建表 → 再补列 → 最后建索引/视图。
+# ⚠️ 下面这几段"本轮只建结构、逻辑下一轮切"的记录已经**过期**（P1-a/P1-b/序2
+# 都已落地），保留它们只会让后来者误以为还有未完成的分步。压缩成结论：
+#   · 结构先就位、逻辑单独切——这个策略当时是对的，`citizens` 被 28 条 SQL
+#     引用，在这张表上顺手改查询会让风险顺着全部调用点扩散；
+#   · 沿用推送地基的同一套纪律：表 DDL 提成常量（SCHEMA 与 migrate 共用一份）、
+#     索引与视图只放 migrate()、顺序是「先建表 → 再补列 → 最后建索引/视图」。
+# 完整历史见 `56-身份层-P1a-设计` 与 `58-身份层-P1b`。
 
 
 def _presence_prefix_conflicts(conn) -> list:
@@ -5879,22 +5871,24 @@ def _render_repo_line(conn, cwd) -> str:
         return ""
     try:
         rows = conn.execute(
-            "SELECT c.checkout_id, c.path, r.display_name, r.identity "
+            "SELECT c.checkout_id, c.path, r.display_name, r.identity, c.repo_id "
             "FROM git_checkout c JOIN git_repo r ON r.repo_id = c.repo_id "
             "WHERE c.missing_since IS NULL").fetchall()
-    except sqlite3.Error:
-        return ""                          # 老库还没有 git 表：这一行就不出现
+    except sqlite3.Error as exc:
+        # 老库还没有 git 表：这一行就不出现。但不许静默——走统一出口。
+        warn_ignored('fish.py _render_repo_line', exc)
+        return ""
     best = None
-    for cid, path, name, ident in rows:
+    for cid, path, name, ident, rid in rows:
         base = (path or "").rstrip("/")
         if not base:
             continue
         if norm == base or norm.startswith(base + "/"):
             if best is None or len(base) > len(best[1].rstrip("/")):
-                best = (cid, base, name, ident)
+                best = (cid, base, name, ident, rid)
     if best is None:
         return ""
-    cid, base, name, ident = best
+    cid, base, name, ident, rid = best
     label = name or (ident.rsplit("/", 1)[-1] if ident else base.rsplit("/", 1)[-1])
     try:
         obs = fish_git_store.latest_obs(conn, cid)
@@ -5912,7 +5906,17 @@ def _render_repo_line(conn, cwd) -> str:
     else:
         status = "未采集——不是「干净」，是没采到"
     branch = obs.get("branch") or "(detached)"
-    return f"当前仓库：{label}（{branch}，{status}）"
+    # ── P5-3（2026-11-20）：最近提交 ────────────────────────────────────
+    # 协作价值：撞车机制只能告诉你「有人**正在写**」，提交事件能告诉你
+    # 「有人**已经写完并提交**」——那是完全不同的信息（方案 §6 缺口三）。
+    try:
+        last = conn.execute(
+            "SELECT sha, committed_at FROM git_commit WHERE repo_id=? "
+            "ORDER BY committed_at DESC LIMIT 1", (rid,)).fetchone()
+    except sqlite3.Error:
+        last = None
+    extra = f"；最近提交 {last[0][:8]} {last[1][:10]}" if (last and last[1]) else ""
+    return f"当前仓库：{label}（{branch}，{status}{extra}）"
 
 
 def _render_project_head(project, count, last_seen, source) -> str:
