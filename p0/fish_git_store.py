@@ -233,77 +233,38 @@ def rebuild_commit_projection(conn):
     return restored
 
 
-def link_create(conn, *, src_kind, src_id, dst_kind, dst_id, rel,
-                source="explicit", confidence=1.0, evidence=None,
-                content_hash=None, now=None):
-    """建立一条记忆↔提交（或 ↔仓库/工作副本）的关联，返回 `git_link.id`。
+_OWNERSHIP_VALUES = ("owned", "external", "unknown")
 
-    **为什么独立表不扩展 `links`**：`links` 两端必须是 `code_index` 里的编码
-    （`gov_apply.py` 的健康检查 + `fish_maintenance.py` 的 24h 维护都强制），
-    把 commit SHA 塞进去会立刻变成悬空边、24 小时后被 `suppressed=1` 压掉。
 
-    重复建立同一条关联（同一 src/dst/rel）返回已有的 id，不报错——
-    调用方（hook / 手工工具）不需要先查再建。
+def set_ownership(conn, repo_id, ownership, *, evidence=None, now=None):
+    """显式设置仓库归属，返回是否命中。
+
+    ## 为什么必须有这个入口
+
+    `ownership` 默认 `unknown` 是**正确的保守默认**（方案 P10：发现器一跑，
+    ComfyUI、deepseek-harness 这些第三方仓库全会被标成「自己的」，
+    然后「只读红线」就形同虚设）。
+
+    但**字段建了却没有任何东西会写它**，等于没实现——实测本仓代码里
+    `ownership` 只出现在 INSERT 的硬编码与一个 SELECT 里。所以补这个显式入口。
+
+    ## 为什么不做自动判定
+
+    判定需要「这个远端 owner 是不是我」的规则，而方案 P9 说「身份是归属不是授权」
+    ——**归属该由人声明，不该由程序猜**。猜错的代价是不对称的：
+    把别人的仓库标成自己的（→ 越界写）比把自己的标成别人的（→ 少采点）严重得多。
+    所以这里只提供「能标」的能力，不提供「替你标」的智能。
+
+    `evidence` 是必填语义的（虽然参数可为 None）：标成 owned/external 必须能说出
+    依据，否则下次没法复核这条判断还成不成立。
     """
-    stamp = now or fish_common.now_utc()
-    row = conn.execute(
-        "SELECT id, removed_at FROM git_link WHERE src_kind=? AND src_id=? AND "
-        "dst_kind=? AND dst_id=? AND rel=?",
-        (src_kind, src_id, dst_kind, dst_id, rel)).fetchone()
-    if row:
-        # 已存在：若曾被软删，这次建立视为「恢复」
-        if row[1]:
-            conn.execute("UPDATE git_link SET removed_at=NULL WHERE id=?", (row[0],))
-        return row[0]
+    if ownership not in _OWNERSHIP_VALUES:
+        raise ValueError(
+            f"未知的归属值：{ownership!r}（可用：{_OWNERSHIP_VALUES}）")
     cur = conn.execute(
-        "INSERT INTO git_link (src_kind, src_id, dst_kind, dst_id, rel, source, "
-        "confidence, evidence, content_hash, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (src_kind, src_id, dst_kind, dst_id, rel, source, confidence,
-         evidence, content_hash, stamp))
-    return cur.lastrowid
-
-
-def link_remove(conn, link_id, *, now=None):
-    """**软删除**一条关联（写 `removed_at`），返回是否命中。
-
-    J10 的判据就在这一行：物理删除之后「撤销」无从谈起（追溯不到原来关联过什么），
-    所以这里只打时间戳。`link_restore` 把时间戳清回 NULL 即完成回滚。
-    """
-    cur = conn.execute("UPDATE git_link SET removed_at=? WHERE id=? AND removed_at IS NULL",
-                       (now or fish_common.now_utc(), link_id))
+        "UPDATE git_repo SET ownership=?, ownership_evidence=?, updated_at=? "
+        "WHERE repo_id=?", (ownership, evidence, now or fish_common.now_utc(), repo_id))
     return bool(cur.rowcount)
-
-
-def link_restore(conn, link_id):
-    """撤销软删除（回滚），返回是否命中。"""
-    cur = conn.execute("UPDATE git_link SET removed_at=NULL WHERE id=? AND removed_at IS NOT NULL",
-                       (link_id,))
-    return bool(cur.rowcount)
-
-
-def links_of(conn, *, src_kind=None, src_id=None, dst_kind=None, dst_id=None,
-             include_removed=False):
-    """按 src 或 dst 查关联；默认**不含**已软删的。
-
-    两个维度都支持，因为真实问题两个方向都会问：「这条记忆改过哪些提交」
-    和「这个提交实现了哪些记忆」。
-    """
-    where, params = [], []
-    for col, val in (("src_kind", src_kind), ("src_id", src_id),
-                     ("dst_kind", dst_kind), ("dst_id", dst_id)):
-        if val is not None:
-            where.append(f"{col}=?")
-            params.append(val)
-    if not include_removed:
-        where.append("removed_at IS NULL")
-    sql = ("SELECT id, src_kind, src_id, dst_kind, dst_id, rel, source, confidence, "
-           "evidence, content_hash, created_at, removed_at FROM git_link")
-    if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY id"
-    return [dict(zip(("id", "src_kind", "src_id", "dst_kind", "dst_id", "rel",
-                      "source", "confidence", "evidence", "content_hash",
-                      "created_at", "removed_at"), r)) for r in conn.execute(sql, params)]
 
 
 def latest_obs(conn, checkout_id):
