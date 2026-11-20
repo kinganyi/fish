@@ -417,6 +417,36 @@ def _first_non_option(text):
     return ""
 
 
+# 「这条命令产生了一次提交」的**精确**判据（P4-2 · 2026-11-20）。
+#
+# 为什么不复用上面的 `_GIT_WRITE_RE`：那条是「粗判是不是 git 写操作」用的，
+# 它不需要精确，所以有三处会误判（实测）：
+#   · `git -C /path commit` ——漏（`-C` 卡在 `git` 与 `commit` 之间）
+#   · `echo git commit`     ——误（它只看 `git commit` 这个子串出现在哪都算）
+#   · `git commit-tree abc` ——误（`commit` 后的 `\b` 在 `-` 前也成立）
+# 而 commit 采集是**归因链唯一的确定性绑定**，误判会产生假归因、漏判会丢真归因，
+# 两个方向都不可接受。所以这里是独立的一条，要求「命令起始 + 可选 -C + 精确动词」。
+_GIT_COMMIT_RE = re.compile(
+    r"(?:^|[|&;]\s*|\bsudo\s+|\benv\s+(?:\S+=\S+\s+)+)"   # 命令起始位置
+    r"git\s+"
+    r"(?:-\S+\s+\S+\s+|--\S+=\S+\s+)*"                     # 可选 -C path / --git-dir=...
+    r"(?:commit|merge)(?=\s|$)",                            # 动词后面必须断词
+    re.I)
+
+
+def is_git_commit(command) -> bool:
+    """这条命令是不是**产生提交**的 git 操作（P4-2 的识别口）。
+
+    只认 `commit` 与 `merge`（merge 会生成 merge commit，HEAD 会变）。
+    `checkout/switch/reset/rebase/stash` 虽然 HEAD 也可能变，但它们不产生
+    「一次新的工作成果」，不该进归因链。
+
+    判据的误差方向经过实测校准：`git -C /x commit` 要认（常见写法），
+    `echo git commit` 与 `git commit-tree` 不能认（假归因比漏归因更坏）。
+    """
+    return bool(_GIT_COMMIT_RE.search(str(command or "")))
+
+
 def bash_write_feature(command, *, cwd=None):
     """判断一条 Bash 命令是不是**写动作**，返回 `(特征名, 目标绝对路径|None, 长度)`。
 

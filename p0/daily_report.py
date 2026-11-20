@@ -567,6 +567,54 @@ def maintenance_step(data_dir=None):
     return line
 
 
+def git_refresh_step(data_dir=None):
+    """日报的一步（P5 · 2026-11-20）：对**已登记**的仓库做一次 L0/L1 采样。
+
+    ## 为什么必须挂在每日任务
+
+    方案 §5.3 的触发表里，L0 全量刷新归 23:00 任务——理由是 hook 只在**写类动作**
+    时采，而冷仓库（几个月没动过的）永远轮不到。不接这一步的话，`git_obs` 里
+    只会有"最近被写过的仓库"，清单里其余的全是空白。
+
+    ## 只刷已登记的，不重新扫盘
+
+    这里遍历 `git_checkout`（已经结束发现的仓库），**不做全盘扫描**——那是
+    `repo_inventory.json` 生成器的事（离线、允许慢）。每天的例行任务不该去 walk 磁盘。
+
+    **异常一律转成一行文本**：与 `maintenance_step` 同一条口径——git 采集是派生
+    数据，失败不许拖垮报告/备份，也不改退出码。
+    """
+    data = Path(data_dir) if data_dir is not None else DATA
+    try:
+        sys.path.insert(0, str(HERE))
+        import fish as fishlib                    # noqa: PLC0415 —— 延迟导入（同 maintenance_step）
+        import fish_git_store                     # noqa: PLC0415
+
+        conn = fishlib.connect(data)
+        try:
+            rows = conn.execute(
+                "SELECT path FROM git_checkout WHERE missing_since IS NULL"
+            ).fetchall()
+            if not rows:
+                return "git 采样：0 个仓库（还没有登记过任何工作副本）"
+            refreshed = degraded = 0
+            for (path,) in rows:
+                res = fish_git_store.observe(conn, path)
+                if res.get("obs_id"):
+                    refreshed += 1
+                    if res.get("state") in ("degraded", "unknown"):
+                        degraded += 1
+            conn.commit()
+            line = f"git 采样：{refreshed}/{len(rows)} 个仓库已刷新"
+            if degraded:
+                line += f"（其中 {degraded} 个状态不可靠，见 git_obs.degraded_reason）"
+            return line
+        finally:
+            conn.close()
+    except Exception as e:                     # noqa: BLE001 —— 派生数据，不许拖垮主流程
+        return f"git 采样失败：{type(e).__name__}: {e}"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description="fish 每日任务：生成报告 + 数据库备份",
@@ -658,6 +706,10 @@ def main(argv=None):
     # 失败只落一行、不改退出码：维护是派生数据，不许让日报假红。
     maintenance_line = maintenance_step()
 
+    # git 采样（P5 · 2026-11-20）：接在维护之后、备份之前——备份要拍下"刷新之后"
+    # 的形状。方案 §5.3：L0 全量刷新归每日任务，覆盖 hook 轮不到的冷仓库。
+    git_line = git_refresh_step()
+
     # 备份即使报告失败也要做：数据安全 > 报告成功
     backup_ok, backup_line = True, ""
     try:
@@ -693,6 +745,8 @@ def main(argv=None):
             f.write(corpus_line + "\n")
         if maintenance_line:
             f.write(maintenance_line + "\n")
+        if git_line:
+            f.write(git_line + "\n")
         f.write(backup_line + "\n")
 
     print(f"[{stamp}] 报告 exit={report_code}；{backup_line}")
@@ -708,6 +762,8 @@ def main(argv=None):
         print(f"[{stamp}] {corpus_line}")
     if maintenance_line:
         print(f"[{stamp}] {maintenance_line}")
+    if git_line:
+        print(f"[{stamp}] {git_line}")
     return 0 if (report_code == 0 and backup_ok) else 1
 
 
