@@ -39,8 +39,15 @@ from typing import Iterable
 # WorkBuddy 侧是 `Write`/`Edit`——所以判定前必须先 `.lower()`，否则 matcher
 # 匹配上了、代码判定却漏（那是「静默不记」里最难发现的一种）。
 WRITE_TOOL_NAMES = ("write", "edit", "multiedit", "notebookedit", "apply_patch", "patch")
-# Bash 方言兜底：DSH 叫 `bash`，别的宿主可能叫 `shell`。两者都按 exec 分类。
-BASH_TOOL_NAMES = ("bash", "shell")
+# Shell 方言白名单：判定前统一 `.lower()` 比较。
+#
+# 2026-11-20 修：旧值只有 `("bash", "shell")`，注释还写着「DSH 叫 bash」——
+# 但实测 DSH 0.2.2-rc.1 的工具名是 **`pwsh`**（PowerShell），既不在写类白名单、
+# 也不在旧白名单里，于是 `classify_tool_call` 直接返回 None，**所有 PowerShell
+# 操作一条都不落库**。实测证据：hook 心跳 `heartbeat-dsh-PostToolUse.json` 有
+# `"tool_name": "pwsh"` 的记录，而 `tool_activity` 里 dsh 侧零新增。
+# 这是 DSH 侧断流的**第二个独立原因**（第一个是 hook junction 断链）。
+BASH_TOOL_NAMES = ("bash", "shell", "pwsh", "powershell")
 
 _SURFACE_SEP = re.compile(r"[,，;；\n]")
 _DRIVE_ROOT = re.compile(r"[A-Za-z]:")
