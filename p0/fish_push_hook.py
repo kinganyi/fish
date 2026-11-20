@@ -137,8 +137,6 @@ def _run(argv=None):
     # 这是"旁路不该有权阻塞主流程"的收口：关掉的功能必须**秒**退，不能拖着等 10s。
     if not hook_fastpath.enabled(DATA, "push.enabled", True):
         return 0
-    if hook_fastpath.cooldown_remaining(DATA, "posttool"):
-        return 0
     try:
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     except Exception:      # noqa: BLE001
@@ -179,6 +177,18 @@ def _run(argv=None):
         maybe_warn_pending(req, host)
     except Exception as exc:      # noqa: BLE001 —— 提醒失败不影响后续推送
         _dbg("warn pending failed: %r" % (exc,))
+
+    # ── ①c 冷却（**只挡推送，不挡采集**）──────────────────────────────
+    # 2026-11-20（DSH hook 断流事故）：这段判断原来在读 stdin **之前**，于是
+    # 「连续 3 次跑得慢就冷却 10 分钟」顺带把采集也关掉了——而采集是这条链路上
+    # **唯一不该停**的东西。症状很隐蔽：hook 被饿到 1.5 秒以上三次之后，整整
+    # 10 分钟 tool_activity 一条都不写，且没有任何输出（心跳写在那个判断之后）。
+    #
+    # 冷却的初衷（见 hook_fastpath.note_elapsed 的 docstring）是「不让用户每次
+    # 工具调用都等满宿主给的 3 秒」——那是**推送**路径的成本。采集只是本地写一行，
+    # 不产生这个成本。所以它该守在这里，而不是守在大门口。
+    if hook_fastpath.cooldown_remaining(DATA, "posttool"):
+        return 0
 
     # ── ② 频率闸（前置）：先算"到没到点"，不到就别去加载 fish ──────────
     # 默认 10，可被 config 覆盖；但读 config 要连库，所以这里用**保守默认**，
