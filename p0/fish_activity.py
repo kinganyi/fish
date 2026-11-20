@@ -226,6 +226,64 @@ SQL_HOST_SESSION_CITIZEN = (
     "ORDER BY created_at LIMIT 1")
 
 
+def remember_session_cwd(conn, *, session_key, citizen_id=None, host="", cwd="",
+                         project=None, seen_at=None) -> bool:
+    """记住会话的当前工作目录；**变了才写**，返回是否真的写入（2026-11-20 · P1-3）。
+
+    为什么需要：hook 每次 PostToolUse 都拿得到 `cwd`，但旧代码只用它算一次
+    `path_abs` 就丢——`tool_activity` 没有 cwd 列，于是 `build_snapshot` 只能把
+    entry 的 cwd 写空、`fish_pretool_hook` 的 `make_abs(raw_path, cwd)` 在 cwd
+    为空时返回相对路径，撞车判定退化成「相对面靠分量链兜底匹配绝对目标」——
+    那是 `warn-pending-*.json` 里那条假撞车（CZHY 工作区相对面命中飞书工作区
+    绝对目标）的来源。
+
+    为什么「变了才写」：PostToolUse 每次工具调用都触发，无条件写会产生大量无意义
+    写事务；同一会话的连续动作 cwd 通常不变。
+
+    判不到就不记（返回 False 而不是抛错）：session_key 空 / cwd 空 / 非绝对路径
+    ——按 fish 的纪律，缺证据时宁可空着，不编一个值出来。
+    """
+    if not session_key or not cwd:
+        return False
+    norm = fish_surface.normalize_path(cwd)
+    if not norm or not fish_surface.is_absolute(norm):
+        return False
+    now = seen_at or utc_now()
+    try:
+        row = conn.execute(
+            "SELECT cwd FROM session_context WHERE session_key=?",
+            (session_key,)).fetchone()
+        if row and row[0] == norm:
+            return False                     # 没变，不写
+        conn.execute(
+            "INSERT INTO session_context "
+            "(session_key,citizen_id,host,cwd,project,first_seen_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(session_key) DO UPDATE SET citizen_id=excluded.citizen_id, "
+            "host=excluded.host, cwd=excluded.cwd, project=excluded.project, "
+            "updated_at=excluded.updated_at",
+            (session_key, citizen_id, host, norm, project, now, now))
+    except sqlite3.Error as exc:
+        # 表缺失/只读库：不记，不让它拖垮采集。**但不许静默**——走统一出口。
+        warn_ignored('fish_activity.py remember_session_cwd', exc)
+        return False
+    return True
+
+
+def session_cwd(conn, session_key) -> str:
+    """读会话的 cwd；没有就返回空串（判不到不给猜测值）。"""
+    if not session_key:
+        return ""
+    try:
+        row = conn.execute(
+            "SELECT cwd FROM session_context WHERE session_key=?",
+            (session_key,)).fetchone()
+    except sqlite3.Error as exc:
+        warn_ignored('fish_activity.py session_cwd', exc)
+        return ""
+    return (row[0] if row else "") or ""
+
+
 def resolve_citizen(conn, session_key, now=None):
     """会话键 → 公民；查不到返回 None（**不猜**）。"""
     if not session_key:
@@ -1057,6 +1115,15 @@ def build_snapshot(conn, *, out_path, window_min=90, now=None, project=None) -> 
         return bases[project_name]
 
     cutoff = (now_dt - datetime.timedelta(minutes=max(window, 0))).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # P1-3：会话 cwd 一次性取全（表是每会话一行的小表，批量比逐 entry 查省事）
+    cwds = {}
+    try:
+        for _sk, _cwd in conn.execute("SELECT session_key, cwd FROM session_context"):
+            cwds[_sk] = _cwd
+    except sqlite3.Error as exc:
+        # 表缺失（老库还没升到带 session_context 的版本）：cwd 全空，撞车判定退化。
+        # 不是致命，但不许静默——走统一出口，出事时 stderr 有话说。
+        warn_ignored('fish_activity.py build_snapshot session_context', exc)
     entries = []
     for (session_col, cid, agent, surface, status, last_seen, auto_surface, auto_seen,
          auto_source, scope, scope_key, _dname, _host, _created) in rows:
@@ -1072,7 +1139,7 @@ def build_snapshot(conn, *, out_path, window_min=90, now=None, project=None) -> 
             "session_key": sk,
             "session_key_source": sk_src,
             "agent_id": agent or "",       # 旧字段保留（外部读者可能还在用）
-            "cwd": "",                 # 采集表不含 cwd（设计 §4.1 无此列，不编）
+            "cwd": cwds.get(sk, ""),   # P1-3：会话级 cwd（session_context 表；没有就是空，不编）
             "project": proj or "",
             "declared": declared,
             "declared_abs": _abs_list(declared, base),
@@ -1625,6 +1692,10 @@ def handle_post_tool_use(conn, *, host, payload, now=None, data_dir=None,
 
     seen_at = now or utc_now()
     cwd = payload.get("cwd") or ""
+    # P1-3：会话 cwd 落库。**先于 classify** —— cwd 是会话属性，与"这次动作是不是
+    # 写"无关；纯读命令也要记（撞车判定需要知道你在哪个目录，而不是只在写时才需要）。
+    remember_session_cwd(conn, session_key=session_key, host=host, cwd=cwd,
+                         seen_at=seen_at)
     tool_name = payload.get("tool_name") or ""
     tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
     raw_path = _first_path(tool_input)

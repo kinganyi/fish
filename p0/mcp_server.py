@@ -1601,6 +1601,9 @@ class FishServer:
         # build_injection_pack 的最高优先档；不传时由档期/兜底决定，并在 L1 里标明来源。
         # 刻意**不**在 MCP 侧猜 cwd：本进程被宿主所有会话共享，进程 cwd 不是调用方
         # 的工作目录，拿它做 workspace_map 匹配等于把"服务器启动目录"说成"AI 在哪儿干活"。
+        # 2026-11-20（P1-2）：这条判断不变，而且**也不加入参**——inject 的入参是冻结契约
+        # （三条门禁锁着「只允许新增可选 token」）。改用会话键反查：hook 已把 cwd 落进
+        # `session_context`（P1-3），`build_injection_pack` 内部按 session_key 取回即可。
         #
         # 2026-10-26（FB-02）：`sections`（只构建列出的段）+ `include_board`（便捷布尔）。
         # 归一在 `_inject_sections_arg` 里做一次——`sections` 与 `include_board` 都写时

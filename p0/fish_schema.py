@@ -303,7 +303,14 @@ _ACTIVITY_INDEXES = (
     "ON tool_activity(project, path_dir, seen_at DESC)",
 )
 
-_ACTIVITY_SCHEMA = "\n" + _TOOL_ACTIVITY_DDL + "\n"
+# session_context（P1-3）：存每会话的 cwd，供撞车判定绝对化。cwd 是会话级属性，
+# 不塞 tool_activity（2 万行、加列要迁移）；写入「变了才写」，见 remember_session_cwd。
+_ACTIVITY_SCHEMA = ("\n" + _TOOL_ACTIVITY_DDL + "\n" + """
+CREATE TABLE IF NOT EXISTS session_context (session_key TEXT PRIMARY KEY, citizen_id TEXT,
+  host TEXT NOT NULL, cwd TEXT NOT NULL, project TEXT, first_seen_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_session_ctx_citizen ON session_context(citizen_id, updated_at DESC);
+CREATE INDEX IF NOT EXISTS ix_session_ctx_cwd ON session_context(cwd);
+""" + "\n")
 
 _TOOL_ACTIVITY_COLS = (
     ("host", "TEXT"),

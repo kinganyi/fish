@@ -146,7 +146,6 @@ def evaluate(payload, *, host="dsh", data_dir=None, now=None) -> dict:
     if not target_abs:
         result["reason"] = "目标路径归一后为空"
         return result
-    result["target_abs"] = target_abs
     session_key = fish_activity.make_session_key(host, payload.get("session_id"))
     result["session_key"] = session_key
 
@@ -156,6 +155,27 @@ def evaluate(payload, *, host="dsh", data_dir=None, now=None) -> dict:
     if not snapshot:
         result["reason"] = "快照缺失/损坏/过旧"
         return result
+
+    # ── P1-1（2026-11-20）：目标路径必须能绝对化，否则不判 ──────────────────
+    # 缺 cwd 时 `make_abs` 原样返回相对串，而 `find_collisions` 的 `path_hit` 会拿
+    # 相对面去做「分量链包含」匹配**绝对**目标——那正是假撞车（实测记录
+    # `warn-pending-6f4bbb96.json`：surface 是 CZHY 工作区相对路径，target 是
+    # 飞书建设工作空间的绝对路径）的成因。
+    #
+    # 兜底顺序：payload 的 cwd → 快照里本会话的 cwd（P1-3 落库后由 build_snapshot
+    # 带出）→ 都拿不到就 skip。**宁可漏报，不要假撞车**——假撞车比漏报更坏，
+    # 因为警告一旦掺假就会被学会忽视（fish_activity.py 里老注释的原话）。
+    if not fish_surface.is_absolute(target_abs):
+        for _e in (snapshot.get("entries") or ()):
+            if isinstance(_e, dict) and _e.get("session_key") == session_key:
+                _scwd = _e.get("cwd") or ""
+                if _scwd:
+                    target_abs = fish_surface.make_abs(raw_path, _scwd)
+                break
+    if not fish_surface.is_absolute(target_abs):
+        result["reason"] = "目标路径无法绝对化（缺 cwd 且路径是相对的），跳过撞车判定"
+        return result
+    result["target_abs"] = target_abs
     min_segments = int(fish_activity.read_cfg(data_dir, "board.collision_min_segments"))
     hits = fish_activity.find_collisions(
         snapshot, target_abs=target_abs, own_session_key=session_key,

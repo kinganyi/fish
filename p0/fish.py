@@ -75,7 +75,8 @@ from fish_common import BOARD_SCOPES, UNATTRIBUTED, board_relpath  # noqa: F401
 from fish_db import (    PresenceMigrationError, _CITIZENS_ALL_COLUMNS, _PRESENCE_SESSION_BACKFILL, _board_seen_backup,
     _citizens_all_view_ddl, _ensure_activity_table, _ensure_board_seen_session, _ensure_board_tables,
     _ensure_boards_home_paths, _ensure_citizens_all_view, _ensure_identity_tables, _ensure_name_tables,
-    _ensure_presence_session, _ensure_push_tables, _ensure_stint_open_index, _ensure_workspace_table,
+    _ensure_presence_session, _ensure_push_tables, _ensure_stint_open_index,
+    _ensure_workspace_table,
     _has_unique_index, _presence_backup, _presence_data_root, _presence_pk_cols,
     _presence_pk_cols_of, _presence_rebuild_ddl, _presence_session_counts, append_event,
     set_config)
@@ -6531,6 +6532,15 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
     budget = int(budget or get_config(conn, "inject.budget_tokens"))
     root_s = str(root)
     want = normalize_injection_sections(sections)
+
+    # ── P1-2（2026-11-20）：cwd 缺失时按**会话键**补齐 ────────────────────
+    # 为什么不给 `inject` 加 cwd 入参：那个工具的入参是**冻结契约**（三条门禁锁着
+    # 「只允许新增可选 token」），加参数会一次性打红 test_corpus_search /
+    # test_identity_p1c / test_push_p0。而 hook 早已把 cwd 落进 `session_context`
+    # （P1-3），按 session_key 取回即可——调用方一个参数都不用多传。
+    # 取不到就保持 None：下游照原样走「显式 → 档期 → workspace_map → 兜底」。
+    if not cwd and session_key:
+        cwd = fish_activity.session_cwd(conn, session_key) or None
 
     # ---- L0 身份（主人 / 行动者 必须分开）----
     # F-P2-2：**identity 记忆不进 L0、也不进注入包**（实测：12 条 identity，注入包 0 条），
