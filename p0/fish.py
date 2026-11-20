@@ -8494,6 +8494,34 @@ def cmd_healthcheck(args):
             print(_line)
     except Exception as exc:        # noqa: BLE001
         print(f"  知识库索引：判不到（{type(exc).__name__}: {exc}）")
+    # 采集活性（2026-11-20）：**每个 host 单独看**，不看总量。
+    #
+    # 为什么必须单列这一段：hook 采集断掉是静默的——插件加载失败、junction 断链、
+    # 宿主升级改内部接口，表现全都是"不再新增"，而没有任何东西会因此报错。
+    # 2026-11-09 起 DSH 侧断流 11 天没人发现，因为 WorkBuddy 一直在采，
+    # 总数看起来一直"有数据"。**总量正常不等于每个通道都活着。**
+    #
+    # 这里的口径（详见 fish_activity.collection_liveness 的 docstring）：
+    #   · 超过阈值没有任何新记录 = 疑似断流，单独报；
+    #   · 声明过的 host 一次都没出现过 = "接了但没生效"，比断流更该看一眼；
+    #   · 「没采过」与「很久没采」分开写——前者是没接过，后者才是断了。
+    #
+    # 退出码**不并入**这一项：24 小时阈值下，休假/周末本来就可能没有动作，
+    # 把它算进 exit 1 会让"坏"这个信号同时代表两件事（与全文索引缺口同理）。
+    try:
+        live = fish_activity.collection_liveness(
+            conn, hosts=("dsh", "workbuddy"))
+        for name, item in sorted(live["hosts"].items()):
+            if item.get("never_seen"):
+                print(f"  ⚠ 采集活性：{name} 从未采到过 —— 接了但一次都没生效")
+            elif item["stale"]:
+                print(f"  ⚠ 采集活性：{name} 已停 {live['stale_hours']} 小时以上"
+                      f"（最后 {item['last_seen']}）—— **疑似断流**，查 hook 插件是否加载")
+            else:
+                print(f"  采集活性：{name} 正常（最后 {item['last_seen']}，"
+                      f"{live['stale_hours']}h 内 {item['recent']} 条）")
+    except Exception as exc:        # noqa: BLE001 —— 活性检查失败不该拖垮主库体检
+        print(f"  采集活性：判不到（{type(exc).__name__}: {exc}）")
     conn.close()
     # F-P1-6：**体检的结论必须能被机器读到**（退出码是脚本唯一可读的结论）。
     # 旧实现直接结束 → 永远 exit 0，于是「断链 1 条」在 && 链条里表现为成功。

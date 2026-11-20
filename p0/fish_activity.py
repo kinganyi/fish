@@ -1544,6 +1544,64 @@ def stats(conn, *, days: int = 1, now=None, asks_path=None) -> dict:
             "by_hour": sorted(by_hour.items())}
 
 
+# ------------------------------------------------------------------ 采集活性
+
+# 默认阈值：24 小时没有任何新记录就判「疑似断流」。
+#
+# 为什么是 24 小时而不是更短：人不是每时每刻都在干活——周末、休假、整天开会都可能
+# 一整天没有写动作。判据太紧会天天误报，误报多了人就学会忽略它，那比没有更糟。
+# 24 小时的含义是「一整天一次工具调用都没有」，那在正常使用下不成立。
+LIVENESS_STALE_HOURS = 24
+
+
+def collection_liveness(conn, *, now=None, stale_hours: int = LIVENESS_STALE_HOURS,
+                        hosts=None) -> dict:
+    """每个 host 的采集活性：最后一条活动距今多久、是否已超过阈值。
+
+    为什么需要这个读数（2026-11-20 的教训）
+
+    hook 采集是**静默**的：插件加载失败、junction 断链、宿主升级改了内部接口——
+    这些故障的表现全都一样，就是「数据不再新增」，而**没有任何东西会因此报错**。
+    2026-11-09 起 DSH 侧断流 11 天，期间没人发现，因为 WorkBuddy 一直正常在采，
+    总量看起来一直「有数据」。**只看总量是看不出断流的。**
+
+    所以这里按 host 分别算：
+      · `last_seen` 为 `None` = 这个 host **从来没采到过**（没接过，不是断了）；
+      · 有值但超过 `stale_hours` = **疑似断流**，这才是要报警的形态；
+      · 阈值用「小时」而不是「条数」：条数取决于人干了多少活，不取决于采集是否活着。
+
+    `hosts` 显式给出「应该有采集的 host」清单时，清单里从没出现过的一并报出来——
+    那是「接了但一次都没生效」，比断流更需要人看一眼。
+    """
+    now_dt = _dt(now)
+    cutoff = (now_dt - datetime.timedelta(hours=max(int(stale_hours or 1), 1))
+              ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = {}
+    for host, last, total in conn.execute(
+            "SELECT host, MAX(seen_at), COUNT(*) FROM tool_activity "
+            "GROUP BY host ORDER BY host").fetchall():
+        name = (host or "(未标 host)")
+        fresh = conn.execute(
+            "SELECT COUNT(*) FROM tool_activity WHERE host IS ? AND seen_at >= ?",
+            (host, cutoff)).fetchone()[0]
+        rows[name] = {
+            "last_seen": last,
+            "total": int(total),
+            "recent": int(fresh),
+            "stale": bool(last is not None and fresh == 0),
+        }
+    for declared in (hosts or ()):
+        rows.setdefault(declared, {"last_seen": None, "total": 0, "recent": 0,
+                                   "stale": False, "never_seen": True})
+    stale = sorted(name for name, item in rows.items() if item["stale"])
+    never = sorted(name for name, item in rows.items() if item.get("never_seen"))
+    return {"as_of": now_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "stale_hours": int(stale_hours or LIVENESS_STALE_HOURS),
+            "cutoff": cutoff, "hosts": rows,
+            "stale_hosts": stale, "never_seen_hosts": never,
+            "ok": not stale and not never}
+
+
 # ------------------------------------------------------------------ hook 唯一入口
 
 
