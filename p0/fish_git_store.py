@@ -34,11 +34,21 @@ SQL 里 `NULL = NULL` 恒为 false。无远端仓库（空仓库、本地仓库�
 """
 import sqlite3
 import time as _time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import fish_common
+import fish_db
 import fish_git
 import fish_surface
+
+
+def _iso(ts):
+    """git 的 unix 时间戳 → UTC ISO（`%Y-%m-%dT%H:%M:%SZ`）。判不到返回 None。"""
+    try:
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError, OSError):
+        return None
 
 
 def ensure_repo(conn, *, identity=None, identity_kind="unknown",
@@ -147,10 +157,157 @@ def record_obs(conn, *, checkout_id, probe, shallow=False, now=None, probe_ms=No
     return cur.lastrowid
 
 
+def record_commit(conn, *, root, repo_id, branch=None, now=None):
+    """采集 HEAD 的提交，写事件（真源）+ 投影（派生表）。返回 dict 或 None。
+
+    ## 幂等与增量：**用 sha，不用时间**
+
+    J9 要求「commit 增量不重不漏，两个方向都测」。这里刻意**不使用任何时间水位**：
+
+    · **不漏**：`git commit --amend` 会换 sha，但 author-date 通常被保留
+      （改的是 committer-date）。按 author-date 做水位会**漏采**（实测 0 条 vs
+      按 ref 判 1 条）；按 committer-date 做水位又会在 rebase 后**重采**。
+    · **不重**：`git_commit.sha` 是 PRIMARY KEY，同一 sha 第二次进来直接跳过。
+
+    所以两个方向都由「sha 是主键」这一个事实同时保证，不需要额外水位表。
+
+    ## 先写事件、再写投影
+
+    `events` 是真相源，`git_commit` 可由事件重放重建。事务边界由调用方控制
+    （`append_event(commit=False)`），这样「事件 + 投影」要么一起成、要么一起不成。
+    """
+    info = fish_git.read_commit(root, "HEAD")
+    if not info:
+        return None
+    sha = info["sha"]
+    if conn.execute("SELECT 1 FROM git_commit WHERE sha=?", (sha,)).fetchone():
+        return {"sha": sha, "recorded": False, "reason": "already_present"}
+    stamp = now or fish_common.now_utc()
+    event_id = fish_db.append_event(
+        conn, "git.commit",
+        actor={"kind": "system", "id": "fish_git"},
+        subject={"repo_id": repo_id, "sha": sha},
+        payload={"sha": sha, "repo_id": repo_id,
+                 "content_root": info["content_root"],
+                 "branch_seen": branch, "subject": info["subject"]},
+        cause="hook:git commit", commit=False)
+    conn.execute(
+        "INSERT OR IGNORE INTO git_commit (sha, repo_id, authored_at, committed_at, "
+        "author_email, author_name, subject, is_merge, branch_seen, content_root, "
+        "event_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (sha, repo_id, _iso(info["authored_at"]) or stamp,
+         _iso(info["committed_at"]) or stamp,
+         info["author_email"], info["author_name"], info["subject"],
+         info["is_merge"], branch, info["content_root"], event_id))
+    return {"sha": sha, "recorded": True, "event_id": event_id}
+
+
+def rebuild_commit_projection(conn):
+    """从 `events` 重放 `git.commit` 事件，重建 `git_commit` 投影（P4-1 判据）。
+
+    这是「投影可从事件重建」的可执行证明：清空投影表后调它，行数应当回到重放前的值。
+    **只重建投影，不动 events**（events 是不可变的真源）。
+    返回写入的行数。
+    """
+    rows = conn.execute(
+        "SELECT event_id, payload FROM events WHERE type='git.commit' ORDER BY seq"
+    ).fetchall()
+    restored = 0
+    for event_id, payload_json in rows:
+        try:
+            import json as _json
+            p = _json.loads(payload_json)
+        except Exception:                  # 坏 payload：跳过，不猜
+            continue
+        sha, repo_id = p.get("sha"), p.get("repo_id")
+        if not sha or not repo_id:
+            continue
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO git_commit (sha, repo_id, authored_at, committed_at, "
+            "subject, content_root, event_id) VALUES (?,?,?,?,?,?,?)",
+            (sha, repo_id, p.get("committed_at") or "", p.get("committed_at") or "",
+             p.get("subject"), p.get("content_root"), event_id))
+        restored += cur.rowcount or 0
+    return restored
+
+
+def link_create(conn, *, src_kind, src_id, dst_kind, dst_id, rel,
+                source="explicit", confidence=1.0, evidence=None,
+                content_hash=None, now=None):
+    """建立一条记忆↔提交（或 ↔仓库/工作副本）的关联，返回 `git_link.id`。
+
+    **为什么独立表不扩展 `links`**：`links` 两端必须是 `code_index` 里的编码
+    （`gov_apply.py` 的健康检查 + `fish_maintenance.py` 的 24h 维护都强制），
+    把 commit SHA 塞进去会立刻变成悬空边、24 小时后被 `suppressed=1` 压掉。
+
+    重复建立同一条关联（同一 src/dst/rel）返回已有的 id，不报错——
+    调用方（hook / 手工工具）不需要先查再建。
+    """
+    stamp = now or fish_common.now_utc()
+    row = conn.execute(
+        "SELECT id, removed_at FROM git_link WHERE src_kind=? AND src_id=? AND "
+        "dst_kind=? AND dst_id=? AND rel=?",
+        (src_kind, src_id, dst_kind, dst_id, rel)).fetchone()
+    if row:
+        # 已存在：若曾被软删，这次建立视为「恢复」
+        if row[1]:
+            conn.execute("UPDATE git_link SET removed_at=NULL WHERE id=?", (row[0],))
+        return row[0]
+    cur = conn.execute(
+        "INSERT INTO git_link (src_kind, src_id, dst_kind, dst_id, rel, source, "
+        "confidence, evidence, content_hash, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (src_kind, src_id, dst_kind, dst_id, rel, source, confidence,
+         evidence, content_hash, stamp))
+    return cur.lastrowid
+
+
+def link_remove(conn, link_id, *, now=None):
+    """**软删除**一条关联（写 `removed_at`），返回是否命中。
+
+    J10 的判据就在这一行：物理删除之后「撤销」无从谈起（追溯不到原来关联过什么），
+    所以这里只打时间戳。`link_restore` 把时间戳清回 NULL 即完成回滚。
+    """
+    cur = conn.execute("UPDATE git_link SET removed_at=? WHERE id=? AND removed_at IS NULL",
+                       (now or fish_common.now_utc(), link_id))
+    return bool(cur.rowcount)
+
+
+def link_restore(conn, link_id):
+    """撤销软删除（回滚），返回是否命中。"""
+    cur = conn.execute("UPDATE git_link SET removed_at=NULL WHERE id=? AND removed_at IS NOT NULL",
+                       (link_id,))
+    return bool(cur.rowcount)
+
+
+def links_of(conn, *, src_kind=None, src_id=None, dst_kind=None, dst_id=None,
+             include_removed=False):
+    """按 src 或 dst 查关联；默认**不含**已软删的。
+
+    两个维度都支持，因为真实问题两个方向都会问：「这条记忆改过哪些提交」
+    和「这个提交实现了哪些记忆」。
+    """
+    where, params = [], []
+    for col, val in (("src_kind", src_kind), ("src_id", src_id),
+                     ("dst_kind", dst_kind), ("dst_id", dst_id)):
+        if val is not None:
+            where.append(f"{col}=?")
+            params.append(val)
+    if not include_removed:
+        where.append("removed_at IS NULL")
+    sql = ("SELECT id, src_kind, src_id, dst_kind, dst_id, rel, source, confidence, "
+           "evidence, content_hash, created_at, removed_at FROM git_link")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id"
+    return [dict(zip(("id", "src_kind", "src_id", "dst_kind", "dst_id", "rel",
+                      "source", "confidence", "evidence", "content_hash",
+                      "created_at", "removed_at"), r)) for r in conn.execute(sql, params)]
+
+
 def latest_obs(conn, checkout_id):
     """读某工作副本的**最近一次**观测；没有返回 None。
 
-    **没有就是 None，不是「干净」**（J4 的正向断言靠这条）。
+    **没有就是 None，不是「干净」**（J4 的反向断言靠这条）。
     """
     row = conn.execute(
         "SELECT sampled_at, branch, head_sha, dirty, state, degraded_reason, "
@@ -169,8 +326,8 @@ def observe(conn, path, *, now=None):
     """对 `path` 所在仓库做一次完整采集并落库，返回结构化结果（P3-1 入口）。
 
     它**总是**返回一个 dict（含 `state`），从不抛异常：调用方（hook）需要的是
-    「有一次观测」而不是「异常」。但失败不许静默——走 `warn_ignored`，
-    并把原因写进 `degraded_reason`（形如 `db_error:IntegrityError`）。
+    「有一次观测」而不是「异常」。但失败不许静默——走 `warn_ignored`，并把原因
+    写进 `degraded_reason`（形如 `db_error:IntegrityError`）。
     """
     started = _time.time()
     norm_root = fish_git.discover_root(path)

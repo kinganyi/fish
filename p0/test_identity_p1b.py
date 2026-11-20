@@ -153,7 +153,10 @@ MCP_TOOL_NAMES = ["remember", "recall", "neighbors", "resolve_code", "read_body"
                   "session_start", "board", "kb", "kb_write",
                   # 2026-10-27（语料层 T03）：18 → 19，新增 `corpus`
                   # （search/read/stats 三读动作；主理人已批准的设计契约变更）。
-                  "corpus", "profile_show", "profile_propose"
+                  # 2026-11-20（fish 引入 git 的 P4-4）：21 → 23，追加两个**只读**
+                  # git 工具（方案 §6：不加写仓库的工具）。旧 21 个名字/顺序不动。
+                  "corpus", "profile_show", "profile_propose",
+                  "git_repo_status", "git_repo_commits"
 ]
 
 _SQL_START = re.compile(r"^(SELECT|INSERT|UPDATE|DELETE|PRAGMA|ALTER|CREATE|REPLACE)\b", re.I)

@@ -331,6 +331,55 @@ def probe_shallow(root):
     return bool(ok and out.strip() == "true")
 
 
+# 一次 git 调用取全部需要的提交字段（\x00 分隔，避免 subject 里有空格干扰）
+_COMMIT_FORMAT = "%H%x00%at%x00%ct%x00%ae%x00%an%x00%s%x00%P%x00%T"
+
+
+def read_commit(root, rev="HEAD"):
+    """读一个提交的元数据（**一次** git 调用）。判不到返回 None。
+
+    字段口径：
+    · `%at` / `%ct` —— author / committer 时间戳，**两个都留**。做增量水位时
+      用时间会出错（`--amend` 改的是 committer-date，author-date 常被保留），
+      所以本项目的增量判据不用时间，用 **sha 主键**（见 fish_git_store.record_commit）。
+    · `%P` —— 父提交列表，`len(parents) > 1` 即 merge。
+    · `%T` —— tree SHA（`content_root`）。**抗 SHA 失效**：rebase/force-push 会改
+      commit SHA 但不改 tree 内容，存下它才能在 SHA 变了之后回答「这段内容还在不在」。
+    """
+    ok, out, _ = _run_git(["log", "-1", "--format=" + _COMMIT_FORMAT, rev], cwd=root)
+    if not ok:
+        return None
+    parts = out.rstrip("\n").split("\x00")
+    if len(parts) < 8:
+        return None
+    sha, at, ct, ae, an, subj, parents, tree = parts[:8]
+    if not sha.strip():
+        return None
+    plist = parents.split()
+    return {
+        "sha": sha.strip(),
+        "authored_at": at.strip(), "committed_at": ct.strip(),
+        "author_email": ae.strip() or None, "author_name": an.strip() or None,
+        "subject": subj or None,
+        "is_merge": 1 if len(plist) > 1 else 0,
+        "content_root": tree.strip() or None,
+        "parents": plist,
+    }
+
+
+def commit_in_range(root, since_ref, until_ref="HEAD"):
+    """列出 `since_ref..until_ref` 之间的提交 sha（**增量采集**用）。
+
+    只返回 sha 列表，不读元数据——元数据在真要入库时再逐个读（L2 级成本按需付）。
+    区间为空时 `git rev-list` 输出为空，返回 `[]` 而不是报错。
+    """
+    ok, out, _ = _run_git(
+        ["rev-list", f"{since_ref}..{until_ref}"], cwd=root)
+    if not ok:
+        return []
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
 # ══════════════════════════════════════════════════════════════════
 # 四、离线清单：一次性基线（与运行时的 P11 分工明确）
 # ══════════════════════════════════════════════════════════════════

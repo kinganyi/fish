@@ -114,7 +114,9 @@ class MCPProtocolTest(unittest.TestCase):
                                  "close_project", "reopen_project",
                                  "inject", "healthcheck", "add_project", "supersede",
                                  "session_start", "board", "kb", "kb_write", "corpus",
-                                   "profile_show", "profile_propose"})
+                                   "profile_show", "profile_propose",
+                                   # 2026-11-20（P4-4）：两个只读 git 工具（21 → 23）
+                                   "git_repo_status", "git_repo_commits"})
         # 每个工具必须有 inputSchema
         for t in r["result"]["tools"]:
             self.assertIn("inputSchema", t)

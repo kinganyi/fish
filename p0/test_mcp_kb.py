@@ -154,8 +154,10 @@ class MCPKBToolsTest(unittest.TestCase):
         """
         r = self.c.request("tools/list")
         names = {t["name"] for t in r["result"]["tools"]}
-        self.assertEqual(names, TOOL_NAMES | {"corpus", "profile_show", "profile_propose"})
-        self.assertEqual(len(r["result"]["tools"]), 21)
+        # 2026-11-20（P4-4）：21 → 23，追加两个只读 git 工具。
+        self.assertEqual(names, TOOL_NAMES | {"corpus", "profile_show", "profile_propose",
+                                              "git_repo_status", "git_repo_commits"})
+        self.assertEqual(len(r["result"]["tools"]), 23)
         for tool in r["result"]["tools"]:
             self.assertIn("inputSchema", tool)
             self.assertEqual(tool["inputSchema"]["type"], "object")

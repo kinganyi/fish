@@ -110,7 +110,12 @@ BASELINE_TOOL_PROPS = {
     # 2026-11-11（序2 主人画像）：两个工具，**没有 profile_set**——
     # 画像是人写的，AI 只能 propose（R1-2 写权分离落在接口层）。
     "profile_show": {"group"},
-    "profile_propose": {"group", "name", "value", "rationale", "remove"}
+    "profile_propose": {"group", "name", "value", "rationale", "remove"},
+# 2026-11-20（fish 引入 git 的 P4-4）：两个**只读** git 工具。
+# 方案 §6 明确「不加写仓库的工具」——所以这两个只能读已采下来的快照，
+# 不会去跑 git、更不会改仓库。用户已授权这次名单扩充。
+"git_repo_status": {"path", "repo_id"},
+"git_repo_commits": {"repo_id", "limit"},
 }
 
 # 进程态身份的名字——判据 H 的扫描目标（出现即红，注释不算：只看语法树里的属性访问）。
@@ -573,7 +578,7 @@ class FishIdentityP1cTest(unittest.TestCase):
         # 2026-10-26（T05 / B3）：16 → 18（kb 读 + kb_write 写；读/写是两个权限位，裁决 C2）。
         # 2026-10-27（语料层 T03）：18 → 19（新增 `corpus`：search/read/stats 三读动作；
         # 主理人已批准的设计契约变更；18 个旧工具的描述/schema 由 golden 逐字锁住）。
-        self.assertEqual(len(names), 21,
+        self.assertEqual(len(names), 23,
                          f"{where}：工具数量变了（{len(names)} 个：{names}）")
         self.assertEqual(sorted(names), sorted(BASELINE_TOOL_PROPS),
                          f"{where}：工具集合变了：{names}")

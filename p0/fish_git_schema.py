@@ -139,6 +139,76 @@ _GIT_OBS_INDEXES = (
     "CREATE INDEX IF NOT EXISTS ix_git_obs_state ON git_obs(state)",
 )
 
+# ── Phase 4：事件与关联（2026-11-20）──────────────────────────────────
+#
+# ## git_commit 是**派生投影**，不是真源
+#
+# 真源是 `events` 表里的 `type='git.commit'` 事件；本表可由事件重放重建
+# （与 `code_index` 之于 events 是同一种关系，`fish_rebuild.py` 已有先例）。
+# 所以它**没有 append-only 触发器**——重建时本来就要能删能写。
+#
+# `content_root`（tree SHA）是为「抗 commit SHA 失效」：rebase/force-push 会改
+# commit SHA 但不改 tree/blob 内容。存下 tree SHA，才能在 SHA 变了之后仍回答
+# 「这段内容还在不在」。
+_GIT_COMMIT_DDL = """CREATE TABLE IF NOT EXISTS git_commit (
+  sha           TEXT PRIMARY KEY,
+  repo_id       INTEGER NOT NULL REFERENCES git_repo(repo_id),
+  authored_at   TEXT NOT NULL,
+  committed_at  TEXT NOT NULL,
+  author_email  TEXT,
+  author_name   TEXT,
+  subject       TEXT,
+  is_merge      INTEGER NOT NULL DEFAULT 0,
+  files_changed INTEGER,
+  insertions    INTEGER,
+  deletions     INTEGER,
+  branch_seen   TEXT,
+  content_root  TEXT,
+  event_id      TEXT,
+  superseded_by TEXT,
+  unreachable_since TEXT
+);"""
+
+_GIT_COMMIT_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS ix_git_commit_repo "
+    "ON git_commit(repo_id, authored_at DESC)",
+    "CREATE INDEX IF NOT EXISTS ix_git_commit_root ON git_commit(content_root)",
+)
+
+# ## git_link 为什么是独立表，不扩展 `links`
+#
+# `links` 的两端必须是 `code_index` 里的编码——`gov_apply.py:292` 的健康检查
+# （悬空边计数）与 `fish_maintenance.py:423` 的 24h 维护都会强制这一点。
+# 把 commit SHA 塞进去会立刻变成「悬空边」，24 小时后被 `suppressed=1` 压掉。
+# 独立表是唯一不破坏现有不变量的做法。
+#
+# `removed_at` 是**软删除**：撤销一次关联要能追溯（J10 判据），物理删除做不到。
+# `content_hash` 是 blob 级内容血缘：rebase 改 SHA 不改内容，force-push 后
+# 仍能按 (blob_sha, path) 找到「内容还在、SHA 变了」的提交。
+_GIT_LINK_DDL = """CREATE TABLE IF NOT EXISTS git_link (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  src_kind     TEXT NOT NULL CHECK (src_kind IN ('memory','board','kb','event')),
+  src_id       TEXT NOT NULL,
+  dst_kind     TEXT NOT NULL CHECK (dst_kind IN ('commit','repo','checkout')),
+  dst_id       TEXT NOT NULL,
+  rel          TEXT NOT NULL
+               CHECK (rel IN ('implemented_by','produced','revised_in','discussed_in')),
+  source       TEXT NOT NULL CHECK (source IN ('explicit','inferred')),
+  confidence   REAL NOT NULL DEFAULT 1.0,
+  evidence     TEXT,
+  content_hash TEXT,
+  created_at   TEXT NOT NULL,
+  removed_at   TEXT,
+  UNIQUE(src_kind, src_id, dst_kind, dst_id, rel)
+);"""
+
+_GIT_LINK_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS ix_git_link_src "
+    "ON git_link(src_kind, src_id, removed_at)",
+    "CREATE INDEX IF NOT EXISTS ix_git_link_dst "
+    "ON git_link(dst_kind, dst_id, removed_at)",
+)
+
 
 def _build_schema() -> str:
     """把五张表与它们的索引拼成一段可进 `executescript` 的 SQL。
@@ -167,6 +237,11 @@ def _build_schema() -> str:
         block(_GIT_REPO_ALIAS_DDL),
         block(_GIT_CHECKOUT_DDL, _GIT_CHECKOUT_INDEXES),
         block(_GIT_OBS_DDL, _GIT_OBS_INDEXES),
+        block(_GIT_COMMIT_DDL, _GIT_COMMIT_INDEXES),
+        block(_GIT_LINK_DDL, _GIT_LINK_INDEXES),
+        # events 的 type 索引（方案 §4.3 明确要求）：实测此前只有 event_id 的
+        # autoindex，而按 type 找「所有 git.commit 事件」是重放投影的必经查询。
+        "CREATE INDEX IF NOT EXISTS ix_events_type ON events(type, seq DESC);",
     ]
     return "\n" + "\n".join(parts) + "\n"
 

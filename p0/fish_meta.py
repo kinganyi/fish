@@ -37,7 +37,13 @@
 import sqlite3
 
 # 当前代码期望的结构版本。**改结构时必须 +1 并写清改了什么。**
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+
+# 版本 4 = 2026-11-20 新增 git 事件与关联层（fish 引入 git 的 Phase 4）：
+#   `git_commit`（派生投影表，可从 events 重放重建）+
+#   `git_link`（独立关联表，软删除可回滚）+
+#   `events(type, seq DESC)` 索引（方案 §4.3 明确要求；此前只有 event_id 的 autoindex）。
+#   全部 DDL 在 fish_git_schema.py，随 SCHEMA 拼装自动生效。
 
 # 版本 3 = 2026-11-20 新增 git 仓库身份层五张表（fish 引入 git 的 Phase 2）：
 #   git_repo / git_remote / git_repo_alias / git_checkout / git_obs，DDL 在

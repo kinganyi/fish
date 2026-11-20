@@ -701,7 +701,10 @@ CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL,
             "corpus",
             # 2026-11-11（序2 主人画像）：19 → 21，新增 profile_show / profile_propose。
             # **没有 profile_set**——画像是人写的，AI 只能提建议（R1-2）。
-            "profile_show", "profile_propose"])
+            "profile_show", "profile_propose",
+            # 2026-11-20（P4-4）：21 → 23，新增两个**只读** git 工具
+            # （方案 §6：不加写仓库的工具）。
+            "git_repo_status", "git_repo_commits"])
         expect = {
             "remember": {"project", "title", "body", "mem_type", "tags", "cause",
                          "occurred_at", "supersedes", "attachments"},
@@ -744,6 +747,10 @@ CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL,
             # token 由 `_attach_token` 统一补；这里只列业务字段。
             "corpus": {"action", "host", "limit", "max_chars", "pointer", "project",
                        "query", "ranker", "role"},
+            # 2026-11-20（P4-4）：两个只读 git 工具。token 同样由 _attach_token 补，
+            # 这里只列业务字段。**没有写仓库的工具**（方案 §6）。
+            "git_repo_status": {"path", "repo_id"},
+            "git_repo_commits": {"repo_id", "limit"},
         }
         for t in mcp_server.TOOLS:
             extra = {"token"} | ({"bind_token"} if t["name"] == "session_start" else set())

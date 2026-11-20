@@ -42,6 +42,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fish
+import fish_activity
+import fish_git_store
+import fish_surface
 import fish_trust
 import fish_profile   # noqa: E402 —— 主人画像（R1-2：AI 只能 propose）
 import fish_corpus  # noqa: E402
@@ -632,6 +635,46 @@ TOOLS = [
                 "remove": {"type": "boolean", "description": "改为建议清空这一格"},
             },
             "required": ["group", "name"],
+        },
+    },
+    # 2026-11-20（fish 引入 git 的 P4-4）：两个**只读** git 工具，**追加在末尾**
+    # （沿用既有约定：新工具不改旧工具的名字与顺序）。21 → 23。
+    # 方案 §6 明确「不加写仓库的工具」——它们只读已采下来的快照。
+    {
+        "name": "git_repo_status",
+        "title": "仓库状态",
+        "description": "查一个 git 仓库的当前状态（分支 / HEAD / 脏净 / **采样时刻**）。\n\n"
+                       "**只读**——本工具不会去跑 git、不会改任何仓库。它读的是 hook 或 CLI "
+                       "已经采下来的观测快照。所以先看 `采样时刻`：如果它很旧，说明这个仓库"
+                       "最近没被采过，状态不代表当下。\n\n"
+                       "四态如实返回：`clean`（净）/ `dirty`（有未提交改动）/ "
+                       "`unknown`（**没采到**，不是干净）/ `degraded`（采到但不可靠：浅克隆等）。\n"
+                       "判不到时明说「没有记录」，**不会编一个状态出来**。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "仓库路径或其子目录（可选；缺省用本会话的 cwd）"},
+                "repo_id": {"type": "integer",
+                            "description": "直接按 repo_id 查（可选，优先于 path）"},
+            },
+        },
+    },
+    {
+        "name": "git_repo_commits",
+        "title": "仓库提交",
+        "description": "查一个仓库**已被采集到**的提交（sha / 时间 / 标题 / 是否 merge）。\n\n"
+                       "只列已入库的提交——本工具不去跑 `git log`。默认只采「从今往后」的新提交"
+                       "（方案 §4.3：历史全量回填会让事件表 ×5.6，所以它是独立的可选任务）。\n\n"
+                       "所以条数少不代表仓库没历史，只代表**还没采**。判不到时明说。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo_id": {"type": "integer",
+                            "description": "按 repo_id 查（可选；缺省用本会话 cwd 解析出的仓库）"},
+                "limit": {"type": "integer",
+                          "description": "最多返回几条（缺省 20，上限 200）"},
+            },
         },
     },
 ]
@@ -2258,6 +2301,98 @@ class FishServer:
             lines.append(f"（{res['source']['note']}）")
         return "\n".join(lines) + "\n"
 
+    def _git_checkout_for(self, path="", repo_id=None, ident=None):
+        """把「path / repo_id / 会话 cwd」解析成一个 checkout 行；判不到返回 None。
+
+        分量级最长前缀匹配（`checkout.path` 是 `cwd` 的祖先），**不 spawn git**——
+        这个查询会被高频工具调用，145ms 的进程开销不值得。
+        """
+        if repo_id:
+            row = self.conn.execute(
+                "SELECT checkout_id, path, repo_id FROM git_checkout "
+                "WHERE repo_id=? AND missing_since IS NULL ORDER BY is_primary DESC, "
+                "last_seen_at DESC LIMIT 1", (repo_id,)).fetchone()
+            return row
+        target = path or fish_activity.session_cwd(
+            self.conn, getattr(ident, "session_key", None)) or ""
+        norm = fish_surface.normalize_path(target) if target else ""
+        if not norm:
+            return None
+        best = None
+        for cid, cpath, rid in self.conn.execute(
+                "SELECT checkout_id, path, repo_id FROM git_checkout "
+                "WHERE missing_since IS NULL"):
+            base = (cpath or "").rstrip("/")
+            if base and (norm == base or norm.startswith(base + "/")):
+                if best is None or len(base) > len(best[1].rstrip("/")):
+                    best = (cid, base, rid)
+        return best
+
+    def tool_git_repo_status(self, a, ident):
+        """查仓库状态（**只读**：不跑 git，读已采下来的快照）。"""
+        try:
+            row = self._git_checkout_for(a.get("path") or "", a.get("repo_id"), ident)
+        except Exception as exc:           # 老库还没有 git 表
+            return f"这个库还没有 git 观测表（{type(exc).__name__}）——先升级库结构再查。\n"
+        if not row:
+            return ("没有这个仓库的记录。\n\n"
+                    "**注意**：没有记录 ≠ 仓库是干净的，只代表它还没被采过。\n"
+                    "传入 `path`（仓库或其子目录）或 `repo_id` 再看一次。\n")
+        cid, cpath, rid = row
+        repo = self.conn.execute(
+            "SELECT identity, display_name, ownership FROM git_repo WHERE repo_id=?",
+            (rid,)).fetchone()
+        ident_s, name, own = repo if repo else (None, None, "unknown")
+        obs = fish_git_store.latest_obs(self.conn, cid)
+        lines = [f"仓库：{name or (ident_s or cpath)}", f"路径：{cpath}"]
+        if ident_s:
+            lines.append(f"身份：{ident_s}")
+        lines.append(f"归属：{own}")
+        if not obs:
+            lines.append("状态：**未采集**——不是「干净」，是还没有采过")
+        else:
+            state = obs.get("state") or "unknown"
+            label = {"clean": "净", "dirty": "有未提交改动",
+                     "degraded": "采到但不可靠"}.get(state, "未采集——不是「干净」，是没采到")
+            lines.append(f"状态：{label}")
+            lines.append(f"分支：{obs.get('branch') or '(detached)'}")
+            sha = obs.get("head_sha") or ""
+            lines.append(f"HEAD：{sha[:12] or '(未知)'}")
+            if obs.get("degraded_reason"):
+                lines.append(f"降级原因：{obs['degraded_reason']}")
+            lines.append(f"**采样时刻：{obs.get('sampled_at') or '(未知)'}**（早于现在就不是当下状态）")
+        return "\n".join(lines) + "\n"
+
+    def tool_git_repo_commits(self, a, ident):
+        """查仓库**已采集到**的提交（**只读**：不跑 git log）。"""
+        try:
+            row = self._git_checkout_for("", a.get("repo_id"), ident)
+        except Exception as exc:
+            return f"这个库还没有 git 表（{type(exc).__name__}）——先升级库结构再查。\n"
+        if not row:
+            return ("没有这个仓库的记录（传入 `repo_id` 或先让会话有 cwd）。\n\n"
+                    "**条数少不代表仓库没历史**：默认只采「从今往后」的新提交"
+                    "（方案 §4.3：历史全量回填会让事件表 ×5.6）。\n")
+        cid, cpath, rid = row
+        try:
+            limit = int(a.get("limit") or 20)
+        except (TypeError, ValueError):
+            limit = 20
+        limit = max(1, min(limit, 200))
+        rows = self.conn.execute(
+            "SELECT sha, authored_at, committed_at, subject, is_merge, branch_seen "
+            "FROM git_commit WHERE repo_id=? ORDER BY committed_at DESC LIMIT ?",
+            (rid, limit)).fetchall()
+        if not rows:
+            return ("这个仓库还没有采集到任何提交。\n\n"
+                    "**这不是「没有提交」**——只代表还没采。默认只采从现在起的新提交。\n")
+        out = [f"仓库 {rid}（{cpath}）最近的 {len(rows)} 条提交："]
+        for sha, authored, committed, subject, is_merge, branch in rows:
+            mark = " [merge]" if is_merge else ""
+            out.append(f"- {sha[:12]} {committed or authored or ''} "
+                       f"{(subject or '')[:60]}{mark}")
+        return "\n".join(out) + "\n"
+
     def tool_healthcheck(self, a, ident):
         total = self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         mem = self.conn.execute("SELECT COUNT(*) FROM code_index WHERE status='active'").fetchone()[0]
@@ -2297,6 +2432,10 @@ class FishServer:
             "kb_write": self.tool_kb_write,
             # T03（2026-10-27）：对话语料只读面（18 → 19 个工具）。
             "corpus": self.tool_corpus,
+            # P4-4（2026-11-20）：git 仓库只读面（21 → 23 个工具）。
+            # **只加读，不加写仓库的工具**——方案 §6 明确要求。
+            "git_repo_status": self.tool_git_repo_status,
+            "git_repo_commits": self.tool_git_repo_commits,
         }
         if name not in table:
             raise ValueError(f"未知工具：{name}")
