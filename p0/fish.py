@@ -38,6 +38,7 @@ from pathlib import Path
 # 三者都是纯 stdlib 小模块，hook 侧也要 import 它们——**判定只许有一份实现**，
 # 所以 fish 从这里 import 并原样再导出（`fish.surface_hit` 等旧名字仍然可用）。
 import fish_activity
+import fish_git_store
 import fish_naming
 import fish_surface
 from fish_surface import _path_inside, normalize_surface, surface_hit  # noqa: F401 —— 对外仍是 fish 的名字
@@ -5853,6 +5854,67 @@ def _resolve_injection_project(conn, citizen_id, project=None, cwd=None) -> tupl
     return None, "undeclared", []
 
 
+def _render_repo_line(conn, cwd) -> str:
+    """L1 的仓库行：当前工作目录所属仓库的最近一次观测（P3-3 · 2026-11-20）。
+
+    ## 三个刻意的设计
+
+    **① 判不到就返回空串（不出现）。**
+    不写「未知仓库」这种噪音——噪音会训练 AI 跳过整个 status 段（③④ 两段
+    的老注释里有同一条纪律）。
+
+    **② `unknown` 绝不说成「净」。**
+    `unknown` 的真实含义是「没采到」，与 `clean` 是**不同的事实**。
+    所以它渲染成「未采集（不是「干净」，是没采到）」而不是「净」。
+    J4 判据的**反向断言**就守这一条。
+
+    **③ 用最长前缀匹配找 checkout，不 spawn git。**
+    cwd 通常是仓库内的子目录。这里在内存里对已登记的 checkout 做分量级
+    最长前缀匹配（`path` 是 `cwd` 的祖先），比 `discover_root` 省 145ms。
+    """
+    if not cwd:
+        return ""
+    norm = fish_surface.normalize_path(cwd)
+    if not norm:
+        return ""
+    try:
+        rows = conn.execute(
+            "SELECT c.checkout_id, c.path, r.display_name, r.identity "
+            "FROM git_checkout c JOIN git_repo r ON r.repo_id = c.repo_id "
+            "WHERE c.missing_since IS NULL").fetchall()
+    except sqlite3.Error:
+        return ""                          # 老库还没有 git 表：这一行就不出现
+    best = None
+    for cid, path, name, ident in rows:
+        base = (path or "").rstrip("/")
+        if not base:
+            continue
+        if norm == base or norm.startswith(base + "/"):
+            if best is None or len(base) > len(best[1].rstrip("/")):
+                best = (cid, base, name, ident)
+    if best is None:
+        return ""
+    cid, base, name, ident = best
+    label = name or (ident.rsplit("/", 1)[-1] if ident else base.rsplit("/", 1)[-1])
+    try:
+        obs = fish_git_store.latest_obs(conn, cid)
+    except sqlite3.Error:
+        obs = None
+    if obs is None:
+        return f"当前仓库：{label}（未采集——不是「干净」，是还没采过）"
+    state = obs.get("state") or "unknown"
+    if state == "clean":
+        status = "净"
+    elif state == "dirty":
+        status = "有未提交改动"
+    elif state == "degraded":
+        status = f"状态不可靠（{obs.get('degraded_reason') or '原因未知'}）"
+    else:
+        status = "未采集——不是「干净」，是没采到"
+    branch = obs.get("branch") or "(detached)"
+    return f"当前仓库：{label}（{branch}，{status}）"
+
+
 def _render_project_head(project, count, last_seen, source) -> str:
     """L1 的项目行。走 ④ 档（inferred）时**必须**带上"这是推断"的标注。
 
@@ -6670,15 +6732,20 @@ def build_injection_pack(conn, root, citizen_id, budget=None, project=None, cwd=
         l1_head = _UNDECLARED_PROJECT_LINE
     dormant_n = conn.execute(
         "SELECT COUNT(*) FROM code_index WHERE dormant=1 AND status='active'").fetchone()[0]
+    # P3-3（2026-11-20）：仓库行。判不到返回空串——**空就不出现**，不写噪音。
+    repo_line = _render_repo_line(conn, cwd)
 
     def render_l1():
-        # `status` = 坐标（当前项目 / 同时在其他项目 / 休眠计数）；
+        # `status` = 坐标（当前项目 / 当前仓库 / 同时在其他项目 / 休眠计数）；
         # `recent` = L1 的"最近三件事"条目。两段分开选的理由：坐标是"我在哪"，
         # 条目是"这里有什么"——后者才是可省的那一半（要内容可以 recall）。
         lines = []
         if "status" in want:
             if l1_head:
                 lines.append(l1_head)
+            # P3-3：仓库行紧跟在项目行后面——两者都是"我在哪"的坐标
+            if repo_line:
+                lines.append(repo_line)
             if other_projects:
                 lines.append("同时在其他项目：" + " / ".join(other_projects))
         if "recent" in want and recent:

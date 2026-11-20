@@ -231,24 +231,49 @@ def read_remotes(root):
 # ══════════════════════════════════════════════════════════════════
 
 def probe_l0(root):
-    """L0：只读 ref，拿分支与 HEAD。近零成本（实测 40 仓 67.8ms）。
+    """L0：只读 ref，拿分支 + HEAD。
 
-    不用手解 `.git/HEAD` + `packed-refs` 的原因：worktree/submodule 的 `.git`
-    是**文件**不是目录、bare 仓没有 `.git/HEAD`、reftable 后端没有 packed-refs
-    ——三种情况都会静默判空。走 `for-each-ref` 更稳。
+    **必须两次 git 调用**，这是实测结论，不是懒得优化：
+
+    · `rev-parse --abbrev-ref HEAD HEAD` 想一次拿两个值 —— **错**：`--abbrev-ref`
+      是全局选项，两行都会缩成**分支名**，SHA 根本出不来（实测输出
+      `fix/...` / `fix/...`，长度 6 而期望 40）。我的第一版就这么写错了。
+    · `for-each-ref --points-at HEAD` 能一次拿 ref+SHA —— **也错**：它说的是
+      「哪些 ref 指向这个提交」，多分支同提交时会拿到**别的分支名**，不是 HEAD 指向的那个。
+    · 只有 `symbolic-ref --short -q HEAD`（当前分支，detached 时失败）+
+      `rev-parse HEAD`（完整 SHA）是语义正确的。
+
+    代价：两次调用 ≈ 290ms/仓（Windows 上 spawn 一次约 145ms）。**高频场景请用
+    `probe_head_sha`**（一次调用，145ms）——它只取 SHA，够用来判断「有没有新提交」。
+
+    ⚠️ **不要手解 `.git/HEAD` 来省时间**：worktree/submodule 的 `.git` 是**文件**
+    不是目录、bare 仓没有 `.git/HEAD`、reftable 后端没有 `packed-refs`——三种情况
+    都会静默判空（判空比慢更坏）。
     """
     result = {"branch": None, "head_sha": None, "degraded": None}
-    ok, out, err = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=root)
+    ok, out, err = _run_git(["symbolic-ref", "--short", "-q", "HEAD"], cwd=root)
     if ok:
         name = out.strip()
-        result["branch"] = None if name == "HEAD" else name   # detached
-    else:
-        result["degraded"] = "timeout" if "timeout" in err else "unresolvable"
+        result["branch"] = name or None      # detached 时 symbolic-ref 失败，保持 None
+    elif "timeout" in err:
+        result["degraded"] = "timeout"
 
-    ok, out, _ = _run_git(["rev-parse", "HEAD"], cwd=root)
-    if ok:
-        result["head_sha"] = out.strip() or None
+    ok2, out2, err2 = _run_git(["rev-parse", "HEAD"], cwd=root)
+    if ok2:
+        result["head_sha"] = out2.strip() or None
+    elif result["degraded"] is None:
+        result["degraded"] = "timeout" if "timeout" in err2 else "unresolvable"
     return result
+
+
+def probe_head_sha(root):
+    """只要 HEAD 的 SHA（**一次** git 调用，约 145ms）。
+
+    给高频场景用：判断「有没有产生新提交」只需要 SHA，不需要分支名。
+    判不到返回 None（空仓库 / detached 到无效对象 / 超时）。
+    """
+    ok, out, _ = _run_git(["rev-parse", "HEAD"], cwd=root)
+    return (out.strip() or None) if ok else None
 
 
 def probe_l1(root):
@@ -383,3 +408,25 @@ def write_inventory(out_path, roots, *, max_depth=3):
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
+
+
+
+
+# 身份类别映射（URL 形态 → remote/local/unknown）。写库层用它，见 fish_git_store。
+def identity_kind_of(url_kind):
+    """URL 形态 → **身份类别**。
+
+    这两个是**不同维度**，混用会撞 CHECK 约束（实测：`identity_kind IN
+    ('remote','local','unknown')` 报 IntegrityError）：
+
+    · `git_remote.url_kind` = URL 长什么样：direct / proxy / mirror / local_path
+    · `git_repo.identity_kind` = 身份是哪一类：remote / local / unknown
+
+    proxy 与 mirror 算 `remote`——它们的 identity 仍然是**远端身份**，只是来的路
+    不同；那个差别记在 `git_remote.url_kind` 上，不该污染仓库身份的分类。
+    """
+    if url_kind == "local_path":
+        return "local"
+    if url_kind in ("direct", "proxy", "mirror"):
+        return "remote"
+    return "unknown"

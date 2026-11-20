@@ -58,6 +58,9 @@ FISH_PROFILE = P0 / "fish_profile.py"
 # 所以它必须比 schema 更底层）；`fish_git` 是逻辑层（发现器 / 身份归一 / 观测探针）。
 FISH_GIT = P0 / "fish_git.py"
 FISH_GIT_SCHEMA = P0 / "fish_git_schema.py"
+# 2026-11-20（Phase 3）：写库层从 fish_git 拆出（它一度六职责、589 行超窗）。
+# 分层：store → git 是向下（写层用读层的解析结果），反向禁止。
+FISH_GIT_STORE = P0 / "fish_git_store.py"
 
 spec = importlib.util.spec_from_file_location("fish", str(FISH))
 fish = importlib.util.module_from_spec(spec)
@@ -231,6 +234,9 @@ FISH_GIT_LINES_MIN = 250
 FISH_GIT_LINES_MAX = 550
 FISH_GIT_SCHEMA_LINES_MIN = 120
 FISH_GIT_SCHEMA_LINES_MAX = 320
+# Phase 3 拆出的写库层：当前 217 行 → 上界 380（还要容纳 Phase 4/5 的写入入口）
+FISH_GIT_STORE_LINES_MIN = 150
+FISH_GIT_STORE_LINES_MAX = 380
 
 
 def _read(path: Path) -> str:
@@ -456,7 +462,11 @@ class SplitDependencyTest(unittest.TestCase):
                                             "fish_trust", "fish_rebuild", "fish_profile"}),
                                 (FISH_GIT_SCHEMA, {"fish", "fish_kb", "fish_push",
                                                    "fish_trust", "fish_rebuild", "fish_profile",
-                                                   "fish_schema", "fish_db", "fish_common"})):
+                                                   "fish_schema", "fish_db", "fish_common"}),
+                                # Phase 3 拆出的写库层：依赖 fish_git（向下）+ schema/db，
+                                # 但不许碰 fish 本体与任何上层。
+                                (FISH_GIT_STORE, {"fish", "fish_kb", "fish_push",
+                                                  "fish_trust", "fish_rebuild", "fish_profile"})):
             mods = _imported_modules(ast.parse(_read(path)))
             bad = sorted(m for m in mods if m in forbidden)
             self.assertEqual(bad, [], f"{path.name} 反向依赖了 {bad}")
@@ -760,7 +770,8 @@ class SplitSizeTest(unittest.TestCase):
                 ("fish_surface.py", FISH_SURFACE_LINES_MIN, FISH_SURFACE_LINES_MAX),
                 # 2026-11-20（fish 引入 git · Phase 2）：仓库身份层两个新模块
                 ("fish_git.py", FISH_GIT_LINES_MIN, FISH_GIT_LINES_MAX),
-                ("fish_git_schema.py", FISH_GIT_SCHEMA_LINES_MIN, FISH_GIT_SCHEMA_LINES_MAX)):
+                ("fish_git_schema.py", FISH_GIT_SCHEMA_LINES_MIN, FISH_GIT_SCHEMA_LINES_MAX),
+                ("fish_git_store.py", FISH_GIT_STORE_LINES_MIN, FISH_GIT_STORE_LINES_MAX)):
             count = len(_read(P0 / module).split("\n"))
             self.assertGreaterEqual(count, low, f"{module} 只有 {count} 行：搬漏了")
             self.assertLessEqual(count, high, f"{module} 有 {count} 行：长回去了")
