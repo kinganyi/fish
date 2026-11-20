@@ -53,6 +53,11 @@ FISH_REBUILD = P0 / "fish_rebuild.py"
 FISH_SCHEMA = P0 / "fish_schema.py"
 FISH_DB = P0 / "fish_db.py"
 FISH_PROFILE = P0 / "fish_profile.py"
+# 2026-11-20（fish 引入 git · Phase 2）：仓库身份层两个新模块。
+# `fish_git_schema` 只含纯 DDL 字符串常量（`fish_schema` 要 import 它拼 SCHEMA，
+# 所以它必须比 schema 更底层）；`fish_git` 是逻辑层（发现器 / 身份归一 / 观测探针）。
+FISH_GIT = P0 / "fish_git.py"
+FISH_GIT_SCHEMA = P0 / "fish_git_schema.py"
 
 spec = importlib.util.spec_from_file_location("fish", str(FISH))
 fish = importlib.util.module_from_spec(spec)
@@ -219,6 +224,13 @@ FISH_NAMING_LINES_MIN = 220
 FISH_NAMING_LINES_MAX = 420
 FISH_SURFACE_LINES_MIN = 250
 FISH_SURFACE_LINES_MAX = 500
+# 2026-11-20（fish 引入 git · Phase 2）：仓库身份层的两个新模块。
+# 下界守「搬漏了」，上界守「长成第二个巨石」。按当前实测留足余量：
+# fish_git 386 行 → 上界 550；fish_git_schema 175 行 → 上界 320。
+FISH_GIT_LINES_MIN = 250
+FISH_GIT_LINES_MAX = 550
+FISH_GIT_SCHEMA_LINES_MIN = 120
+FISH_GIT_SCHEMA_LINES_MAX = 320
 
 
 def _read(path: Path) -> str:
@@ -434,7 +446,17 @@ class SplitDependencyTest(unittest.TestCase):
                                 # 2026-11-11（序2）：画像模块。只许依赖
                                 # fish_common / fish_schema / fish_db（写事件要它）。
                                 (FISH_PROFILE, {"fish", "fish_kb", "fish_push",
-                                                "fish_trust", "fish_rebuild"})):
+                                                "fish_trust", "fish_rebuild"}),
+                                # 2026-11-20（fish 引入 git · Phase 2）：仓库身份层。
+                                # `fish_git` 只许依赖 fish_common / fish_surface /
+                                # fish_schema / fish_db（都在它之下）；
+                                # `fish_git_schema` 是**纯常量模块**，连 fish_common
+                                # 都不该依赖——它必须在 fish_schema 之下才能被拼进 SCHEMA。
+                                (FISH_GIT, {"fish", "fish_kb", "fish_push",
+                                            "fish_trust", "fish_rebuild", "fish_profile"}),
+                                (FISH_GIT_SCHEMA, {"fish", "fish_kb", "fish_push",
+                                                   "fish_trust", "fish_rebuild", "fish_profile",
+                                                   "fish_schema", "fish_db", "fish_common"})):
             mods = _imported_modules(ast.parse(_read(path)))
             bad = sorted(m for m in mods if m in forbidden)
             self.assertEqual(bad, [], f"{path.name} 反向依赖了 {bad}")
@@ -735,7 +757,10 @@ class SplitSizeTest(unittest.TestCase):
                 ("fish_activity.py", FISH_ACTIVITY_LINES_MIN, FISH_ACTIVITY_LINES_MAX),
                 ("fish_visibility.py", FISH_VISIBILITY_LINES_MIN, FISH_VISIBILITY_LINES_MAX),
                 ("fish_naming.py", FISH_NAMING_LINES_MIN, FISH_NAMING_LINES_MAX),
-                ("fish_surface.py", FISH_SURFACE_LINES_MIN, FISH_SURFACE_LINES_MAX)):
+                ("fish_surface.py", FISH_SURFACE_LINES_MIN, FISH_SURFACE_LINES_MAX),
+                # 2026-11-20（fish 引入 git · Phase 2）：仓库身份层两个新模块
+                ("fish_git.py", FISH_GIT_LINES_MIN, FISH_GIT_LINES_MAX),
+                ("fish_git_schema.py", FISH_GIT_SCHEMA_LINES_MIN, FISH_GIT_SCHEMA_LINES_MAX)):
             count = len(_read(P0 / module).split("\n"))
             self.assertGreaterEqual(count, low, f"{module} 只有 {count} 行：搬漏了")
             self.assertLessEqual(count, high, f"{module} 有 {count} 行：长回去了")

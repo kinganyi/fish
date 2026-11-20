@@ -37,7 +37,13 @@
 import sqlite3
 
 # 当前代码期望的结构版本。**改结构时必须 +1 并写清改了什么。**
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+# 版本 3 = 2026-11-20 新增 git 仓库身份层五张表（fish 引入 git 的 Phase 2）：
+#   git_repo / git_remote / git_repo_alias / git_checkout / git_obs，DDL 在
+#   `fish_git_schema.py`（单独模块的理由见它的 docstring：fish_schema 的 J4
+#   窗口只剩 1 行余量，五张表放不进来；该模块只含字符串常量、不 import 任何
+#   fish_*，所以 schema 依赖它不破坏 J2 分层）。
 
 # 版本 2 = 2026-11-20 新增 `session_context` 表（fish 引入 git 的 P1-3）：
 #   存每个会话的 cwd，供撞车判定的路径绝对化使用。此前 cwd 被 hook 拿到后即丢弃，

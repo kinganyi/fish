@@ -20,7 +20,7 @@ kb 之下。所以 `SCHEMA` 留在 `fish.py`，它从这里和 `fish_kb` 两边�
 本模块不 import 任何 fish_* 模块，所以它在 J2 的允许侧，谁都可以安全依赖它。
 `fish.py` 通过 `from fish_schema import (...)` 保持同名，既有引用一个字都不改。
 """
-
+from fish_git_schema import _GIT_SCHEMA   # git 仓库身份层五张表；理由见该模块 docstring
 
 _ACCESS_LOG_DDL = """CREATE TABLE IF NOT EXISTS memory_access_log (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -666,9 +666,8 @@ CREATE TABLE IF NOT EXISTS citizens (
   last_seen_at     TEXT,
   archived_at      TEXT
 );
--- 注意：owner 的唯一索引不在 SCHEMA 里创建。
--- 旧库的 citizens 表可能还没有 is_owner 列，此时建索引会报 no such column。
--- 索引统一在 migrate() 里「先 ALTER 加列、再建索引」，保证新旧库都能走通。
+-- 注意：owner 的唯一索引不在 SCHEMA 里创建——旧库可能还没有 is_owner 列，
+-- 此时建索引会报 no such column；索引统一在 migrate() 里「先 ALTER 再加索引」。
 
 CREATE TABLE IF NOT EXISTS config (
   key        TEXT PRIMARY KEY,
@@ -687,7 +686,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
   tokenize='unicode61'
 );
 """ + _PUSH_SCHEMA + _IDENTITY_SCHEMA + _WORKSPACE_SCHEMA + _NAME_SCHEMA + _BOARD_SCHEMA \
-    + _ACTIVITY_SCHEMA + _KB_SCHEMA + _PROFILE_SCHEMA   # 画像（2026-11-11 起）
+    + _ACTIVITY_SCHEMA + _KB_SCHEMA + _PROFILE_SCHEMA + _GIT_SCHEMA   # 画像 / git 仓库身份
 
 def connect(root: Path) -> sqlite3.Connection:
     root.mkdir(parents=True, exist_ok=True)
