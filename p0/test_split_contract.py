@@ -201,6 +201,25 @@ FISH_PROFILE_LINES_MAX = 1000
 FISH_TRUST_LINES_MIN = 120
 FISH_TRUST_LINES_MAX = 260
 
+# 2026-11-20（本轮）：**窗口覆盖补全**。上面这些模块都有窗口，但 fish_board / fish_inject /
+# fish_cli / fish_activity / fish_visibility / fish_naming / fish_surface 一直没有——没有窗口
+# 的模块可以无限增长而无人察觉，那是棘轮体系的覆盖漏洞。这里按**当前实测**给它们各自设界：
+# 下界守"搬漏了"，上界守"长成第二个巨石"。
+FISH_BOARD_LINES_MIN = 1800
+FISH_BOARD_LINES_MAX = 2400
+FISH_INJECT_LINES_MIN = 150
+FISH_INJECT_LINES_MAX = 400
+FISH_CLI_LINES_MIN = 700
+FISH_CLI_LINES_MAX = 1100
+FISH_ACTIVITY_LINES_MIN = 1400
+FISH_ACTIVITY_LINES_MAX = 1900
+FISH_VISIBILITY_LINES_MIN = 30
+FISH_VISIBILITY_LINES_MAX = 140
+FISH_NAMING_LINES_MIN = 220
+FISH_NAMING_LINES_MAX = 420
+FISH_SURFACE_LINES_MIN = 250
+FISH_SURFACE_LINES_MAX = 500
+
 
 def _read(path: Path) -> str:
     return path.read_bytes().decode("utf-8")
@@ -515,7 +534,7 @@ class SplitDependencyTest(unittest.TestCase):
 #
 # 这不是密码学意义上的防篡改（人能重算并改字面量），但它把"改一个数字"
 # 变成"必须动一个看起来就不是数据文件的测试文件"。**诚实地说，这是威慑，不是证明。**
-EXPECTED_CHAIN_HEAD = "5e5cf86589f0b4eb818deda895f0e3c818bf359066366db71094515421fb355a"
+EXPECTED_CHAIN_HEAD = "357d8e6b66c7ffbae9000d016f5e3d7ddc59e73d0bd5fb46c4f37dfef571e498"
 EXPECTED_HISTORY_LEN = 5
 # 与上面链头同一时刻的 max。新增历史前，max 不许偏离它。
 EXPECTED_RATCHET_MAX_AT_ANCHOR = 12660
@@ -708,6 +727,18 @@ class SplitSizeTest(unittest.TestCase):
                                 f"fish_db.py 只有 {db_lines} 行：搬漏了")
         self.assertLessEqual(db_lines, FISH_DB_LINES_MAX,
                              f"fish_db.py 有 {db_lines} 行：长回去了")
+        # 2026-11-20（本轮）：窗口覆盖补全——这几个模块此前没有上界。
+        for module, low, high in (
+                ("fish_board.py", FISH_BOARD_LINES_MIN, FISH_BOARD_LINES_MAX),
+                ("fish_inject.py", FISH_INJECT_LINES_MIN, FISH_INJECT_LINES_MAX),
+                ("fish_cli.py", FISH_CLI_LINES_MIN, FISH_CLI_LINES_MAX),
+                ("fish_activity.py", FISH_ACTIVITY_LINES_MIN, FISH_ACTIVITY_LINES_MAX),
+                ("fish_visibility.py", FISH_VISIBILITY_LINES_MIN, FISH_VISIBILITY_LINES_MAX),
+                ("fish_naming.py", FISH_NAMING_LINES_MIN, FISH_NAMING_LINES_MAX),
+                ("fish_surface.py", FISH_SURFACE_LINES_MIN, FISH_SURFACE_LINES_MAX)):
+            count = len(_read(P0 / module).split("\n"))
+            self.assertGreaterEqual(count, low, f"{module} 只有 {count} 行：搬漏了")
+            self.assertLessEqual(count, high, f"{module} 有 {count} 行：长回去了")
         self.assertGreater(len(fish_kb.__all__), 100,
                            "fish_kb 的导出面太小，明显漏名")
         self.assertGreaterEqual(len(_read(FISH_KB).split("\n")), 2500,

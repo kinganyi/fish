@@ -919,7 +919,7 @@ def search(q, terms=None, filters=None, limit=SEARCH_DEFAULT_LIMIT, budget_token
     time_from = filters.pop("time_from", time_from)
     time_to = filters.pop("time_to", time_to)
     limit_val = _clamp_limit(limit)
-    now = rank_mod.utc_now()
+    now = rank_mod.now_utc_dt()   # 排序侧要 datetime（年龄是相对当前时刻算的），不是 UTC 字符串
     degraded = []
     hits = []
     total = 0 if count else None

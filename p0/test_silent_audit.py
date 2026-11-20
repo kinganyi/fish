@@ -56,9 +56,15 @@ class SilentAuditTest(unittest.TestCase):
     def test_warn_ignored_exists_and_writes_stderr(self):
         """出声出口必须存在，且真的写 stderr（不是空函数）。"""
         import fish
+        import fish_common
         self.assertTrue(callable(getattr(fish, "warn_ignored", None)),
                         "fish.warn_ignored 不存在（静默点的统一出口被删了？）")
-        src = (HERE / "fish.py").read_text(encoding="utf-8")
+        # 实现住在 fish_common：领域模块不许 import fish（J2），但都 import fish_common，
+        # 那是唯一能让所有静默点共用一个出口的层。所以这里除了"存在且写 stderr"，
+        # 还要锁"fish 里的就是同一个对象"——复制一份实现会让统一出口退化成两个各自演化的出口。
+        self.assertIs(fish.warn_ignored, fish_common.warn_ignored,
+                      "fish.warn_ignored 必须与 fish_common.warn_ignored 是同一个对象（不是副本）")
+        src = (HERE / "fish_common.py").read_text(encoding="utf-8")
         m = re.search(r"def warn_ignored\(.*?\):\n(.*?)\ndef ", src, re.S)
         self.assertIsNotNone(m, "找不到 warn_ignored 的实现")
         self.assertIn("stderr", m.group(1), "warn_ignored 必须写 stderr（否则等于没出声）")

@@ -37,6 +37,7 @@ sys.path.insert(0, str(HERE))
 import fish  # noqa: E402
 import fish_naming  # noqa: E402
 import fish_surface  # noqa: E402
+import fish_board  # noqa: E402 —— 看板实现住这里，打桩要打在消费方
 
 ULID_RE = re.compile(r"(?<![0-9A-HJKMNP-TV-Z])[0-9A-HJKMNP-TV-Z]{26}(?![0-9A-HJKMNP-TV-Z])")
 CID_A = "01BOARDREADABLE00000000A1"
@@ -342,15 +343,15 @@ class MutationTest(ReadableBase):
     def test_label_back_to_short_id_goes_red(self):
         fish.board_checkin(self.conn, CID_A, "改 fish", scope="project", scope_key="PJ")
         board = fish.board_ensure(self.conn, "project", "PJ")
-        original = fish.who_label
+        original = fish_board.who_label
         try:
-            fish.who_label = lambda row, **kw: (row["citizen_id"] if isinstance(row, dict)
+            fish_board.who_label = lambda row, **kw: (row["citizen_id"] if isinstance(row, dict)
                                                 else row[0])[:8]
             path, _size, _split = fish.board_render(self.conn, self.root, board)
             text = fish.board_out_path(self.root, {"path": path}).read_text(encoding="utf-8")
             self.assertIn(CID_A[:8], text, "变异后渲染里出现了短 id——R3 的判据才有效")
         finally:
-            fish.who_label = original
+            fish_board.who_label = original
 
     def test_state_threshold_zero_breaks_tiers(self):
         fish.board_checkin(self.conn, CID_A, "改了半小时前", scope="project",
@@ -477,10 +478,10 @@ class ObservedOverlapJudgeTest(ReadableBase):
             return rows
 
         try:
-            fish.board_presence_rows = with_display_dirs
+            fish_board.board_presence_rows = with_display_dirs
             overlaps = fish.board_observed_overlaps(self.conn, board)
         finally:
-            fish.board_presence_rows = original
+            fish_board.board_presence_rows = original
         self.assertTrue([o for o in overlaps if o["kind"] == "actual"],
                         "变异后退回展示列必须误报——否则本判据没在测判定列")
 

@@ -4,10 +4,22 @@
 
 ## 为什么独立成文件（不塞进 fish_common）
 
-hook 每轮都要**起一个 Python 进程**，所以"启动成本"就是它的全部预算：
-`import fish` 实测 1.3s，`fish_activity` 约 0.1s。本模块**只依赖 stdlib**，
-在"功能已关"或"冷却中"时把 hook 的总耗时压到**十几毫秒**，慢路径（import fish +
-真正干活）只在确实要做时才走。
+hook 每轮都要**起一个 Python 进程**，所以"启动成本"就是它的全部预算。
+本机实测（Windows 11 / CPython 3.11，取 7 次最小值）：
+
+    Python 解释器启动 + 常用 stdlib     ≈ 130–220 ms   ← 这是地板，任何 hook 都要付
+    + `import hook_fastpath`             + 25 ms
+    + `import fish_common`               + 24 ms
+    + `import fish`                      + 130–430 ms（随负载波动）
+
+所以本模块**只保留必要依赖**：`json` / `sqlite3` / `time` / `pathlib` 四个 stdlib，
+外加 `fish_common` 的报警出口。它**不是**纯 stdlib 模块——但它的两个调用方
+（`fish_pretool_hook` / `fish_push_hook`）本来就都要 `fish_activity`，而那条链
+一定先加载 `fish_common`，所以这里的 import 是**零边际成本**；为了"纯 stdlib"
+再造一份 `warn_ignored` 只会在本模块里多一份要同步维护的副本。
+
+真正的预算节省来自**不 import `fish`**（差 130–430 ms，十倍以上），而不是省掉
+一个 24 ms 的共用层。
 
 ## 三个函数
 

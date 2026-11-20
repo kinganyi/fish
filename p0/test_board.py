@@ -33,6 +33,11 @@ spec = importlib.util.spec_from_file_location("fish", "fish.py")
 fish = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fish)
 
+# 看板实现住在 fish_board：打桩要打在**消费方的模块全局**上。
+# 打 `fish_board.BOARD_MAX_BYTES` 只改 fish.py 里那个再导出名，而 `board_render` 读的是
+# fish_board 自己的全局——两边各有一个绑定，改一个不影响另一个（F-26 那类假绿）。
+import fish_board  # noqa: E402
+
 CID_A = "01BOARDTESTA000000000001"
 CID_B = "01BOARDTESTB000000000002"
 
@@ -160,8 +165,8 @@ class BoardTest(unittest.TestCase):
                 (board["id"], CID_A, "note", "第%d条" % i + "内容" * 60, ts))
         self.conn.commit()
         path, size, split = fish.board_render(self.conn, self.root, board)
-        self.assertLessEqual(size, fish.BOARD_MAX_BYTES,
-                             f"渲染文件 {size} B 超过上限 {fish.BOARD_MAX_BYTES} B")
+        self.assertLessEqual(size, fish_board.BOARD_MAX_BYTES,
+                             f"渲染文件 {size} B 超过上限 {fish_board.BOARD_MAX_BYTES} B")
         self.assertTrue(split, "超限时必须切分（v1 就是死在只追加不切分上）")
         # 分片文件要真的存在
         shards = list(fish.board_out_path(self.root, board).parent.glob("看板-*-*.md"))
@@ -178,12 +183,12 @@ class BoardTest(unittest.TestCase):
                 "VALUES (?,?,?,?,?)",
                 (board["id"], CID_A, "note", "第%d条" % i + "内容" * 60, ts))
         self.conn.commit()
-        orig = fish.BOARD_MAX_BYTES
+        orig = fish_board.BOARD_MAX_BYTES
         try:
-            fish.BOARD_MAX_BYTES = 10 ** 9          # 假装没有容量约束
+            fish_board.BOARD_MAX_BYTES = 10 ** 9          # 假装没有容量约束
             _p, size_no_limit, split_no = fish.board_render(self.conn, self.root, board)
         finally:
-            fish.BOARD_MAX_BYTES = orig
+            fish_board.BOARD_MAX_BYTES = orig
         self.assertFalse(split_no, "上限调大后不该切分")
         self.assertGreater(size_no_limit, orig,
                            f"不切分时必然超 32KB（实测 {size_no_limit} B）——"

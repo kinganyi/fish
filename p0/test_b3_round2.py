@@ -37,6 +37,9 @@ spec.loader.exec_module(fish)
 # `fish_kb`。**只改目标，不改既有断言**（唯一例外见 R21：那里补了一条断言，
 # 把"patch 打空导致静默变弱"变成响亮的红）。
 import fish_kb  # noqa: E402 —— 与 fish.py 同一个路径下，测试用 cwd 导入
+# 根板刷新的实现住在 fish_board：mock 必须打在**消费方模块自己的全局**上。
+# 打在 fish.board_render_root 上只是改了一个再导出名，board_sweep 读的是 fish_board 的全局。
+import fish_board  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 
@@ -586,7 +589,7 @@ class R19RootBoardRefreshTest(_Round2Case):
         """R19（评审 🟡-4）：根板刷新失败不许被 `except: pass` 吞掉。"""
         board = fish.board_ensure(self.conn, "project", "P9")
         err = io.StringIO()
-        with mock.patch.object(fish, "board_render_root",
+        with mock.patch.object(fish_board, "board_render_root",
                                side_effect=RuntimeError("根板炸了")), \
                 contextlib.redirect_stderr(err):
             path, _size, _split = fish.board_render(self.conn, self.root, board,
@@ -1063,7 +1066,7 @@ class S9MiscFixesTest(_Round2Case):
     def test_board_sweep_reports_root_refresh_failure(self):
         fish.board_ensure(self.conn, "project", "P9", period_key="250101")
         err = io.StringIO()
-        with mock.patch.object(fish, "board_render_root",
+        with mock.patch.object(fish_board, "board_render_root",
                                side_effect=RuntimeError("根板炸了")), \
                 contextlib.redirect_stderr(err):
             res = fish.board_sweep(self.conn, root=self.root, days=1)

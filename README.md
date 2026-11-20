@@ -7,7 +7,7 @@
 单机 · 单仓 · 事件溯源 —— SQLite + FTS5 + MCP + CLI + 宿主 hooks
 
 ![criteria](https://img.shields.io/badge/criteria-1975%20total-brightgreen)
-![fish.py](https://img.shields.io/badge/fish.py-12637%20lines-blue)
+![fish.py](https://img.shields.io/badge/fish.py-10481%20lines-blue)
 ![modules](https://img.shields.io/badge/domain%20modules-38-informational)
 ![mutants](https://img.shields.io/badge/mutants-27-blue)
 ![python](https://img.shields.io/badge/python-3.11%2B-3776ab)
@@ -125,7 +125,7 @@ python p0/fish.py healthcheck
 |---|---|
 | 判据 | **1,971 条**（146 个 `test_*.py`） |
 | 变异体 | **27 个**（`p0/mutation_*.py`）——用来证明判据**真的会失败**，不是摆设 |
-| 代码规模 | `fish.py` **12,626 行** + **38 个领域模块** |
+| 代码规模 | `fish.py` **10,481 行** + **39 个领域模块** |
 | MCP 面 | **21 个工具 + 2 个资源** |
 | 设计文档 | 40 篇（`docs/`，仅生产树；公开包只镜像 `p0/`） |
 

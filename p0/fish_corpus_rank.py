@@ -60,6 +60,7 @@ import math
 from typing import Protocol, runtime_checkable
 
 import fish_common
+from fish_common import parse_utc  # 时间解析全仓一份：口径统一在 fish_common
 
 # 默认权重（0.6 + 0.2 + 0.2 = 1.0，所以 score 天然落在 [0, 1]：
 # 推送门槛 `min_relevance` 才能直接拿它比，不用再猜量纲）。
@@ -67,9 +68,6 @@ W_RANK = 0.6
 W_TERMS = 0.2
 W_RECENCY = 0.2
 RECENCY_HALF_LIFE_DAYS = 180.0
-
-_UTC_FMT = "%Y-%m-%dT%H:%M:%SZ"
-
 
 class RankerError(ValueError):
     """排序层的参数错误（未知 ranker / 注册名冲突）。**不许静默回落默认算法**。"""
@@ -86,19 +84,12 @@ class Ranker(Protocol):
         ...
 
 
-def utc_now() -> datetime.datetime:
+# 本模块只做"算分"，不自己定义时间格式：`parse_utc` 从 `fish_common` 取。
+# 排序要比较"谁更新"，而年轻是相对**当前时刻**算的——这里直接把 datetime 作为入参，
+# 不需要 str 形态的 `now_utc`；两个时间原语混在同一个模块里，最容易出的错
+# 就是拿字符串去减 datetime。命名上用 `now_utc_dt` 把"这是 datetime"写进名字里。
+def now_utc_dt() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
-
-
-def parse_utc(text):
-    """`2026-10-27T04:06:43Z` → datetime；解析失败返回 None（不猜、不抛）。"""
-    if not text:
-        return None
-    try:
-        return datetime.datetime.strptime(str(text), _UTC_FMT).replace(
-            tzinfo=datetime.timezone.utc)
-    except (TypeError, ValueError):
-        return None
 
 
 def _age_days(occurred_at, now) -> float:
@@ -226,7 +217,7 @@ def freshness_factor(occurred_at, now=None,
     stamp = _as_datetime(occurred_at)
     if stamp is None:
         return 1.0
-    now_dt = _as_datetime(now) or utc_now()
+    now_dt = _as_datetime(now) or now_utc_dt()
     age_days = max(0.0, (now_dt - stamp).total_seconds() / 86400.0)
     return math.exp(-age_days / half)
 
@@ -264,7 +255,7 @@ def freshness_reading(occurred_at, now=None,
     stamp = _as_datetime(occurred_at)
     age_days = None
     if stamp is not None:
-        now_dt = _as_datetime(now) or utc_now()
+        now_dt = _as_datetime(now) or now_utc_dt()
         age_days = round(max(0.0, (now_dt - stamp).total_seconds() / 86400.0), 1)
     return {"factor": factor, "band": freshness_band(factor), "age_days": age_days}
 
@@ -463,7 +454,7 @@ class DefaultRanker:
         ctx = ctx or {}
         terms = [t for t in (ctx.get("terms") or []) if t]
         project = ctx.get("project") or ""
-        now = ctx.get("now") or utc_now()
+        now = ctx.get("now") or now_utc_dt()
         norms = rank_norm([c.get("bm25") for c in cands])
         scored = []
         for cand, norm in zip(cands, norms):

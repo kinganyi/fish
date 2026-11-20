@@ -29,6 +29,8 @@
 """
 from __future__ import annotations
 
+import os
+
 import posixpath
 import re
 from typing import Iterable
@@ -315,3 +317,20 @@ def longest_prefix(path, pairs: Iterable):
             if best is None or cand[0] > best[0] or (cand[0] == best[0] and cand[1] < best[1]):
                 best = cand
     return (best[2], best[1]) if best else None
+
+def _path_inside(child, parent) -> bool:
+    r"""路径包含判断的 Windows 正确版（K8）：realpath + normcase + commonpath。
+
+    为什么禁止 `str.startswith`：`E:\\Obsidian\\安逸知识库-evil` 会被
+    `startswith("E:\\Obsidian\\安逸知识库")` 判成"在库里"——这是假前缀漏洞（PRD §7.1 已识别，
+    裁决 §四.7 明确禁止）。`commonpath` 按**路径段**比，`\` 与 `/`、大小写、
+    junction 别名都先归一，才是"谁真的在谁里面"。
+
+    不同盘符时 `commonpath` 抛 `ValueError` → 一律判"不在里面"（跨盘不可能是子路径）。
+    """
+    try:
+        c = os.path.normcase(os.path.realpath(str(child)))
+        p = os.path.normcase(os.path.realpath(str(parent)))
+        return os.path.commonpath([c, p]) == p
+    except (ValueError, OSError):
+        return False

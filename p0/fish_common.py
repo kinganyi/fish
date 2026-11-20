@@ -440,12 +440,14 @@ CONFIG_DEFAULTS = {
 _DEFAULT_DECAY = {k: v[0] for k, v in CONFIG_DEFAULTS.items() if k.startswith("decay.")}
 
 def parse_utc(s):
+    """UTC ISO → aware datetime；空值或解析不了返回 None（不抛：坏时间戳不该打断采集）。
+    先 `str()`：TEXT 列以外的值可能是 int/float，`strptime` 对非 str 抛的是 TypeError。"""
     if not s:
         return None
     try:
-        return datetime.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(
+        return datetime.datetime.strptime(str(s), "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=datetime.timezone.utc)
-    except ValueError:
+    except (TypeError, ValueError):
         return None
 
 def local_date() -> str:

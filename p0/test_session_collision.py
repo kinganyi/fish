@@ -38,6 +38,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import fish  # noqa: E402
+import fish_board  # noqa: E402 —— 看板实现住这里，打桩打在消费方
 import fish_activity  # noqa: E402
 
 CID_A = "01SESSIONCOLLIDE00000A1"
@@ -142,20 +143,20 @@ class ObservedJudgeTest(CollisionBase):
                          "自己的声明 vs 自己的实际不是重叠")
         # 防御式判据（设计 §3.5 第 3 条）：把同一行复制成两行（模拟将来拆"声明/实际"行），
         # 同 `(citizen, session)` 的两行之间仍不许报——否则拆行那天会立刻自撞。
-        original = fish.board_presence_rows
+        original = fish_board.board_presence_rows
 
         def duplicated(conn, b):
             rows = original(conn, b)
             return rows + [dict(row) for row in rows]
 
         try:
-            fish.board_presence_rows = duplicated
+            fish_board.board_presence_rows = duplicated
             self.assertEqual(fish.board_observed_overlaps(self.conn, board), [],
                              "同一 (citizen, session) 的两行之间不算重叠")
             self.assertEqual(fish.board_overlaps(self.conn, board), [],
                              "`board_overlaps` 也必须跳过同键对")
         finally:
-            fish.board_presence_rows = original
+            fish_board.board_presence_rows = original
 
     def test_S8_other_session_actual_is_reported(self):
         self._checkin(CID_A, "dsh:aaa1111", surface="i:/proj/p0")
@@ -296,7 +297,7 @@ class ActualSurfacesTest(CollisionBase):
     def test_S26_session_without_activity_gets_no_borrowed_dirs(self):
         board = self._checkin(CID_A, "dsh:X", surface="p0/fish.py")
         self._activity(CID_A, "dsh:Y", "p0/fish.py")
-        rows = fish.board_presence_rows(self.conn, board)
+        rows = fish_board.board_presence_rows(self.conn, board)
         mine = [r for r in rows if r["session_key"] == "dsh:X"][0]
         self.assertEqual(mine["auto_dirs"], [],
                          "该会话自己没有活动 → 空；不许拿同公民另一会话的面冒充（F2 第三档）")
@@ -306,7 +307,7 @@ class ActualSurfacesTest(CollisionBase):
     def test_S27_rows_without_session_fields_do_not_crash(self):
         board = self._checkin(CID_A, "dsh:X", surface="p0/fish.py")
         self._checkin(CID_B, "dsh:Y", surface="p0/fish.py")
-        original = fish.board_presence_rows
+        original = fish_board.board_presence_rows
 
         def stripped(conn, b):
             rows = original(conn, b)
@@ -316,14 +317,14 @@ class ActualSurfacesTest(CollisionBase):
             return rows
 
         try:
-            fish.board_presence_rows = stripped
+            fish_board.board_presence_rows = stripped
             self.assertEqual(len(fish.board_overlaps(self.conn, board)), 1,
                              "缺字段时按 '' 处理，判定仍成立（F3：读侧一律 .get()）")
             fish.board_observed_overlaps(self.conn, board)
             block = fish.board_block(self.conn, "PJ")
             self.assertIn("看板", block)
         finally:
-            fish.board_presence_rows = original
+            fish_board.board_presence_rows = original
 
 
 if __name__ == "__main__":

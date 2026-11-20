@@ -42,7 +42,7 @@ CLI）与两个 hook（Pre/Post）都调这里——不在任何一处再写第�
 可用的默认值，而不是把 hook 打挂。
 """
 from __future__ import annotations
-from fish_common import warn_ignored
+from fish_common import now_utc as utc_now, parse_utc, warn_ignored  # 时间原语与报警出口全仓只有一份实现
 
 import datetime
 import hashlib
@@ -110,20 +110,9 @@ WARN_PENDING_MAX_AGE_SEC = 900
 # ------------------------------------------------------------------ 时间
 
 
-def utc_now() -> str:
-    """UTC ISO（`%Y-%m-%dT%H:%M:%SZ`）——与 fish 同口径，定长字符串可比大小。"""
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def parse_utc(text):
-    """解析 UTC ISO；失败返回 None（**不抛**：坏时间戳不该让采集整体失败）。"""
-    if not text:
-        return None
-    try:
-        return datetime.datetime.strptime(str(text), "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=datetime.timezone.utc)
-    except ValueError:
-        return None
+# 时间原语住在 `fish_common`：口径必须全仓唯一（定长 UTC 字符串才能按字典序比大小），
+# 而 fish、fish_activity、fish_corpus_rank 三方都 `import fish_common`——它是唯一
+# 能让三方拿到同一份实现的地方。这里只是把它们取成本模块的名字，调用点不动。
 
 
 def _dt(text=None):
