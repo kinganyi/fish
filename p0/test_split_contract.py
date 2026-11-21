@@ -67,6 +67,10 @@ FISH_GIT_LINK = P0 / "fish_git_link.py"
 # 2026-11-21（系统级修复 A-1）：记忆作废是独立领域（不是记忆编排、不是身份、不是 git）。
 # 它只依赖 fish_db（append_event）+ fish_common（now_utc），**不 import fish**。
 FISH_PURGE = P0 / "fish_purge.py"
+# 2026-11-21（系统级修复 D-1）：PostToolUse 的 git 采集下沉到共享核心。
+# 它**不 import fish_activity**（那会成环：fish_activity → fish_git_hook → fish_activity），
+# 所以判断函数由调用方传参。
+FISH_GIT_HOOK = P0 / "fish_git_hook.py"
 
 spec = importlib.util.spec_from_file_location("fish", str(FISH))
 fish = importlib.util.module_from_spec(spec)
@@ -249,6 +253,9 @@ FISH_GIT_LINK_LINES_MAX = 220
 # 作废层：当前 210 行 → 上界 380
 FISH_PURGE_LINES_MIN = 120
 FISH_PURGE_LINES_MAX = 380
+# git 采集（hook 侧）：当前 160 行 → 上界 320
+FISH_GIT_HOOK_LINES_MIN = 90
+FISH_GIT_HOOK_LINES_MAX = 320
 
 
 def _read(path: Path) -> str:
@@ -489,7 +496,13 @@ class SplitDependencyTest(unittest.TestCase):
                                 (FISH_PURGE, {"fish", "fish_kb", "fish_push", "fish_trust",
                                               "fish_rebuild", "fish_profile",
                                               "fish_git", "fish_git_store", "fish_git_link",
-                                              "fish_activity", "fish_board"})):
+                                              "fish_activity", "fish_board"}),
+                                # git 采集（hook 侧）：只用 git / git_store / surface / common。
+                                # **不许 import fish_activity**——那会成环。
+                                (FISH_GIT_HOOK, {"fish", "fish_kb", "fish_push", "fish_trust",
+                                                 "fish_rebuild", "fish_profile",
+                                                 "fish_activity", "fish_board",
+                                                 "fish_cli", "mcp_server"})):
             mods = _imported_modules(ast.parse(_read(path)))
             bad = sorted(m for m in mods if m in forbidden)
             self.assertEqual(bad, [], f"{path.name} 反向依赖了 {bad}")
@@ -796,7 +809,8 @@ class SplitSizeTest(unittest.TestCase):
                 ("fish_git_schema.py", FISH_GIT_SCHEMA_LINES_MIN, FISH_GIT_SCHEMA_LINES_MAX),
                 ("fish_git_store.py", FISH_GIT_STORE_LINES_MIN, FISH_GIT_STORE_LINES_MAX),
                 ("fish_git_link.py", FISH_GIT_LINK_LINES_MIN, FISH_GIT_LINK_LINES_MAX),
-                ("fish_purge.py", FISH_PURGE_LINES_MIN, FISH_PURGE_LINES_MAX)):
+                ("fish_purge.py", FISH_PURGE_LINES_MIN, FISH_PURGE_LINES_MAX),
+                ("fish_git_hook.py", FISH_GIT_HOOK_LINES_MIN, FISH_GIT_HOOK_LINES_MAX)):
             count = len(_read(P0 / module).split("\n"))
             self.assertGreaterEqual(count, low, f"{module} 只有 {count} 行：搬漏了")
             self.assertLessEqual(count, high, f"{module} 有 {count} 行：长回去了")

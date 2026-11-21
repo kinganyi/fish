@@ -96,113 +96,6 @@ def collect_activity(payload, host):
                 pass
 
 
-def _obs_throttled(conn, root, *, window_sec=60):
-    """同一个 checkout 在 `window_sec` 内采过就跳过（方案 §5.3 的节流要求）。
-
-    为什么必须节流：`status` 实测 P50 253ms / max 684ms，而 PostToolUse 是
-    **每次工具调用**都跑的。不节流的话，连续写 10 个文件就是 10 次 status，
-    把 hook 的 3 秒预算吃光，用户会感到明显的卡顿。
-    """
-    import fish_surface
-    norm = fish_surface.normalize_path(root)
-    if not norm:
-        return False
-    try:
-        row = conn.execute(
-            "SELECT o.sampled_at FROM git_checkout c JOIN git_obs o "
-            "ON o.checkout_id = c.checkout_id WHERE c.path_key=? "
-            "ORDER BY o.sampled_at DESC LIMIT 1", (norm,)).fetchone()
-    except Exception:                     # noqa: BLE001 —— 老库没有 git 表
-        return False
-    if not row or not row[0]:
-        return False
-    age = fish_activity._age_sec(row[0], fish_common_now())
-    return 0 <= age < window_sec
-
-
-def fish_common_now():
-    """当前 UTC（`%Y-%m-%dT%H:%M:%SZ`）—— 与库里的 sampled_at 同一口径。"""
-    import fish_common
-    return fish_common.now_utc()
-
-
-def collect_git(payload, host):
-    """P3-1 / P4-2（2026-11-20）：PostToolUse 里的 git 采集。
-
-    方案 §5.3 的触发表要求的正是这里：
-
-    | 采集动作 | 触发点 |
-    |---|---|
-    | 仓库身份发现 | PostToolUse，仅在写类动作时 |
-    | L1 状态采样 | 同上，但同 checkout 60s 内不重复 |
-    | commit 事件采集 | PostToolUse 识别到 `git commit` 后 |
-
-    ## 两件事的顺序是刻意的
-
-    **commit 采集先做**：它是归因链唯一的确定性绑定（不靠时间窗口猜），
-    不能被 60s 节流挡掉——否则「刚提交完立刻又提交」的第二次会丢。
-
-    ## 独立 try 边界
-
-    与 `collect_activity` 同样的纪律：git 采集失败绝不能影响工具结果，
-    也不能拖垮既有采集。但**不许静默**——失败走 `_dbg`（FISH_HOOK_DEBUG=1 可见）。
-    """
-    conn = None
-    try:
-        import fish_git
-        import fish_git_store
-        import fish_surface
-
-        cwd = payload.get("cwd") or ""
-        session_key = fish_activity.make_session_key(host, payload.get("session_id"))
-        if not cwd or not session_key:
-            return None
-        tool_name = str(payload.get("tool_name") or "")
-        tool_input = (payload.get("tool_input")
-                      if isinstance(payload.get("tool_input"), dict) else {})
-        conn = fish_activity.connect(DATA)
-
-        # ── ① commit 采集（归因链的锚，先于节流）─────────────────────────
-        if fish_activity.is_git_commit(tool_input.get("command")):
-            root = fish_git.discover_root(cwd)
-            if root:
-                # 先 observe 一次：确保 repo/checkout 存在，才能拿到 repo_id
-                res = fish_git_store.observe(conn, root)
-                rid = res.get("repo_id")
-                if rid:
-                    got = fish_git_store.record_commit(
-                        conn, root=root, repo_id=rid, session_key=session_key)
-                    _dbg("commit collect: %r" % (got,))
-                else:
-                    _dbg("commit collect: observe 没拿到 repo_id（%r）" % (res,))
-
-        # ── ② 写类动作 → L1 观测（带节流）────────────────────────────────
-        if (fish_surface.is_write_tool(tool_name)
-                or fish_surface.is_bash_tool(tool_name)):
-            target = cwd
-            raw_path = fish_activity._first_path(tool_input)
-            if raw_path:
-                target = fish_surface.make_abs(raw_path, cwd) or cwd
-            root = fish_git.discover_root(target)
-            if root:
-                if _obs_throttled(conn, root):
-                    _dbg("observe skipped (throttled): %s" % root)
-                else:
-                    res = fish_git_store.observe(conn, root)
-                    _dbg("observe: %r" % (res.get("state"),))
-        conn.commit()
-        return True
-    except Exception as exc:              # noqa: BLE001 —— 旁路失败绝不拖垮工具结果
-        _dbg("git collect failed: %r" % (exc,))
-        return None
-    finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:             # noqa: BLE001
-                pass
-
-
 def maybe_warn_pending(payload, host) -> None:
     """把 PreToolUse 欠的**撞车提醒**（`warn` 模式）递一句给模型（评审 L3）。
 
@@ -275,12 +168,10 @@ def _run(argv=None):
 
     # ── ① 采集（先于频率闸：事实不该跟着推送节流）────────────────────
     if collect:
+        # git 采集已下沉到 `fish_activity.handle_post_tool_use`（2026-11-21 D-1）——
+        # 那才是两个宿主共用的入口。原来这里有一句 `collect_git(req, host)`，
+        # 而 WorkBuddy 走的是另一条脚本、根本没有它。
         collect_activity(req, host)
-        # P3-1/P4-2（2026-11-20）：git 采集。**独立 try 边界**，且有自己的开关
-        # （`git.enabled`，缺省开）——出问题能单独关掉，不用把整条 hook 停掉。
-        if hook_fastpath.enabled(DATA, "git.enabled", True):
-            collect_git(req, host)
-
     # ── ①b 撞车提醒（`warn` 模式唯一可见通道；欠一句就递一句）─────────
     # 必须在频率闸**之前**：这条提醒与"每 N 次推送"是两回事，
     # 被推送节流挡住等于 warn 又变回"模型不可见"（评审 L3 的原症状）。

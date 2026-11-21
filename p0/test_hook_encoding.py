@@ -125,18 +125,36 @@ class HookStdoutScanTest(unittest.TestCase):
         self.assertEqual(bad, [], f"stdout 出口不得 ensure_ascii=False：{bad}")
 
     def test_hooks_delegate_to_hook_io(self):
-        """每个 hook 的出口都委托 hook_io（防止又写一份 json.dumps）。
+        """每个 **hook 入口脚本**的出口都委托 hook_io（防止又写一份 json.dumps）。
 
         2026-10-26（T01）：出口现在有**两种**合法形态——
         `hook_io.emit(...)`（additionalContext）与
         `hook_io.emit_decision(...)`（PreToolUse 的 permissionDecision）。
         判据接受两者，但**必须至少有一个**：不写出口的 hook 要么是死的，
         要么在自己拼 JSON（那就一定会再踩一次编码坑）。
+
+        ## 2026-11-21（D-1）：只检查**入口脚本**，不检查同名前缀的库
+
+        `fish_git_hook.py` 是**被 hook 调用的库**，它不往 stdout 写任何东西
+        （只做 git 采集），却被 `fish_*hook.py` 通配扫进来判"没委托 hook_io"——
+        那是**假阳性**：一条"库不该有 stdout 出口"的判据，拿"没有出口"当失败。
+
+        精确特征是 `if __name__ == "__main__"`：实测 7 个 `fish_*hook.py` 里
+        6 个有、只有 `fish_git_hook.py` 没有。用它区分入口与库，比维护一份
+        排除名单更不容易漂。
         """
+        entry_scripts = []
         for p in sorted(HERE.glob("fish_*hook.py")):
             src = p.read_text(encoding="utf-8")
+            if "__main__" not in src:
+                # 库（不自己执行）——它没有 stdout 出口是对的，不是缺陷
+                continue
+            entry_scripts.append(p.name)
             self.assertTrue(("hook_io.emit(" in src) or ("hook_io.emit_decision(" in src),
                             f"{p.name} 的 stdout 出口没有委托 hook_io")
+        self.assertGreaterEqual(len(entry_scripts), 5,
+                                f"入口脚本数异常少（{entry_scripts}）——"
+                                f"判据可能因收集逻辑写错而空转")
 
     def test_hooks_have_no_direct_stdout(self):
         """hook 里禁止任何直接 stdout 操作（必须经 hook_io 出口）。

@@ -1795,6 +1795,29 @@ def handle_post_tool_use(conn, *, host, payload, now=None, data_dir=None,
     result = {"recorded": True, "row_id": row_id, "session_key": session_key,
               "citizen_id": citizen_id, "project": project,
               "action": classification["action"], "path": classification.get("path")}
+    # 2026-11-21（D-1 · 下沉）：**git 采集放在共享核心里**，两个宿主自动一致。
+    # 第一版写在 `fish_push_hook.py`（DSH 专属脚本），于是 WorkBuddy 侧为零——
+    # 用户实测"真提交完成后 fish 里依然没有这个仓库的记录"，而那个模块是
+    # `fish_posttool_hook.py`。`is_git_commit()` 当时已经在共享核心，**用它的
+    # 代码却不在**——这违背了本仓反复写的「共享逻辑只能在共享核心」。
+    #
+    # 位置在早退**之前**：git 采集只要 cwd 与会话键，不依赖 citizen / path_dir。
+    #
+    # ⚠️ 开关的**缺省值**要自己处理：`git.enabled` 不在 `CONFIG_DEFAULTS` 里，
+    # `get_cfg` 对它返回 `None`。第一版写成 `if get_cfg(conn, "git.enabled")`，
+    # 于是 **None 是 falsy → 采集静默永不执行**——下沉时把代码搬过来了，
+    # 却没把"缺省开"这层语义搬过来。这类错误最坏：功能没了但不报错。
+    try:
+        _git_on = get_cfg(conn, "git.enabled")
+        if _git_on is None or str(_git_on).strip().lower() in ("1", "true", "yes", "on"):
+            import fish_git_hook               # noqa: PLC0415 —— 避免加载期就拉 git 层
+            result["git"] = fish_git_hook.collect_git(
+                conn, cwd=cwd, session_key=session_key,
+                tool_name=str(payload.get("tool_name") or ""),
+                tool_input=payload.get("tool_input") or {},
+                is_commit_cmd=is_git_commit, first_path=_first_path)
+    except Exception as exc:      # noqa: BLE001 —— 旁路失败绝不拖垮活动采集
+        warn_ignored("fish_activity.py handle_post_tool_use git", exc)
     if data_dir is None or not citizen_id or not classification.get("path_dir"):
         return result
 
