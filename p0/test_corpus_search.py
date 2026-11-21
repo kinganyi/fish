@@ -427,7 +427,7 @@ class McpSurfaceTest(unittest.TestCase):
     def test_tool_count_and_order(self):
         import mcp_server
         names = [tool["name"] for tool in mcp_server.TOOLS]
-        self.assertEqual(len(names), 23)
+        self.assertEqual(len(names), 24)
         self.assertEqual(names[:18], self.OLD_TOOLS)
         self.assertEqual(names[18], "corpus")
         # 2026-11-11（序2 主人画像）：画像两个工具追加在末尾；
@@ -435,8 +435,10 @@ class McpSurfaceTest(unittest.TestCase):
         # 2026-11-20（fish 引入 git 的 P4-4）：追加两个只读 git 工具（21 → 23）。
         # 方案 §6「③ 新增两个只读 MCP 工具…**不加写仓库的工具**」；用户已授权。
         # 旧的 21 个名字与顺序仍然一字不动。
+        # 2026-11-21：再追加一个记忆↔提交关联工具（23 → 24）。
         self.assertEqual(names[19:], ["profile_show", "profile_propose",
-                                      "git_repo_status", "git_repo_commits"])
+                                      "git_repo_status", "git_repo_commits",
+                                      "git_link"])
 
     def test_corpus_tool_is_read_only_and_has_token(self):
         import mcp_server

@@ -298,5 +298,108 @@ class MentionLinkTest(_DbCase):
                         f"端到端没建立关联：{res}")
 
 
+class GitLinkToolTest(_DbCase):
+    """`git_link` MCP 工具：显式建立那三种「不能自动推断」的关系。
+
+    ## 为什么需要这个工具
+
+    `fish_git_link` 原本 4 个函数、21 条判据、**生产侧 0 个调用点**。
+    `link_commit_mentions` 补上了 `discussed_in` 的自动推断，但另外三种
+    （`implemented_by` / `produced` / `revised_in`）**只能由人断言**——
+    而「只能显式建立」若无入口，就等于「建不了」。
+
+    ## 变异体（去掉 → 必红）
+
+    · 删掉 `git_link` 的 `action` 分支 → 对应判据红
+    · 去掉「提交必须已采集」的前置检查 → `test_rejects_unknown_sha` 红
+    · 去掉「discussed_in 不许手动建」的守卫 → 自动与显式会造两条意义不同的边
+    """
+
+    def setUp(self):
+        super().setUp()
+        import mcp_server
+        self.mcp = mcp_server
+        self.conn.execute(
+            "INSERT OR IGNORE INTO code_registry (prefix, namespace, status) "
+            "VALUES ('T','t','active')")
+        self.conn.commit()
+        self.code, _ = fish.record_memory(self.conn, self.data, project="T",
+                                          title="测试", body="x")
+        TS = "2026-11-20T00:00:00Z"
+        self.conn.execute(
+            "INSERT INTO git_repo (repo_id, identity, identity_kind, identity_source, "
+            "display_name, ownership, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
+            (1, "t", "remote", "inferred", "t", "unknown", TS, TS))
+        self.conn.execute(
+            "INSERT INTO git_commit (sha, repo_id, authored_at, committed_at, is_merge, "
+            "subject) VALUES (?,?,?,?,?,?)",
+            (self.SHA, 1, TS, TS, 0, "某个提交"))
+        self.conn.commit()
+        self.srv = object.__new__(mcp_server.FishServer)
+        self.srv.conn = self.conn
+        self.srv.root = self.data
+
+        class _Id:
+            status = "valid"
+            citizen_id = "C1"
+            evidence = "machine"
+            session_key = "dsh:t"
+
+        self.ident = _Id()
+
+    SHA = "abc123def4567890"
+
+    def _call(self, **kw):
+        return self.srv.tool_git_link(kw, self.ident)
+
+    def test_link_then_list(self):
+        """建立 implemented_by 并按编码查回来。"""
+        out = self._call(action="link", code=self.code, sha=self.SHA,
+                         rel="implemented_by", evidence="断言")
+        self.assertIn("已建立关联", out, out)
+        rows = fish_git_link.links_of(self.conn, src_id=self.code)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["rel"], "implemented_by")
+        self.assertEqual(rows[0]["source"], "explicit")
+        self.assertIn(self.code, self._call(action="list", code=self.code))
+
+    def test_rejects_unknown_sha(self):
+        """未采集的提交不许建关联（否则边指向不存在的对象）。
+
+        变异体：去掉 `git_commit` 存在性检查 → 红。
+        """
+        out = self._call(action="link", code=self.code, sha="deadbeef",
+                         rel="produced")
+        self.assertIn("还没采集到", out, out)
+        self.assertFalse(fish_git_link.links_of(self.conn, src_id=self.code))
+
+    def test_rejects_bad_rel(self):
+        out = self._call(action="link", code=self.code, sha=self.SHA, rel="nonsense")
+        self.assertIn("rel 只能是", out, out)
+
+    def test_rejects_manual_discussed_in(self):
+        """`discussed_in` 是自动推断的，不许手动断言（否则同一关系两条来源不同口径的边）。"""
+        out = self._call(action="link", code=self.code, sha=self.SHA,
+                         rel="discussed_in")
+        self.assertIn("自动推断", out, out)
+        self.assertFalse(fish_git_link.links_of(self.conn, src_id=self.code))
+
+    def test_list_needs_direction(self):
+        """list 不给方向 → 明说该给什么，而不是返回全库 dump。"""
+        out = self._call(action="list")
+        self.assertIn("至少要给一个方向", out, out)
+
+    def test_unlink_is_soft(self):
+        """撤销是软删：行还在（「建立过又被否掉」和「从没建立过」不是一回事）。"""
+        self._call(action="link", code=self.code, sha=self.SHA, rel="produced")
+        lid = fish_git_link.links_of(self.conn, src_id=self.code)[0]["id"]
+        out = self._call(action="unlink", link_id=lid)
+        self.assertIn("已撤销", out, out)
+        self.assertEqual(len(fish_git_link.links_of(self.conn, src_id=self.code)), 0)
+        self.assertEqual(
+            len(fish_git_link.links_of(self.conn, src_id=self.code,
+                                       include_removed=True)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

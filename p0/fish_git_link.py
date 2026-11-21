@@ -29,8 +29,35 @@ J10 的判据就在这一条：物理删除之后「撤销」无从谈起——�
 
 **② 重复建立返回已有 id，不报错。**
 调用方（hook / 手工工具）不需要「先查再建」——那会在并发下变成两行。
+
+## 四种 `rel`，只有一种能自动推断（2026-11-21）
+
+| rel | 含义 | 能自动建吗 |
+|---|---|---|
+| `discussed_in` | 提交正文提到了这条记忆的编码 | **能**（`link_commit_mentions`，零猜测） |
+| `implemented_by` | 这条记忆描述的工作被这个提交实现了 | **不能**——要判断"做完了没有" |
+| `produced` | 这条记忆产出了这个提交 | **不能**——要判断因果 |
+| `revised_in` | 这条记忆在这个提交里被修订 | **不能**——记忆正文在 `data/` 且被 gitignore |
+
+后三种**只能显式建立**（`link_create(source="explicit")`），入口是 MCP 的 `git_link`
+与 CLI 的 `fish git-link`。
+
+**为什么不去造它们**：机械化那三种关系必然产出"看起来有、实际是猜的"边，
+而错边比没有边更糟——它会让人相信一个不成立的事实。
+
+**结构上的原因**（记下来免得后来者以为漏了）：`git_commit` 只存 `files_changed`
+（数字）不存文件列表；而 `code_index.file_path` 指向的是**记忆正文**
+（`projects/.../*.md`）。两者不在同一命名空间，所以「提交改了哪些文件 → 哪条记忆」
+这条链根本走不通。
 """
 import fish_common
+
+#: `git_link.rel` 的取值域——与 `fish_git_schema._GIT_LINK_DDL` 的 CHECK 对齐。
+#: 导出成常量是为了让 MCP / CLI 的入参校验引用同一份，不再各自硬编码字符串。
+RELS = ("implemented_by", "produced", "revised_in", "discussed_in")
+
+#: 能自动推断的那一种（见模块 docstring 的表）。
+AUTO_REL = "discussed_in"
 
 
 def link_create(conn, *, src_kind, src_id, dst_kind, dst_id, rel,
@@ -149,6 +176,6 @@ def link_commit_mentions(conn, *, sha, text, now=None):
     hits = _drop_shadowed([c for c in codes if c in text])
     for code in hits:
         link_create(conn, src_kind="memory", src_id=code, dst_kind="commit",
-                    dst_id=sha, rel="discussed_in", source="inferred",
+                    dst_id=sha, rel=AUTO_REL, source="inferred",
                     confidence=1.0, evidence="commit message 提到该编码", now=stamp)
     return {"linked": hits, "checked": len(codes)}

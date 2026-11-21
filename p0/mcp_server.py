@@ -44,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fish
 import fish_activity
 # 2026-11-21：只为 `KB_SOURCE_LABEL`（来源标签的唯一真源）。
+import fish_git_link
 import fish_kb
 import fish_git_store
 import fish_surface
@@ -702,6 +703,48 @@ TOOLS = [
                 "limit": {"type": "integer",
                           "description": "最多返回几条（缺省 20，上限 200）"},
             },
+        },
+    },
+    {
+        "name": "git_link",
+        "title": "记忆↔提交关联",
+        "description": "把一条记忆和一个提交**显式**连起来（link / unlink / list）。\n\n"
+                       "## 为什么需要手动建立\n\n"
+                       "四种关系里只有 `discussed_in`（提交正文提到了这条记忆的编码）"
+                       "能自动推断——那是确定的事实。另外三种都要语义判断：\n"
+                       "`implemented_by`（这条记忆描述的工作被这个提交做完了）、"
+                       "`produced`（这条记忆产出了这个提交）、"
+                       "`revised_in`（这条记忆在这个提交里被修订）。\n\n"
+                       "**机械化它们必然产出「看起来有、实际是猜的」的边**，"
+                       "而错边比没有边更糟——它会让人相信一个不成立的事实。"
+                       "所以它们只能由人来断言，这就是本工具存在的理由。\n\n"
+                       "## 这些边有什么用\n\n"
+                       "两个方向都能问：「这条记忆改过哪些提交」和「这个提交实现了哪些记忆」。"
+                       "`list` 两个方向都支持。\n\n"
+                       "## 撤销是软删除\n\n"
+                       "`unlink` 只写 `removed_at`，行还在——"
+                       "「建立过又被否掉」和「从没建立过」不是一回事。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["link", "unlink", "list"],
+                           "description": "link 建立 / unlink 软删 / list 查询（缺省 list）"},
+                "code": {"type": "string",
+                         "description": "记忆编码（link / unlink 必填）"},
+                "sha": {"type": "string",
+                        "description": "提交 sha（link 必填；须是已采集到的提交）"},
+                "rel": {"type": "string",
+                        "enum": ["implemented_by", "produced", "revised_in",
+                                 "discussed_in"],
+                        "description": "关系类型（link 必填）。discussed_in 之外的都是语义断言"},
+                "evidence": {"type": "string",
+                             "description": "为什么这么关联（强烈建议写：三个月后没人记得）"},
+                "link_id": {"type": "integer",
+                            "description": "unlink 用：要撤销的关联 id"},
+                "include_removed": {"type": "boolean",
+                                    "description": "list 用：连已软删的一起列"},
+            },
+            "required": ["action"],
         },
     },
 ]
@@ -2455,6 +2498,78 @@ class FishServer:
                        f"{(subject or '')[:60]}{mark}")
         return "\n".join(out) + "\n"
 
+    def tool_git_link(self, a, ident):
+        """记忆↔提交关联的**显式**入口（link / unlink / list）。
+
+        2026-11-21：为什么必须有它——`fish_git_link` 原本有 4 个函数、21 条判据、
+        **生产侧 0 个调用点**。`link_commit_mentions` 补上了 `discussed_in` 的自动推断，
+        但另外三种关系（`implemented_by` / `produced` / `revised_in`）**只能由人断言**。
+        「只能显式建立」若无入口，就等于「建不了」——那还是死代码。
+        """
+        action = (a.get("action") or "list").strip().lower()
+        if action not in ("link", "unlink", "list"):
+            return f"action 只能是 link / unlink / list，收到 {action!r}。\n"
+
+        if action == "list":
+            want = {k: a.get(k) for k in ("code", "sha") if a.get(k)}
+            kw = {}
+            if "code" in want:
+                kw["src_kind"], kw["src_id"] = "memory", want["code"]
+            if "sha" in want:
+                kw["dst_kind"], kw["dst_id"] = "commit", want["sha"]
+            if not kw:
+                return ("list 至少要给一个方向：`code=<编码>`（这条记忆连过哪些提交）"
+                        "或 `sha=<提交>`（这个提交连过哪些记忆）。\n")
+            rows = fish_git_link.links_of(
+                self.conn, include_removed=bool(a.get("include_removed")), **kw)
+            if not rows:
+                return ("没有关联记录。\n\n**这不等于「没有关系」**——只代表还没人建立过。"
+                        "`discussed_in` 会在提交正文提到编码时自动建；"
+                        "其余三种要用 `action=link` 显式断言。\n")
+            out = [f"共 {len(rows)} 条关联："]
+            for r in rows:
+                dead = "（已撤销）" if r.get("removed_at") else ""
+                out.append(f"- #{r['id']} {r['src_id']} --{r['rel']}--> "
+                           f"{str(r['dst_id'])[:12]}  [{r['source']}/{r['confidence']}]"
+                           f"{('｜' + r['evidence']) if r.get('evidence') else ''}{dead}")
+            return "\n".join(out) + "\n"
+
+        if action == "unlink":
+            lid = a.get("link_id")
+            if not lid:
+                return "unlink 需要 `link_id`（先用 action=list 查）。\n"
+            hit = fish_git_link.link_remove(self.conn, int(lid))
+            self.conn.commit()
+            return (f"已撤销关联 #{lid}（软删，行还在）。\n" if hit
+                    else f"没有可撤销的 #{lid}（不存在或已经撤销过）。\n")
+
+        # ── link ──────────────────────────────────────────────────────────
+        code = (a.get("code") or "").strip()
+        sha = (a.get("sha") or "").strip()
+        rel = (a.get("rel") or "").strip()
+        if not code or not sha or not rel:
+            return "link 需要 `code` + `sha` + `rel` 三个参数。\n"
+        if rel not in fish_git_link.RELS:
+            return f"rel 只能是 {'/'.join(fish_git_link.RELS)}，收到 {rel!r}。\n"
+        if rel == fish_git_link.AUTO_REL:
+            return (f"`{rel}` 是**自动推断**的关系：提交正文提到编码时会自己建，"
+                    "不需要手动断言。\n想断言别的？用 implemented_by / produced / revised_in。\n")
+        if not self.conn.execute("SELECT 1 FROM code_index WHERE code=?", (code,)).fetchone():
+            return f"库里没有这条记忆：{code}\n"
+        row = self.conn.execute(
+            "SELECT subject, committed_at FROM git_commit WHERE sha=?", (sha,)).fetchone()
+        if not row:
+            return (f"这个提交还没采集到：{sha[:12]}\n\n"
+                    "**只认已入库的提交**——没采过的提交无法建立关联（会变成指向不存在对象的边）。"
+                    "先让会话里有那次提交，或用 `git_repo_commits` 看采到了哪些。\n")
+        lid = fish_git_link.link_create(
+            self.conn, src_kind="memory", src_id=code, dst_kind="commit", dst_id=sha,
+            rel=rel, source="explicit", confidence=1.0,
+            evidence=a.get("evidence") or f"由 {ident.citizen_id or '未归属'} 显式断言")
+        self.conn.commit()
+        return (f"已建立关联 #{lid}：{code} --{rel}--> {sha[:12]}"
+                f"（{(row[0] or '')[:50]}）\n")
+
     def tool_healthcheck(self, a, ident):
         total = self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         mem = self.conn.execute("SELECT COUNT(*) FROM code_index WHERE status='active'").fetchone()[0]
@@ -2498,6 +2613,10 @@ class FishServer:
             # **只加读，不加写仓库的工具**——方案 §6 明确要求。
             "git_repo_status": self.tool_git_repo_status,
             "git_repo_commits": self.tool_git_repo_commits,
+            # 2026-11-21（24 个工具）：记忆↔提交关联的**写入口**。
+            # 注意方案 §6 的约束是「不加写**仓库**的工具」——本工具写的是
+            # fish 自己的 `git_link` 表，不碰任何 git 仓库。
+            "git_link": self.tool_git_link,
         }
         if name not in table:
             raise ValueError(f"未知工具：{name}")

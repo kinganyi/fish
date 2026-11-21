@@ -146,7 +146,7 @@ class MCPKBToolsTest(unittest.TestCase):
 
     # ------------------------------------------------------------ 1. 工具面
 
-    def test_01_tools_list_names_are_21(self):
+    def test_01_tools_list_names(self):
         """工具面 = 18 个旧工具 + `corpus`（T03 加的第 19 个；**名单仍写死**不反读）。
 
         2026-10-27 三关修复顺手修掉这条**既有红**：T03 加 `corpus` 时这里没跟着改成 19，
@@ -155,9 +155,11 @@ class MCPKBToolsTest(unittest.TestCase):
         r = self.c.request("tools/list")
         names = {t["name"] for t in r["result"]["tools"]}
         # 2026-11-20（P4-4）：21 → 23，追加两个只读 git 工具。
+        # 2026-11-21：23 → 24，追加 `git_link`（记忆↔提交关联的显式入口）。
         self.assertEqual(names, TOOL_NAMES | {"corpus", "profile_show", "profile_propose",
-                                              "git_repo_status", "git_repo_commits"})
-        self.assertEqual(len(r["result"]["tools"]), 23)
+                                              "git_repo_status", "git_repo_commits",
+                                              "git_link"})
+        self.assertEqual(len(r["result"]["tools"]), 24)
         for tool in r["result"]["tools"]:
             self.assertIn("inputSchema", tool)
             self.assertEqual(tool["inputSchema"]["type"], "object")

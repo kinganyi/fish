@@ -704,7 +704,11 @@ CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL,
             "profile_show", "profile_propose",
             # 2026-11-20（P4-4）：21 → 23，新增两个**只读** git 工具
             # （方案 §6：不加写仓库的工具）。
-            "git_repo_status", "git_repo_commits"])
+            "git_repo_status", "git_repo_commits",
+            # 2026-11-21：23 → 24，新增 memory↔commit 关联的**显式**写入口。
+            # 它写的是 fish 自己的 `git_link` 表，不碰任何 git 仓库，
+            # 所以不违反「不加写仓库的工具」那条约束。
+            "git_link"])
         expect = {
             "remember": {"project", "title", "body", "mem_type", "tags", "cause",
                          "occurred_at", "supersedes", "attachments"},
@@ -753,6 +757,8 @@ CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL,
             # 这里只列业务字段。**没有写仓库的工具**（方案 §6）。
             "git_repo_status": {"path", "repo_id"},
             "git_repo_commits": {"path", "repo_id", "limit"},
+            "git_link": {"action", "code", "sha", "rel", "evidence",
+                        "link_id", "include_removed"},
         }
         for t in mcp_server.TOOLS:
             extra = {"token"} | ({"bind_token"} if t["name"] == "session_start" else set())

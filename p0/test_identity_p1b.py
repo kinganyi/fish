@@ -156,7 +156,10 @@ MCP_TOOL_NAMES = ["remember", "recall", "neighbors", "resolve_code", "read_body"
                   # 2026-11-20（fish 引入 git 的 P4-4）：21 → 23，追加两个**只读**
                   # git 工具（方案 §6：不加写仓库的工具）。旧 21 个名字/顺序不动。
                   "corpus", "profile_show", "profile_propose",
-                  "git_repo_status", "git_repo_commits"
+                  "git_repo_status", "git_repo_commits",
+                  # 2026-11-21：23 → 24，记忆↔提交关联的**显式**写入口
+                  # （写 fish 自己的 git_link 表，不碰任何 git 仓库）。
+                  "git_link"
 ]
 
 _SQL_START = re.compile(r"^(SELECT|INSERT|UPDATE|DELETE|PRAGMA|ALTER|CREATE|REPLACE)\b", re.I)

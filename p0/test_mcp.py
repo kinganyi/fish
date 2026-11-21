@@ -116,7 +116,11 @@ class MCPProtocolTest(unittest.TestCase):
                                  "session_start", "board", "kb", "kb_write", "corpus",
                                    "profile_show", "profile_propose",
                                    # 2026-11-20（P4-4）：两个只读 git 工具（21 → 23）
-                                   "git_repo_status", "git_repo_commits"})
+                                   "git_repo_status", "git_repo_commits",
+                                   # 2026-11-21：记忆↔提交关联的**显式写入口**
+                                   #（23 → 24）。它写的是 fish 自己的 git_link 表，
+                                   # 不碰任何 git 仓库，不违反"不加写仓库的工具"。
+                                   "git_link"})
         # 每个工具必须有 inputSchema
         for t in r["result"]["tools"]:
             self.assertIn("inputSchema", t)
