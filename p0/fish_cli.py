@@ -547,7 +547,11 @@ def main():
 
     # 身份层 P1-b：session 命令族。**CLI 专属**——不注册成 MCP 工具（18 §4 / 评审 R-2）：
     # MCP 面签不出 machine 级，能签的只有"读得到宿主 env"的 CLI。
-    p = sub.add_parser("session", help="会话身份（CLI 专属命令族；MCP 面不签发凭证）")
+    p = sub.add_parser("session",
+                       # 2026-11-21（B-3）：旧文案写「MCP 面不签发凭证」，
+                       # 而 MCP 早就有 `session_start` 且能正常签发——这句话会让人
+                       # **不去找**那个工具。改成如实描述两个面各有什么。
+                       help="会话身份（CLI 命令族；MCP 面另有 session_start 工具可签发凭证）")
     sess = p.add_subparsers(dest="session_action", required=True)
 
     sp = sess.add_parser("start", help="签发会话凭证（幂等：同会话重跑 → 同一个公民）")
@@ -757,6 +761,11 @@ def main():
     p.set_defaults(func=_f.cmd_supersede)
 
     p = sub.add_parser("events"); p.add_argument("--limit", type=int, default=20)
+    # 2026-11-21（系统级修复 B-4）：`read_body` 的正文缺失提示一直写着
+    # `fish events --code <code>`，但本命令从来没有 `--code`——**诊断信息把人指向
+    # 一个不存在的用法，比不给信息更差**。这里补上参数（实现见 fish.cmd_events），
+    # 让那句提示第一次真的可执行。
+    p.add_argument("--code", help="只看与这条记忆相关的事件（按 subject.id 匹配）")
     p.set_defaults(func=_f.cmd_events)
 
     # ---- 主人画像（R1-1/R1-2/R1-4/R1-5/R1-6，2026-11-11）----

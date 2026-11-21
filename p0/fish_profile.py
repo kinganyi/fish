@@ -385,12 +385,20 @@ def reset_question_counter(conn, *, status="answered", by=None, commit=True):
     否则"为什么这次没问"在事后完全不可查。
     """
     since = int(get_config(conn, "profile.docs_since_ask") or 0)
-    qid = ulid()
-    conn.execute(
-        "INSERT INTO profile_questions (question_id, raised_at, trigger_count,"
-        " status, answered_at) VALUES (?,?,?,?,?)",
-        (qid, now_utc(), since, status,
-         now_utc() if status == "answered" else None))
+    # F-3：如果有 pending 记录，把它收尾（而不是再插一条）——否则每回答一次
+    # 就多一行孤儿 pending，那还是"留痕了但读不出节律"。
+    qid = _open_pending_question(conn)
+    if qid:
+        conn.execute(
+            "UPDATE profile_questions SET status=?, answered_at=? WHERE question_id=?",
+            (status, now_utc() if status == "answered" else None, qid))
+    else:
+        qid = ulid()
+        conn.execute(
+            "INSERT INTO profile_questions (question_id, raised_at, trigger_count,"
+            " status, answered_at) VALUES (?,?,?,?,?)",
+            (qid, now_utc(), since, status,
+             now_utc() if status == "answered" else None))
     if status == "deferred":
         append_event(conn, PROFILE_EVENT_DEFERRED,
                      {"citizen_id": by or "human", "evidence_level": "signed"},
@@ -401,10 +409,50 @@ def reset_question_counter(conn, *, status="answered", by=None, commit=True):
     return {"question_id": qid, "status": status, "trigger_count": since}
 
 
+def _open_pending_question(conn):
+    """当前那条「已提示、待回答」的记录；没有返回 None。
+
+    2026-11-21（系统级修复 F-3）：此前 `profile_questions` 表**永远是 0 行**——
+    因为只有 `reset_question_counter`（回答/延期时）会写它，而"提示过"这件事
+    从来没有落过库。于是注入包每次都在说「该问三问」，事后却查不到
+    "问过几次、哪几次没答"。**留痕缺失比问错更麻烦**：它让节律不可审计。
+    """
+    try:
+        row = conn.execute(
+            "SELECT question_id FROM profile_questions WHERE status='pending' "
+            "ORDER BY raised_at DESC LIMIT 1").fetchone()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
+
+def raise_question_if_needed(conn, *, commit=True):
+    """提示触发时留一笔（同一轮只写一次）。返回 question_id 或 None。
+
+    幂等：已经有 pending 就复用——`render_questions_block` 每次注入都会被调，
+    无条件写会变成"注入一次写一行"，那不是留痕是刷表。
+    """
+    if not question_due(conn):
+        return None
+    existing = _open_pending_question(conn)
+    if existing:
+        return existing
+    since = int(get_config(conn, "profile.docs_since_ask") or 0)
+    qid = ulid()
+    conn.execute(
+        "INSERT INTO profile_questions (question_id, raised_at, trigger_count, status) "
+        "VALUES (?,?,?, 'pending')", (qid, now_utc(), since))
+    if commit:
+        conn.commit()
+    return qid
+
+
 def render_questions_block(conn):
     """注入包里的「画像三问」段。**只在到点且未延平时出现**。"""
     if not question_due(conn):
         return ""
+    # F-3：渲染即留痕（幂等，同一轮不重复写）
+    raise_question_if_needed(conn, commit=False)
     since = int(get_config(conn, "profile.docs_since_ask") or 0)
     lines = [f"【画像提问】距上次已写 {since} 篇，按节律该问三问（R1-4）："]
     lines += ["  " + q for q in PROFILE_QUESTIONS]

@@ -1480,9 +1480,14 @@ class FishServer:
         # 只写"去调 session_start"还是不够：不传 citizen 它会新建一个公民，
         # 那样 MCP 侧的身份与签发出来的凭证照样对不上。
         if citizen_id:
-            lines.append(f"⚠ 调用时**两个参数都要给**：\n"
+            lines.append(f"⚠ 调用时**最多三个参数**（第三个只在公民已存在时才需要）：\n"
                          f"     session_start(citizen=\"{citizen_id}\", "
-                         f"session_name=\"<你的稳定名字>\")")
+                         f"session_name=\"<你的稳定名字>\", "
+                         f"bind_token=\"<该公民签发过的任一 token>\")\n"
+                         "     · 刚登记的公民：前两个就够（还没有 token 可绑）\n"
+                         "     · 已存在的公民：**必须** bind_token（S-01：防止凭可读的 id 接管身份）\n"
+                         "     · token 丢了：回 CLI 跑 `fish session start`——它按 host_session_key "
+                         "复用公民、签发新 token（公民不变，凭证换新）")
             lines.append("   只给 session_name 会新建一个公民，只给 citizen 没有幂等锚。")
         if a.get("session_name"):
             lines.append(f"（session_name={a['session_name']} 已不再写入进程身份："

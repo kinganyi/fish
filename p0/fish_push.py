@@ -699,13 +699,25 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
                 "FROM board_seen s JOIN boards b ON b.id = s.board_id "
                 "WHERE s.citizen_id=? AND b.status='open' AND b.period_key=?" + sk_where,
                 sk_params).fetchall():
+                # 2026-11-21（系统级修复 C-1）：**这个数曾经虚高 7251 倍。**
+                #
+                # 旧写法是 `MAX(id) - seen_post`。`board_posts.id` 是**全局自增**
+                # （所有板共享一个 AUTOINCREMENT 序列），所以 `MAX(id) WHERE board_id=X`
+                # 拿到的是「所有板里最大的 id」，不是「X 板有几条动态」。
+                # 差值里混进了别板动态的 id —— 实测 board_id=46：MAX(id)=141 但实际动态
+                # 只有 2 条；全库 open 板 MAX(id) 求和 7395 vs 实际动态 144。
+                #
+                # 正确算法是**数区间内的行**：`count(*) WHERE board_id=? AND id > seen`。
+                # 注意 `seen_post` 本身记的也是全局 id，所以 `id > seen` 这个增量口径是对的，
+                # 错的只是「用 MAX(id) 当总数」。
                 cur_post = conn.execute(
-                    "SELECT COALESCE(MAX(id),0) FROM board_posts WHERE board_id=?",
-                    (bid,)).fetchone()[0]
+                    "SELECT count(*) FROM board_posts WHERE board_id=?", (bid,)).fetchone()[0]
                 cur_pres = conn.execute(
                     "SELECT COALESCE(MAX(last_seen_at),'') FROM presence WHERE board_id=?",
                     (bid,)).fetchone()[0]
-                new_posts = int(cur_post or 0) - int(seen_post or 0)
+                new_posts = conn.execute(
+                    "SELECT count(*) FROM board_posts WHERE board_id=? AND id > ?",
+                    (bid, int(seen_post or 0))).fetchone()[0]
                 new_pres = (cur_pres or "") > (seen_pres or "")
                 if new_posts <= 0 and not new_pres:
                     continue

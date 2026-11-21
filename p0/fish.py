@@ -8712,8 +8712,17 @@ def cmd_withdraw(args):
 def cmd_events(args):
     conn = connect(Path(args.root))
     conn.executescript(SCHEMA)
-    rows = conn.execute("SELECT seq,ts,type,subject FROM events ORDER BY seq DESC LIMIT ?",
-                        (args.limit,)).fetchall()
+    code = args.code
+    if code:
+        # B-4：按 subject.id 过滤（subject 是 JSON；用 LIKE 免去 json_extract 的编译依赖）
+        like = '%"id": "' + code + '"%'
+        rows = conn.execute(
+            "SELECT seq,ts,type,subject FROM events WHERE subject LIKE ? "
+            "ORDER BY seq DESC LIMIT ?", (like, args.limit)).fetchall()
+    else:
+        rows = conn.execute("SELECT seq,ts,type,subject FROM events ORDER BY seq DESC LIMIT ?",
+                            (args.limit,)).fetchall()
+    if not rows: print(f"（没有找到相关事件{f'：{code}' if code else ''}）")
     for r in rows:
         print("\t".join(str(x) for x in r))
     conn.close()
