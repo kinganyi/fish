@@ -1058,8 +1058,21 @@ class FishServer:
         lines = [fish.RECALL_DIMENSION_NOTE,
                  "（关键词匹配，不是语义检索；同义词查不到——见 ADR-006）"]
         for c, t, p, m, s, fp, d, src in rows:
+            # 2026-11-21（A-2）：**断链必须被看见**。
+            #
+            # 85 号调查里 318 条记忆的正文文件丢了，而 `recall` 照常返回它们——
+            # 「一份看起来完整的记忆，点进去是空的」。清理（`fish purge-broken`）
+            # 已把存量正式作废，但**未来仍会有新的断链**（磁盘故障、手工删文件、
+            # 又一次迁移），所以消费侧这道闸不能省：它是"防止 AI 引用空记忆"的最后一道。
+            _warn = ""
+            if fp:
+                try:
+                    if not (self.root / fp).exists():
+                        _warn = "  ⚠无正文"
+                except OSError:
+                    _warn = "  ⚠无正文"
             lines.append(f"- {c} {fish.format_status_tag(m, s, d)} {t}"
-                         f"  ← 匹配:{src}｜正文用 read_body")
+                         f"  ← 匹配:{src}｜正文用 read_body{_warn}")
         return "\n".join(lines) + "\n"
 
     def tool_add_project(self, a, ident):

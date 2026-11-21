@@ -390,5 +390,84 @@ class KbVaultAvailabilityTest(unittest.TestCase):
         self.assertEqual(self._vault()["path"], str(self.missing), "dry-run 改了库")
 
 
+class BrokenVisibilityTest(_PurgeCase):
+    """A-2 / A-3：断链必须**被看见**（消费侧标记 + 体检结构）。
+
+    ## 为什么「清理了」还不够
+
+    清理（`purge_broken`）处理的是**存量**（318 条）。而断链会**继续产生**：
+    磁盘故障、手工删文件、又一次迁移。所以消费侧那道闸不能省——
+    它是"防止 AI 引用空记忆"的最后一道。
+
+    ## 变异体（去掉 → 必红）
+
+    · `tool_recall` 里去掉 `⚠无正文` 标记 → 判据 1 红
+    · 标记改成无条件加（不判 exists）→ 判据 2（反向断言）红
+    · `cmd_healthcheck` 改回扫所有行（含已作废）→ 判据 3 红
+    """
+
+    def _recall(self):
+        import mcp_server
+
+        class _Id:
+            status = "valid"
+            citizen_id = "C1"
+            evidence = "machine"
+            session_key = "dsh:t"
+
+        self.conn.execute(
+            "INSERT INTO citizens (citizen_id, display_name, kind, created_at) "
+            "VALUES ('C1','t','role','2026-11-21T00:00:00Z')")
+        self.conn.commit()
+        srv = object.__new__(mcp_server.FishServer)
+        srv.conn = self.conn
+        srv.root = self.data
+        return srv.tool_recall({"query": "T-", "limit": 10}, _Id())
+
+    def test_recall_marks_broken(self):
+        """判据 1：断链条目必须带 `⚠无正文`。"""
+        self._make("有正文的", body="x")
+        self._make("会断链的", body="y", make_broken=True)
+        import fish
+        fish.ensure_fts(self.conn, self.data)
+        out = self._recall()
+        self.assertIn("⚠无正文", out, "断链没被标记——那正是「点进去是空的」的形态")
+
+    def test_recall_does_not_mark_healthy(self):
+        """判据 2（反向断言）：有正文的**不许**被标记。
+
+        变异体：去掉 exists 判断 → 全标 → 红。
+        """
+        self._make("有正文的", body="x")
+        import fish
+        fish.ensure_fts(self.conn, self.data)
+        out = self._recall()
+        self.assertNotIn("⚠无正文", out, "有正文的条目被误标了")
+
+    def test_healthcheck_scans_only_active(self):
+        """判据 3：体检的断链读数**只算 active**。
+
+        已作废的正文缺失不算断链——第一版扫所有行，于是"清理完还报 318 条"，
+        那个读数会让"清理干净了吗"永远为假。
+        """
+        code = self._make("坏的", make_broken=True)
+        import fish
+        import fish_purge
+        before = fish_purge.scan_broken(self.conn, self.data)["count"]
+        self.assertEqual(before, 1, "前置：作废前应算 1 条断链")
+        fish_purge.purge_broken(self.conn, self.data, dry_run=False)
+        after = fish_purge.scan_broken(self.conn, self.data)["count"]
+        self.assertEqual(after, 0, f"作废后仍算 {after} 条断链")
+
+    def test_healthcheck_reports_date_structure(self):
+        """判据 4：体检必须给出**日期结构**（定位根因的关键）。
+        """
+        self._make("坏的", make_broken=True)
+        import fish_purge
+        rep = fish_purge.consistency_report(self.conn, self.data)
+        self.assertIn("broken_by_date", rep)
+        self.assertEqual(sum(rep["broken_by_date"].values()), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

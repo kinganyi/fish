@@ -3013,6 +3013,9 @@ def same_name_notice(citizen_id, kind) -> str:
 from fish_identity_diag import (RELATED_ANCHORS, RELATED_CITIZENS_LIMIT,  # noqa: F401
                                 related_citizens)
 from fish_identity_diag import related_citizens_lines as _rc_lines_raw
+# 2026-11-21（A-3）：体检要复用 `scan_broken`（它只扫 active、带日期结构）。
+# 方向是 `fish → fish_purge`（后者 J2 禁 import fish，反向才合法）。
+import fish_purge
 
 
 def related_citizens_lines(conn, citizen_id=None) -> list:
@@ -8412,13 +8415,23 @@ def cmd_healthcheck(args):
         "SELECT COUNT(*) FROM code_index WHERE status='withdrawn'").fetchone()[0]
     broken = []
     root = Path(args.root)
-    for code, fp in conn.execute("SELECT code,file_path FROM code_index").fetchall():
-        if fp and not (root / fp).exists():
-            broken.append(code)
+    # 2026-11-21（A-3）：断链读数交给 `fish_purge.scan_broken`——它**只扫 active**，
+    # 且给出日期结构。原来的内联循环扫所有行（含已作废），于是"清理完还报 318 条"，
+    # 那个读数会让"清理干净了吗"永远为假。日期结构则是定位根因的关键：
+    # 85 号调查里正是按日期一分，才看出「10-28~11-18 连续 22 天 100% 断链 = 迁移事故」。
+    try:
+        _bi = fish_purge.scan_broken(conn, root)
+        broken = _bi["codes"]
+    except Exception as exc:      # noqa: BLE001 —— 体检不能因为一项检查挂掉整体
+        warn_ignored("fish.py healthcheck scan_broken", exc)
+        _bi = {"by_date": {}, "by_project": {}}
     print(f"事件 {total} 条 / 活跃记忆 {memories} 条 / 休眠 {dormant} 条 / 作废 {withdrawn} 条"
           f" / 断链 {len(broken)} 条")
-    for b in broken:
-        print(f"  断链：{b}")
+    if _bi.get("by_date"):
+        print("  断链按日期（连续多日 100% = 迁移/批量事故；零星 = 偶发删改）：")
+        for _day, _n in _bi["by_date"].items():
+            print(f"    {_day}  {_n}")
+        print("  查详情/修复：fish purge-broken（先看 dry-run，确认后加 --apply）")
     # 全文索引哨兵（2026-10-24 实测教训：索引落后 1 条时，只有人工比对计数才发现——
     # 那种"存进去但搜不到"是最难发现的失真，必须在自检层报出来）
     try:
