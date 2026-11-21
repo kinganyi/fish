@@ -111,6 +111,16 @@ const WRITE_CLASS = {
   // 故 writeClass=audit；幂等判 yes（同一入参重放不改变可观察状态：审计只追加、
   // 采纳回填有 `reaction IS NULL` 前置条件）。
   corpus: ['audit', 'yes'],
+  // 2026-11-21：四个后来新增的工具。语义判据（读的是生产树，不是猜的）：
+  //   · `profile_show` → `fish_profile.list_slots` 只 SELECT，无写 → none；
+  //   · `profile_propose` → `propose_removal` 先 UPDATE 同槽 pending 为 superseded、
+  //     再 INSERT 新 pending 行 + append_event + commit（fish_profile.py）→ state；
+  //     幂等判 no：同一入参重放会生成新的 proposal_id（旧行只是被 supersede，不是不写）；
+  //   · `git_repo_status` / `git_repo_commits` → 都只 SELECT（`_git_checkout_for` 也是查）→ none。
+  profile_show: ['none', 'yes'],
+  profile_propose: ['state', 'no'],
+  git_repo_status: ['none', 'yes'],
+  git_repo_commits: ['none', 'yes'],
 }
 
 /**

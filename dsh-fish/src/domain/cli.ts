@@ -135,7 +135,7 @@ export interface CliMapBuildContext {
  *
  * 三条写表纪律（每一条都对着一次真实踩坑）：
  *   1. `kind` 按**生产语义**判，不按"看起来像读"——`board show` 看着是读，实际会
- *      `board_ensure` 建行（`p0/fish.py:11492` "取或建一块板"），所以它是 `write`；
+ *      `board_ensure` 建行（`p0/fish.py` "取或建一块板"），所以它是 `write`；
  *   2. `proxy-readonly` 只给**逐行核过没有写语句**的命令，`evidence` 写源码位置。
  *      没核过的一律 `python-only`（宁可给人一条指引，不替人赌一次写）；
  *   3. `reason` 说"为什么"，`replacement` 说"那我去哪做"——两样缺一条，这条标注就等于没说。
@@ -160,7 +160,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     kind: 'read',
     impl: 'proxy-readonly',
     reason: '只列 code_index（不含检索、不写审计），Python 侧是纯 SELECT；TS 未做同形渲染',
-    evidence: 'p0/fish.py:6919-6928（cmd_list：一条 SELECT code_index + 打印）',
+    evidence: 'p0/fish.py（cmd_list：一条 SELECT code_index + 打印）',
     replacement: { cli: 'list', note: 'Python 侧纯读，可在快照副本上转发' },
   },
   {
@@ -168,7 +168,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     kind: 'read',
     impl: 'proxy-readonly',
     reason: '邻域五策略仍在 Python（TS 侧没有关联边读取原语：`links.ts` 已按第二批减重删除）',
-    evidence: 'p0/fish.py:6885-6916（cmd_neighbors）+ 6350-6407（neighbors()：无 INSERT/UPDATE/DELETE）',
+    evidence: 'p0/fish.py（cmd_neighbors）；neighbors()：无 INSERT/UPDATE/DELETE）',
     replacement: { cli: 'neighbors', note: 'Python 侧纯读，可在快照副本上转发' },
   },
   {
@@ -224,7 +224,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     kind: 'read',
     impl: 'proxy-readonly',
     reason: '只读 events 表最近 N 行；TS 未做这段渲染（事件只增不改，转发不改变语义）',
-    evidence: 'p0/fish.py:11418-11425（cmd_events：一条 SELECT … ORDER BY seq DESC LIMIT ?）',
+    evidence: 'p0/fish.py（cmd_events：一条 SELECT … ORDER BY seq DESC LIMIT ?）',
     replacement: { cli: 'events', note: 'Python 侧纯读，可在快照副本上转发' },
   },
   {
@@ -302,7 +302,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
       'T05 已复刻 `project_status_rows`（六列 + 每列来源 + 降级清单）。' +
       '⚠ 生产**默认形态**会把渲染结果写进 `<home>/10-项目库/项目状态表.md`，`--json` 形态才纯读；' +
       '影子期只实现纯读的那一半：同一份表格照常渲染，但**不落盘**，回执末尾明写"没有写文件"',
-    evidence: 'p0/fish.py:14517（project_status_rows 的 docstring 明写"只读：不改任何表、不写盘"）；写盘在 render_project_status:14645',
+    evidence: 'p0/fish.py（project_status_rows 的 docstring 明写"只读：不改任何表、不写盘"）；写盘在 render_project_status',
   },
   {
     path: 'alias link',
@@ -324,7 +324,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     impl: 'ts',
     reason:
       'T05 已复刻 `cmd_alias` 的 list 分支：原始别名行 + 按 canonical 折叠的分组（单向展开，最多 8 跳）',
-    evidence: 'p0/fish.py:6722-6738（cmd_alias 的 else 分支：SELECT + resolve_name）',
+    evidence: 'p0/fish.py（cmd_alias 的 else 分支：SELECT + resolve_name）',
   },
   {
     path: 'workspace set',
@@ -345,14 +345,14 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     kind: 'read',
     impl: 'ts',
     reason: 'T05 已复刻 `_workspace_cmd_list`（`list_workspace_mappings` + 一行一条渲染）',
-    evidence: 'p0/fish.py:10036-10037 → 10065-10075（_workspace_cmd_list：list_workspace_mappings + 打印）',
+    evidence: 'p0/fish.py（_workspace_cmd_list：list_workspace_mappings + 打印）',
   },
   {
     path: 'workspace seed',
     kind: 'read',
     impl: 'proxy-readonly',
     reason: '打印建议**绝不自动写入**（源码 docstring 明写）',
-    evidence: 'p0/fish.py:10025-10028（"list / seed 只读：seed 打印建议但绝不自动写入"）',
+    evidence: 'p0/fish.py（"list / seed 只读：seed 打印建议但绝不自动写入"）',
     replacement: { cli: 'workspace seed', note: 'Python 侧纯读，可在快照副本上转发' },
   },
 
@@ -422,7 +422,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     reason:
       'T05 已复刻 `kb_tree`（统计层 + 显示层分开、双预算截断、深度口径）。' +
       '影子期**不写 kb_access 审计**（生产每次读都追一条），所以"未读/读次数"里不会出现 DSH 的读取',
-    evidence: 'p0/fish_kb.py:1541-1665（kb_tree：只统计不读正文；`_kb_log_quiet(action="tree")` 是唯一写点，影子期不写）',
+    evidence: 'p0/fish_kb.py（kb_tree：只统计不读正文；`_kb_log_quiet(action="tree")` 是唯一写点，影子期不写）',
   },
   {
     path: 'kb open',
@@ -431,7 +431,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     reason:
       'T05 已复刻 `kb_open`（8 类路径拒绝 + 敏感名单二次授权 + 编码/媒体双判 + 截断声明）。' +
       '影子期不写 kb_access',
-    evidence: 'p0/fish_kb.py:1731-1834（kb_open；正文读取一律 read_bytes，审计写点不实现）',
+    evidence: 'p0/fish_kb.py（kb_open；正文读取一律 read_bytes，审计写点不实现）',
   },
   {
     path: 'kb search',
@@ -439,7 +439,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     impl: 'ts',
     reason:
       'T05 已复刻 `kb_search`（按需扫描、不建索引、敏感文件不进片段、片段 240 字、排序 -occurrences/-mtime/rel）',
-    evidence: 'p0/fish_kb.py:1966-2108（kb_search：只扫 .md，query 只以 hash 进审计；影子期不写审计）',
+    evidence: 'p0/fish_kb.py（kb_search：只扫 .md，query 只以 hash 进审计；影子期不写审计）',
   },
   {
     path: 'kb stats',
@@ -447,7 +447,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     impl: 'ts',
     reason:
       'T05 已复刻 `kb_stats`（规模/未读/最近变更/每库读写计数）；镜像/离线两档来源如实标注',
-    evidence: 'p0/fish_kb.py:2673-2729（kb_stats：_kb_scan_counts + 四条 kb_access 聚合，纯 SELECT）',
+    evidence: 'p0/fish_kb.py（kb_stats：_kb_scan_counts + 四条 kb_access 聚合，纯 SELECT）',
   },
   {
     path: 'kb toc',
@@ -456,7 +456,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     reason:
       '目录快照（分类概览 + 前 3 标题 + 分页，2026-10-28 新增；纯读、不写 kb_access）' +
       '——TS 侧尚未复刻，影子期在快照副本上只读转发',
-    evidence: 'p0/fish.py:13765（add_parser "toc"）+ 13411-13412（act=="toc" → _kb_cmd_toc）',
+    evidence: 'p0/fish.py（add_parser "toc"）；act=="toc" → _kb_cmd_toc）',
     replacement: { cli: 'kb toc', note: 'Python 侧纯读，可在快照副本上转发' },
   },
   {
@@ -486,7 +486,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     impl: 'ts',
     reason:
       'T05 已复刻 `_kb_cmd_vault` 的 list 分支（`kb_vault_list`：默认库在前，其次按名字；一行 `_kb_vault_line`）',
-    evidence: 'p0/fish_kb.py:567-571 + 2984-2993（kb_vault_list 纯 SELECT + list 渲染）',
+    evidence: 'p0/fish_kb.py（kb_vault_list 纯 SELECT + list 渲染）',
   },
   {
     path: 'kb vault add',
@@ -546,7 +546,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     reason:
       'T05 已复刻 `fish_corpus.stats`（段/会话/by_host/by_project/degraded/orphan/台账四档/滞后/体积）。' +
       '读的是独立库 `corpus.sqlite`（只读打开），不是主库快照',
-    evidence: 'p0/fish_corpus.py:575-703（stats：库不存在返回 db_missing 不建库；readonly=True 打开）',
+    evidence: 'p0/fish_corpus.py（stats：库不存在返回 db_missing 不建库；readonly=True 打开）',
   },
   {
     path: 'corpus search',
@@ -555,7 +555,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     reason:
       'T05 已复刻 `fish_corpus.search`（MATCH + 过滤下推、0.6/0.2/0.2 排序、出口二次脱敏）。' +
       '影子期不写 `corpus_access_log`（生产每次检索都追一条）',
-    evidence: 'p0/fish_corpus.py:892-967（search：只读连接；`_log_access` 是唯一写点，影子期不写）',
+    evidence: 'p0/fish_corpus.py（search：只读连接；`_log_access` 是唯一写点，影子期不写）',
   },
   {
     path: 'corpus read',
@@ -564,7 +564,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     reason:
       'T05 已复刻 `fish_corpus.read`（门牌三档 + 段级脱敏 + 源文件缺失声明）。' +
       '影子期不写访问审计、**也不回填** `push_log.reaction`（那是主库写）',
-    evidence: 'p0/fish_corpus.py:990-1043（read：投影正文 + source 状态；MCP 的采纳回填在 mcp_server.py:2056-2062）',
+    evidence: 'p0/fish_corpus.py（read：投影正文 + source 状态；MCP 的采纳回填在 mcp_server.py）',
   },
   {
     path: 'corpus retag',
@@ -601,7 +601,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     kind: 'read',
     impl: 'proxy-readonly',
     reason: '只读推送效果度量（push_stats 无写语句）',
-    evidence: 'p0/fish.py:10753-10754 + 10612-10715（push_stats：全 SELECT/聚合）',
+    evidence: 'p0/fish.py（push_stats：全 SELECT/聚合）',
     replacement: { cli: 'push stats', note: 'Python 侧纯读，可在快照副本上转发' },
   },
   {
@@ -609,7 +609,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     kind: 'read',
     impl: 'proxy-readonly',
     reason: '只读推送配置（get_config 七次）',
-    evidence: 'p0/fish.py:10759-10764（cmd_push 的 else 分支：get_config 打印）',
+    evidence: 'p0/fish.py（cmd_push 的 else 分支：get_config 打印）',
     replacement: { cli: 'push status', note: 'Python 侧纯读，可在快照副本上转发' },
   },
   {
@@ -682,7 +682,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     kind: 'read',
     impl: 'proxy-readonly',
     reason: '只列公民（无写语句），TS 未做这段渲染',
-    evidence: 'p0/fish.py:9992-10016（cmd_citizen_list：SELECT + 打印）',
+    evidence: 'p0/fish.py（cmd_citizen_list：SELECT + 打印）',
     replacement: { cli: 'citizen-list', note: 'Python 侧纯读，可在快照副本上转发' },
   },
   {
@@ -699,7 +699,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     reason:
       '合并两个公民（默认 dry-run 打印计划；`--apply` 会把 owner/session 归属迁到 dst 并写 events）' +
       '——影子期不写，也不替用户决定"哪两个身份其实是同一个"',
-    evidence: 'p0/fish.py:8501-8540（citizen_merge：apply=False 只统计）+ 8543-8550（cmd_citizen_merge）',
+    evidence: 'p0/fish.py（citizen_merge：apply=False 只统计）；cmd_citizen_merge）',
     replacement: { cli: 'citizen-merge', note: '终端里先跑 dry-run 看计划，确认后再 --apply' },
   },
   {
@@ -727,7 +727,7 @@ export const CLI_ANNOTATIONS: readonly CliAnnotation[] = [
     path: 'config',
     kind: 'write',
     impl: 'unsupported-shadow',
-    reason: '同一路径两种形态：无参列出（读）/ 带参 `set_config` 写库（p0/fish.py:10589）',
+    reason: '同一路径两种形态：无参列出（读）/ 带参 `set_config` 写库（p0/fish.py）',
     replacement: { cli: 'config', note: '终端里跑 `fish config`（只读列表）或 `fish config <key> <value>`（写）' },
   },
   // ── ui：只读读口（2026-10-28 新增）─────────────────────────────────

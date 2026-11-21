@@ -10,8 +10,8 @@
  * ## 与生产的两处**有意差异**（都登记在 NOTES-T05 §5）
  *
  *   1. 生产 `search`/`read` 会把访问记进 `corpus_access_log`（`_log_access`，
- *      `p0/fish_corpus.py:859`）。影子期**不写**——所以本模块没有 `logAccess`。
- *   2. 生产 MCP 的 `corpus.read` 读完会回填 `push_log.reaction`（`mcp_server.py:2056`）。
+ *      `p0/fish_corpus.py`）。影子期**不写**——所以本模块没有 `logAccess`。
+ *   2. 生产 MCP 的 `corpus.read` 读完会回填 `push_log.reaction`（`mcp_server.py`）。
  *      那是**主库写**，影子期更不做；本模块只返回正文与来源状态。
  *
  * 代价：DSH 里的检索不出现在语料审计里；收益：读命令不可能改任何一个字节。

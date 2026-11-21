@@ -10,9 +10,9 @@
  *
  * ## 只读依据（逐条对过源码，不是"看起来像读"）
  *
- *   · `project_status_rows`（`p0/fish.py:14517`，docstring 明写"**只读**：不改任何表、不写盘"）；
- *   · `alias` 的 list 分支（`p0/fish.py:6722-6738`：两条 SELECT + `resolve_name`）；
- *   · `workspace` 的 list 分支（`p0/fish.py:10065-10076` → `list_workspace_mappings`，纯 SELECT）。
+ *   · `project_status_rows`（`p0/fish.py`，docstring 明写"**只读**：不改任何表、不写盘"）；
+ *   · `alias` 的 list 分支（`p0/fish.py`：两条 SELECT + `resolve_name`）；
+ *   · `workspace` 的 list 分支（`p0/fish.py` → `list_workspace_mappings`，纯 SELECT）。
  *
  * ## 与生产的一处**有意差异**
  *

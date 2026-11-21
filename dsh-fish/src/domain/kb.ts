@@ -4,7 +4,7 @@
  * ## 影子期的三条硬边界（与生产语义逐条对齐，不是"简化版"）
  *
  *   1. **只读不索引**：知识库内容永不进 `memory_fts` / `recall` / 注入包；`search` 是
- *      "按需扫描"，回执必须写明"未建索引"——它不是第二个 recall。
+ *      "按需扫描"，回执必须写明"不走索引"——它不是第二个 recall。
  *   2. **忽略规则是硬边界**：`.obsidian/**`、`.trash/**`、`90-模板/**` 是**强制项**，
  *      判定层每次合并（`effectiveGlobs`），删不掉。判定对象是"路径本身 + 每一级祖先目录"，
  *      且先做逐段归一（大小写 + 尾随点/空格）再匹配——Windows 会吃掉组件尾随的空格，
@@ -15,7 +15,7 @@
  * ## 与生产的一处**有意差异**（影形期纪律，登记在 NOTES-T05 §5）
  *
  * 生产 `kb_tree` / `kb_open` / `kb_search` 每次读都会往 `kb_access` 追一条审计
- * （`p0/fish_kb.py:1643`、`:1826`、`:2083`，词表见 `KB_ACTIONS`）。影子期
+ * （`p0/fish_kb.py`，词表见 `KB_ACTIONS`）。影子期
  * **一个字节都不写**，所以本模块**没有** `kbAccessLog` 的实现——不是漏了，是不能有。
  * 代价：DSH 里的读取不会出现在"未读/读次数"里；收益：读命令永远不可能改库。
  *
@@ -993,7 +993,7 @@ function treeLines(
   const lines: string[] = [
     `# 知识库目录 · ${vault.name}`,
     '',
-    `> source=知识库（未建索引）｜as_of ${asOf}`,
+    `> source=知识库（按需扫描，非索引检索）｜as_of ${asOf}`,
     `> vault=\`${vault.path}\`（mode=${vault.mode}）｜起点=\`${startRel !== '' ? startRel : '/'}\`｜深度=${depth}`,
     `> 生效忽略规则：${ignoreGlobs.length > 0 ? ignoreGlobs.join(', ') : '（无）'}`,
     KB_TREE_DEPTH_RULE,
@@ -1186,8 +1186,8 @@ export function kbOpen(
   const shownText = truncated ? sliceCodePoints(text, 0, cap) : text
   const shownBytes = truncated ? Buffer.byteLength(shownText, 'utf8') : raw.length
   const statements = [
-    '来源=知识库（未建索引），不是 fish 记忆；不进 recall / 全文索引。',
-    '本库未建索引；要检索请显式 `fish kb search`（按需扫描）。',
+    '来源=知识库（按需扫描，非索引检索），不是 fish 记忆；不进 recall / 全文索引。',
+    '本次按需扫描文件、不查索引；要检索请显式 `fish kb search`。',
     (truncated ? '已截断' : '未截断') +
       `（${raw.length}/${limit} B 上限；显示 ${codePointLength(shownText)}/${codePointLength(text)} 字）`,
   ]
@@ -1298,7 +1298,7 @@ export function kbSearch(
   const lines = [
     `# 知识库检索 · ${vault.name}`,
     '',
-    `> source=知识库（未建索引）｜as_of ${asOf}`,
+    `> source=知识库（按需扫描，非索引检索）｜as_of ${asOf}`,
     `> scan=${scannedFiles} files / ${scannedBytes} bytes / ${ms} ms｜命中 ${total} 文件，显示 ${shown.length} 个`,
     `> 跳过：大文件 ${skippedLarge} / 二进制 ${skippedBinary} / 编码不可读 ${skippedEncoding} / 敏感名单 ${skippedSensitive}（单文件上限 ${KB_SEARCH_MAX_FILE_BYTES} B）`,
     '> 只扫已登记 vault 的 `.md`；不建索引、不进 `memory_fts`——找 fish 记忆请用 `recall`。',

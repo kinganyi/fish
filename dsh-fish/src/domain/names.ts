@@ -2,10 +2,10 @@
  * 名字解析（项目别名 / 会话档期 / 工作区映射）。
  *
  * 依据（逐条对齐 Python）：
- *   · `_alias_map` / `_walk_alias` / `resolve_name` / `resolve_project_names`（fish.py:3089 / 3107 / 3145）
- *   · `normalize_workspace_path` / `resolve_project_by_cwd`（fish.py / 5464）
- *   · `current_open_stints` / `current_open_stint`（fish.py:5740）
- *   · `find_citizen_by_name`（fish.py:4514）
+ *   · `_alias_map` / `_walk_alias` / `resolve_name` / `resolve_project_names`（fish.py）
+ *   · `normalize_workspace_path` / `resolve_project_by_cwd`（fish.py）
+ *   · `current_open_stints` / `current_open_stint`（fish.py）
+ *   · `find_citizen_by_name`（fish.py）
  *
  * 为什么别名要单独成模块：别名只影响**检索与展示**，不改写入归属（用户 2026-10-25 拍板）。
  * 把"展开名字"这件事收在一处，写侧才不会顺手也调它——那是这条约定唯一可能被破坏的方式。

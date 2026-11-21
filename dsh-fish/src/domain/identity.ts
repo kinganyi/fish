@@ -2,11 +2,11 @@
  * 身份层（只读）：凭证校验 / 证据分级 / `whoami` 回执。
  *
  * 依据（逐条对齐 Python）：
- *   · `lookup_session_token` / `validate_session_token`（fish.py:5191 / 5214）
- *   · `credential_state_line` / `identity_source_line`（fish.py:5264 / 5248）
- *   · `load_citizen` / `find_session_citizen` / `resolve_owner`（fish.py:5329 / 5315 / 4447）
- *   · `related_citizens` / `related_citizens_lines`（fish.py:4581 / 4650）
- *   · MCP `tool_whoami` 的**逐行文案**（mcp_server.py:1088），含 `IDENTITY_HINTS`（mcp_server.py:78）
+ *   · `lookup_session_token` / `validate_session_token`（fish.py）
+ *   · `credential_state_line` / `identity_source_line`（fish.py）
+ *   · `load_citizen` / `find_session_citizen` / `resolve_owner`（fish.py）
+ *   · `related_citizens` / `related_citizens_lines`（fish.py）
+ *   · MCP `tool_whoami` 的**逐行文案**（mcp_server.py），含 `IDENTITY_HINTS`（mcp_server.py）
  *
  * ## 两条不许越的线
  *
@@ -16,7 +16,7 @@
  *    影子期输入来自参数（token / session_key），会话键本身不是持有点——拿它声称
  *    `machine` 就是把自报当机器事实。`session_key` 单独使用时一律降为 `self-reported`，
  *    与 Python 侧 `build_session_identity` 的"env → machine、自报 → self-reported、
- *    都没有 → 匿名"同一套排序（fish.py:4999）。
+ *    都没有 → 匿名"同一套排序（fish.py）。
  *
  * @module dsh-fish/domain/identity
  */
@@ -75,7 +75,7 @@ export const CREDENTIAL_NO_TOKEN = '凭证状态：未提供凭证（无凭证�
 export const CREDENTIAL_UNKNOWN =
   '凭证状态：未知（这条 token 不在库中——明文只在签发时输出一次，丢了就重签：同一个 session_name → 同一个公民，只换凭证）'
 
-/** `IDENTITY_HINTS`（mcp_server.py:78）——四种"为什么本次不能署名"的可执行下一步。 */
+/** `IDENTITY_HINTS`（mcp_server.py）——四种"为什么本次不能署名"的可执行下一步。 */
 export const IDENTITY_HINTS: Readonly<Record<string, string>> = {
   [IDENTITY_STATUS.NONE]:
     '⚠ 本次调用未带会话凭证，归属记为“未归属”（unattributed）。\n' +
@@ -120,7 +120,7 @@ export function nowUtc(at: Date = new Date()): string {
   return `${at.toISOString().slice(0, 19)}Z`
 }
 
-/** 解析定长 UTC 时间戳；解析不了返回 `null`（复刻 `parse_utc`，fish.py:320）。 */
+/** 解析定长 UTC 时间戳；解析不了返回 `null`（复刻 `parse_utc`，fish.py）。 */
 export function parseUtc(value: string | null | undefined): Date | null {
   if (value === null || value === undefined || value === '') return null
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value)) return null
@@ -182,7 +182,7 @@ export function lookupSessionToken(db: DatabaseSync, token: string | null | unde
 /**
  * **MCP 侧的唯一校验契约**：有效 → citizen_id；无效（吊销/过期/不存在）→ `null`。
  *
- * 对应的那条 SQL（fish.py:5217）：
+ * 对应的那条 SQL（fish.py）：
  *   `token_hash=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now)`
  * 注意它**不是** SQL 里的一个 WHERE——Python 是取行后在 Python 里判，所以这里也照做：
  * 差异点在 `expires_at <= now`（含等号）与 `revoked_at <= now`，不是 `<`。
@@ -439,7 +439,7 @@ export function cliEntryHint(fishHome: string): string {
 export const HINT_SELF_EXPLAINED = ['whoami', 'register', 'session_start'] as const
 
 /**
- * 归属提示（MCP `call_tool` 在**这一层**统一追加，mcp_server.py:1968）。
+ * 归属提示（MCP `call_tool` 在**这一层**统一追加，mcp_server.py）。
  *
  * 为什么必须也复刻这一层：漏了它，TS 侧回执就比模型今天看到的少一整段
  * （"你的归属会记成 unattributed" + 怎么拿凭证）——而那段话是**唯一**告诉读者
@@ -456,7 +456,7 @@ export function appendIdentityHint(text: string, identity: Identity, toolName: s
 /**
  * 把"本次调用带的凭证"解析成 `Identity`（**纯函数：不写任何状态**）。
  *
- * 与 MCP `_resolve_identity`（mcp_server.py:631）同口径：
+ * 与 MCP `_resolve_identity`（mcp_server.py）同口径：
  *   · 没 token → `none`；
  *   · 有 token 但库里查不到 → `invalid`；
  *   · 查得到但已吊销 / 已过期 → `revoked` / `expired`（**只为选提示文案**，判定仍只有一处）；
@@ -560,7 +560,7 @@ export function whoami(db: DatabaseSync, input: WhoamiInput = {}): WhoamiReport 
 }
 
 /**
- * `whoami` 的**完整回执文本**（逐行对齐 MCP `tool_whoami`，mcp_server.py:1088）。
+ * `whoami` 的**完整回执文本**（逐行对齐 MCP `tool_whoami`，mcp_server.py）。
  *
  * @param fishHome 含 `fish.py` 的目录（CLI 入口行要用；由调用方给，模块不猜）
  */

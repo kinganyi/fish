@@ -23,7 +23,7 @@ export interface EventTypeSpec {
   readonly requiredPayload: readonly string[]
   /** 全部 payload 键（含可选）。 */
   readonly payloadKeys: readonly string[]
-  /** 来源行号（`fish.py:1234`）——让人能一眼回到代码。 */
+  /** 来源行号（`fish.py`）——让人能一眼回到代码。 */
   readonly sourceLine: number
 }
 

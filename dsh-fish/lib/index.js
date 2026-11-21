@@ -238,17 +238,27 @@ function diffFingerprints(expected, actual) {
 //#endregion
 //#region src/core/contract.ts
 /**
-* 契约门禁：**fail closed** —— 任一要素不匹配就抛错，插件拒绝启用。
+* 契约门禁：比对四处，**不一致时告警并降级**（2026-11-09 从 fail closed 改为 warn）。
 *
-* 为什么宁可"启动失败"也不要"带病启动"：影子期 TS 侧只读，读错结构的后果不是崩溃，
-* 而是**静默返回空结果**（例如少了 `status='active'` 这一列）。那种坏会一路走到
-* 注入包里说"这里什么都没有"。所以三处版本必须同时对上：
+* 为什么改：影子期 TS 侧**只读**。起不来比读不全新更糟——版本漂移时插件直接拒绝
+* 启动，等于把一个"只读补充"变成"整个宿主少一块"。所以现在是 `warnings.push(...)`，
+* 让调用方把漂移**显示出来**而不是拦住。
+*
+* 仍然会抛的只有两种（真正无法继续的情况）：
+*   · `strictHostVersion=true` 且探测不到宿主版本；
+*   · `spec/schema.fingerprint.json` 结构本身不合法（algorithm/fingerprint 缺字段）。
+*
+* 比对的四项：
 *
 *   1. `contract.json.contractVersion` === 插件常量 `SUPPORTED_CONTRACT_VERSION`
 *   2. `spec/schema.fingerprint.json` === 现网库实时算出的指纹
 *   3. 宿主版本 >= `contract.json.minHostVersion`
 *   4. 附带：`contract.json.specFiles` 里登记的文件摘要 === 文件实际摘要
 *      （防止"只改了 events.json 忘了重算契约"这种半更新）
+*
+* 为什么这四项仍值得比对（哪怕只是告警）：影子期读错结构的后果不是崩溃，而是
+* **静默返回空结果**（例如少了 `status='active'` 这一列），那种坏会一路走到
+* 注入包里说"这里什么都没有"。降级不等于不报。
 *
 * `runStartupGate` 是 `apply()` 与验收脚本**共用的同一条路径**：验收脚本另写一条
 * 轻量校验，等于验了个不存在的门。
@@ -671,7 +681,7 @@ const CLI_IMPLS = [
 *
 * 三条写表纪律（每一条都对着一次真实踩坑）：
 *   1. `kind` 按**生产语义**判，不按"看起来像读"——`board show` 看着是读，实际会
-*      `board_ensure` 建行（`p0/fish.py:11492` "取或建一块板"），所以它是 `write`；
+*      `board_ensure` 建行（`p0/fish.py` "取或建一块板"），所以它是 `write`；
 *   2. `proxy-readonly` 只给**逐行核过没有写语句**的命令，`evidence` 写源码位置。
 *      没核过的一律 `python-only`（宁可给人一条指引，不替人赌一次写）；
 *   3. `reason` 说"为什么"，`replacement` 说"那我去哪做"——两样缺一条，这条标注就等于没说。
@@ -699,7 +709,7 @@ const CLI_ANNOTATIONS = [
 		kind: "read",
 		impl: "proxy-readonly",
 		reason: "只列 code_index（不含检索、不写审计），Python 侧是纯 SELECT；TS 未做同形渲染",
-		evidence: "p0/fish.py:6919-6928（cmd_list：一条 SELECT code_index + 打印）",
+		evidence: "p0/fish.py（cmd_list：一条 SELECT code_index + 打印）",
 		replacement: {
 			cli: "list",
 			note: "Python 侧纯读，可在快照副本上转发"
@@ -710,7 +720,7 @@ const CLI_ANNOTATIONS = [
 		kind: "read",
 		impl: "proxy-readonly",
 		reason: "邻域五策略仍在 Python（TS 侧没有关联边读取原语：`links.ts` 已按第二批减重删除）",
-		evidence: "p0/fish.py:6885-6916（cmd_neighbors）+ 6350-6407（neighbors()：无 INSERT/UPDATE/DELETE）",
+		evidence: "p0/fish.py（cmd_neighbors）；neighbors()：无 INSERT/UPDATE/DELETE）",
 		replacement: {
 			cli: "neighbors",
 			note: "Python 侧纯读，可在快照副本上转发"
@@ -781,7 +791,7 @@ const CLI_ANNOTATIONS = [
 		kind: "read",
 		impl: "proxy-readonly",
 		reason: "只读 events 表最近 N 行；TS 未做这段渲染（事件只增不改，转发不改变语义）",
-		evidence: "p0/fish.py:11418-11425（cmd_events：一条 SELECT … ORDER BY seq DESC LIMIT ?）",
+		evidence: "p0/fish.py（cmd_events：一条 SELECT … ORDER BY seq DESC LIMIT ?）",
 		replacement: {
 			cli: "events",
 			note: "Python 侧纯读，可在快照副本上转发"
@@ -869,7 +879,7 @@ const CLI_ANNOTATIONS = [
 		kind: "read",
 		impl: "ts",
 		reason: "T05 已复刻 `project_status_rows`（六列 + 每列来源 + 降级清单）。⚠ 生产**默认形态**会把渲染结果写进 `<home>/10-项目库/项目状态表.md`，`--json` 形态才纯读；影子期只实现纯读的那一半：同一份表格照常渲染，但**不落盘**，回执末尾明写\"没有写文件\"",
-		evidence: "p0/fish.py:14517（project_status_rows 的 docstring 明写\"只读：不改任何表、不写盘\"）；写盘在 render_project_status:14645"
+		evidence: "p0/fish.py（project_status_rows 的 docstring 明写\"只读：不改任何表、不写盘\"）；写盘在 render_project_status"
 	},
 	{
 		path: "alias link",
@@ -890,7 +900,7 @@ const CLI_ANNOTATIONS = [
 		kind: "read",
 		impl: "ts",
 		reason: "T05 已复刻 `cmd_alias` 的 list 分支：原始别名行 + 按 canonical 折叠的分组（单向展开，最多 8 跳）",
-		evidence: "p0/fish.py:6722-6738（cmd_alias 的 else 分支：SELECT + resolve_name）"
+		evidence: "p0/fish.py（cmd_alias 的 else 分支：SELECT + resolve_name）"
 	},
 	{
 		path: "workspace set",
@@ -911,14 +921,14 @@ const CLI_ANNOTATIONS = [
 		kind: "read",
 		impl: "ts",
 		reason: "T05 已复刻 `_workspace_cmd_list`（`list_workspace_mappings` + 一行一条渲染）",
-		evidence: "p0/fish.py:10036-10037 → 10065-10075（_workspace_cmd_list：list_workspace_mappings + 打印）"
+		evidence: "p0/fish.py（_workspace_cmd_list：list_workspace_mappings + 打印）"
 	},
 	{
 		path: "workspace seed",
 		kind: "read",
 		impl: "proxy-readonly",
 		reason: "打印建议**绝不自动写入**（源码 docstring 明写）",
-		evidence: "p0/fish.py:10025-10028（\"list / seed 只读：seed 打印建议但绝不自动写入\"）",
+		evidence: "p0/fish.py（\"list / seed 只读：seed 打印建议但绝不自动写入\"）",
 		replacement: {
 			cli: "workspace seed",
 			note: "Python 侧纯读，可在快照副本上转发"
@@ -1001,35 +1011,35 @@ const CLI_ANNOTATIONS = [
 		kind: "read",
 		impl: "ts",
 		reason: "T05 已复刻 `kb_tree`（统计层 + 显示层分开、双预算截断、深度口径）。影子期**不写 kb_access 审计**（生产每次读都追一条），所以\"未读/读次数\"里不会出现 DSH 的读取",
-		evidence: "p0/fish_kb.py:1541-1665（kb_tree：只统计不读正文；`_kb_log_quiet(action=\"tree\")` 是唯一写点，影子期不写）"
+		evidence: "p0/fish_kb.py（kb_tree：只统计不读正文；`_kb_log_quiet(action=\"tree\")` 是唯一写点，影子期不写）"
 	},
 	{
 		path: "kb open",
 		kind: "read",
 		impl: "ts",
 		reason: "T05 已复刻 `kb_open`（8 类路径拒绝 + 敏感名单二次授权 + 编码/媒体双判 + 截断声明）。影子期不写 kb_access",
-		evidence: "p0/fish_kb.py:1731-1834（kb_open；正文读取一律 read_bytes，审计写点不实现）"
+		evidence: "p0/fish_kb.py（kb_open；正文读取一律 read_bytes，审计写点不实现）"
 	},
 	{
 		path: "kb search",
 		kind: "read",
 		impl: "ts",
 		reason: "T05 已复刻 `kb_search`（按需扫描、不建索引、敏感文件不进片段、片段 240 字、排序 -occurrences/-mtime/rel）",
-		evidence: "p0/fish_kb.py:1966-2108（kb_search：只扫 .md，query 只以 hash 进审计；影子期不写审计）"
+		evidence: "p0/fish_kb.py（kb_search：只扫 .md，query 只以 hash 进审计；影子期不写审计）"
 	},
 	{
 		path: "kb stats",
 		kind: "read",
 		impl: "ts",
 		reason: "T05 已复刻 `kb_stats`（规模/未读/最近变更/每库读写计数）；镜像/离线两档来源如实标注",
-		evidence: "p0/fish_kb.py:2673-2729（kb_stats：_kb_scan_counts + 四条 kb_access 聚合，纯 SELECT）"
+		evidence: "p0/fish_kb.py（kb_stats：_kb_scan_counts + 四条 kb_access 聚合，纯 SELECT）"
 	},
 	{
 		path: "kb toc",
 		kind: "read",
 		impl: "proxy-readonly",
 		reason: "目录快照（分类概览 + 前 3 标题 + 分页，2026-10-28 新增；纯读、不写 kb_access）——TS 侧尚未复刻，影子期在快照副本上只读转发",
-		evidence: "p0/fish.py:13765（add_parser \"toc\"）+ 13411-13412（act==\"toc\" → _kb_cmd_toc）",
+		evidence: "p0/fish.py（add_parser \"toc\"）；act==\"toc\" → _kb_cmd_toc）",
 		replacement: {
 			cli: "kb toc",
 			note: "Python 侧纯读，可在快照副本上转发"
@@ -1067,7 +1077,7 @@ const CLI_ANNOTATIONS = [
 		kind: "read",
 		impl: "ts",
 		reason: "T05 已复刻 `_kb_cmd_vault` 的 list 分支（`kb_vault_list`：默认库在前，其次按名字；一行 `_kb_vault_line`）",
-		evidence: "p0/fish_kb.py:567-571 + 2984-2993（kb_vault_list 纯 SELECT + list 渲染）"
+		evidence: "p0/fish_kb.py（kb_vault_list 纯 SELECT + list 渲染）"
 	},
 	{
 		path: "kb vault add",
@@ -1126,21 +1136,21 @@ const CLI_ANNOTATIONS = [
 		kind: "read",
 		impl: "ts",
 		reason: "T05 已复刻 `fish_corpus.stats`（段/会话/by_host/by_project/degraded/orphan/台账四档/滞后/体积）。读的是独立库 `corpus.sqlite`（只读打开），不是主库快照",
-		evidence: "p0/fish_corpus.py:575-703（stats：库不存在返回 db_missing 不建库；readonly=True 打开）"
+		evidence: "p0/fish_corpus.py（stats：库不存在返回 db_missing 不建库；readonly=True 打开）"
 	},
 	{
 		path: "corpus search",
 		kind: "read",
 		impl: "ts",
 		reason: "T05 已复刻 `fish_corpus.search`（MATCH + 过滤下推、0.6/0.2/0.2 排序、出口二次脱敏）。影子期不写 `corpus_access_log`（生产每次检索都追一条）",
-		evidence: "p0/fish_corpus.py:892-967（search：只读连接；`_log_access` 是唯一写点，影子期不写）"
+		evidence: "p0/fish_corpus.py（search：只读连接；`_log_access` 是唯一写点，影子期不写）"
 	},
 	{
 		path: "corpus read",
 		kind: "read",
 		impl: "ts",
 		reason: "T05 已复刻 `fish_corpus.read`（门牌三档 + 段级脱敏 + 源文件缺失声明）。影子期不写访问审计、**也不回填** `push_log.reaction`（那是主库写）",
-		evidence: "p0/fish_corpus.py:990-1043（read：投影正文 + source 状态；MCP 的采纳回填在 mcp_server.py:2056-2062）"
+		evidence: "p0/fish_corpus.py（read：投影正文 + source 状态；MCP 的采纳回填在 mcp_server.py）"
 	},
 	{
 		path: "corpus retag",
@@ -1175,7 +1185,7 @@ const CLI_ANNOTATIONS = [
 		kind: "read",
 		impl: "proxy-readonly",
 		reason: "只读推送效果度量（push_stats 无写语句）",
-		evidence: "p0/fish.py:10753-10754 + 10612-10715（push_stats：全 SELECT/聚合）",
+		evidence: "p0/fish.py（push_stats：全 SELECT/聚合）",
 		replacement: {
 			cli: "push stats",
 			note: "Python 侧纯读，可在快照副本上转发"
@@ -1186,7 +1196,7 @@ const CLI_ANNOTATIONS = [
 		kind: "read",
 		impl: "proxy-readonly",
 		reason: "只读推送配置（get_config 七次）",
-		evidence: "p0/fish.py:10759-10764（cmd_push 的 else 分支：get_config 打印）",
+		evidence: "p0/fish.py（cmd_push 的 else 分支：get_config 打印）",
 		replacement: {
 			cli: "push status",
 			note: "Python 侧纯读，可在快照副本上转发"
@@ -1263,7 +1273,7 @@ const CLI_ANNOTATIONS = [
 		kind: "read",
 		impl: "proxy-readonly",
 		reason: "只列公民（无写语句），TS 未做这段渲染",
-		evidence: "p0/fish.py:9992-10016（cmd_citizen_list：SELECT + 打印）",
+		evidence: "p0/fish.py（cmd_citizen_list：SELECT + 打印）",
 		replacement: {
 			cli: "citizen-list",
 			note: "Python 侧纯读，可在快照副本上转发"
@@ -1281,7 +1291,7 @@ const CLI_ANNOTATIONS = [
 		kind: "write",
 		impl: "unsupported-shadow",
 		reason: "合并两个公民（默认 dry-run 打印计划；`--apply` 会把 owner/session 归属迁到 dst 并写 events）——影子期不写，也不替用户决定\"哪两个身份其实是同一个\"",
-		evidence: "p0/fish.py:8501-8540（citizen_merge：apply=False 只统计）+ 8543-8550（cmd_citizen_merge）",
+		evidence: "p0/fish.py（citizen_merge：apply=False 只统计）；cmd_citizen_merge）",
 		replacement: {
 			cli: "citizen-merge",
 			note: "终端里先跑 dry-run 看计划，确认后再 --apply"
@@ -1315,7 +1325,7 @@ const CLI_ANNOTATIONS = [
 		path: "config",
 		kind: "write",
 		impl: "unsupported-shadow",
-		reason: "同一路径两种形态：无参列出（读）/ 带参 `set_config` 写库（p0/fish.py:10589）",
+		reason: "同一路径两种形态：无参列出（读）/ 带参 `set_config` 写库（p0/fish.py）",
 		replacement: {
 			cli: "config",
 			note: "终端里跑 `fish config`（只读列表）或 `fish config <key> <value>`（写）"
@@ -1862,7 +1872,7 @@ function pyRepr(value) {
 * 中文切词（能力块 #12 布局/检索的公共纯函数）。
 *
 * 为什么这一小块必须逐 token 等价：SQLite 的 `unicode61` 不做中文分词，fish 自己把
-* 文本切成**重叠 bigram** 再入 FTS（`p0/fish.py:3857`，ADR-005）。TS 侧若切得差一位，
+* 文本切成**重叠 bigram** 再入 FTS（`p0/fish.py`，ADR-005）。TS 侧若切得差一位，
 * 检索不会报错，只会**静默漏召回**——那是影子期最贵的一类坏。
 *
 * 真源是 `spec/layout/cut.json`（规则 + 由 Python 冻结的向量）；本文件只实现规则，
@@ -2069,8 +2079,8 @@ function clipChars(text, limit) {
 * ## 与生产的两处**有意差异**（都登记在 NOTES-T05 §5）
 *
 *   1. 生产 `search`/`read` 会把访问记进 `corpus_access_log`（`_log_access`，
-*      `p0/fish_corpus.py:859`）。影子期**不写**——所以本模块没有 `logAccess`。
-*   2. 生产 MCP 的 `corpus.read` 读完会回填 `push_log.reaction`（`mcp_server.py:2056`）。
+*      `p0/fish_corpus.py`）。影子期**不写**——所以本模块没有 `logAccess`。
+*   2. 生产 MCP 的 `corpus.read` 读完会回填 `push_log.reaction`（`mcp_server.py`）。
 *      那是**主库写**，影子期更不做；本模块只返回正文与来源状态。
 *
 * 代价：DSH 里的检索不出现在语料审计里；收益：读命令不可能改任何一个字节。
@@ -2822,7 +2832,7 @@ function corpusHeader(third, now = /* @__PURE__ */ new Date()) {
 //#endregion
 //#region src/domain/health.ts
 /**
-* 自检（复刻 `cmd_healthcheck`，fish.py:10851 的**核心读数**）。
+* 自检（复刻 `fish.py` 的 `cmd_healthcheck` 的**核心读数**）。
 *
 * 七项读数：事件数 / 活跃记忆 / 休眠 / 作废 / 断链 / FTS 是否落后 / owner 是否有效公民。
 *
@@ -2918,7 +2928,7 @@ function renderHealthcheck(readings) {
 //#endregion
 //#region src/domain/config.ts
 /**
-* 配置键表（**逐条对齐** `fish.py:92` 的 `CONFIG_DEFAULTS`）。
+* 配置键表（**逐条对齐** `fish.py` 的 `CONFIG_DEFAULTS`）。
 *
 * 只收键名/默认值/类型三件事：`enum` 的可选值只在写入侧校验，读侧不需要它，
 * 但为了让"这张表就是契约"这件事完整，枚举键的 allowed 一并记录。
@@ -3172,7 +3182,7 @@ function configKeyDef(key) {
 	return def;
 }
 /**
-* 读一个配置键（复刻 `get_config`，fish.py:1870）。
+* 读一个配置键（复刻 `get_config`，fish.py）。
 *
 * 口径逐条对齐 Python：库里没有该行 → 默认值；`int` 走 `parseInt`、`float` 走 `parseFloat`、
 * `bool` 只在原值为字符串 `"true"` 时为真（Python 是 `raw == "true"`，**不是**真值判断）。
@@ -3216,7 +3226,7 @@ function getConfigString(db, key) {
 	const value = getConfig(db, key);
 	return typeof value === "string" ? value : String(value);
 }
-/** 全部 `decay.*` 键的现值（复刻 `load_decay_cfg`，fish.py:6198）。 */
+/** 全部 `decay.*` 键的现值（复刻 `load_decay_cfg`，fish.py）。 */
 function loadDecayConfig(db) {
 	const out = {};
 	for (const key of Object.keys(CONFIG_DEFAULTS)) {
@@ -3231,11 +3241,11 @@ function loadDecayConfig(db) {
 * 身份层（只读）：凭证校验 / 证据分级 / `whoami` 回执。
 *
 * 依据（逐条对齐 Python）：
-*   · `lookup_session_token` / `validate_session_token`（fish.py:5191 / 5214）
-*   · `credential_state_line` / `identity_source_line`（fish.py:5264 / 5248）
-*   · `load_citizen` / `find_session_citizen` / `resolve_owner`（fish.py:5329 / 5315 / 4447）
-*   · `related_citizens` / `related_citizens_lines`（fish.py:4581 / 4650）
-*   · MCP `tool_whoami` 的**逐行文案**（mcp_server.py:1088），含 `IDENTITY_HINTS`（mcp_server.py:78）
+*   · `lookup_session_token` / `validate_session_token`（fish.py）
+*   · `credential_state_line` / `identity_source_line`（fish.py）
+*   · `load_citizen` / `find_session_citizen` / `resolve_owner`（fish.py）
+*   · `related_citizens` / `related_citizens_lines`（fish.py）
+*   · MCP `tool_whoami` 的**逐行文案**（mcp_server.py），含 `IDENTITY_HINTS`（mcp_server.py）
 *
 * ## 两条不许越的线
 *
@@ -3245,7 +3255,7 @@ function loadDecayConfig(db) {
 *    影子期输入来自参数（token / session_key），会话键本身不是持有点——拿它声称
 *    `machine` 就是把自报当机器事实。`session_key` 单独使用时一律降为 `self-reported`，
 *    与 Python 侧 `build_session_identity` 的"env → machine、自报 → self-reported、
-*    都没有 → 匿名"同一套排序（fish.py:4999）。
+*    都没有 → 匿名"同一套排序（fish.py）。
 *
 * @module dsh-fish/domain/identity
 */
@@ -3283,7 +3293,7 @@ const IDENTITY_SOURCE_UNATTRIBUTED = "身份来源：未归属";
 /** 凭证状态的固定文案（见 `credentialStateLine` 的五档）。 */
 const CREDENTIAL_NO_TOKEN = "凭证状态：未提供凭证（无凭证写入的归属会记成 unattributed）";
 const CREDENTIAL_UNKNOWN = "凭证状态：未知（这条 token 不在库中——明文只在签发时输出一次，丢了就重签：同一个 session_name → 同一个公民，只换凭证）";
-/** `IDENTITY_HINTS`（mcp_server.py:78）——四种"为什么本次不能署名"的可执行下一步。 */
+/** `IDENTITY_HINTS`（mcp_server.py）——四种"为什么本次不能署名"的可执行下一步。 */
 const IDENTITY_HINTS = {
 	[IDENTITY_STATUS.NONE]: "⚠ 本次调用未带会话凭证，归属记为“未归属”（unattributed）。\n   拿凭证：**直接调 `session_start` 工具**（本进程内即可，不用跑 CLI）：\n     · 已登记过 → session_start(citizen=\"<你的 citizen_id>\", session_name=\"<稳定名字>\")\n     · 还没登记 → 先 register 拿 citizen_id，再按上面调\n   拿到 token 后，之后每次调用带 token=...（明文只出现一次）。\n   ⚠ 为什么不建议跑 CLI：CLI 的会话键与 MCP 不同，会建成另一个公民，两条通道的归属从此对不上且无法合并。",
 	[IDENTITY_STATUS.INVALID]: "⚠ 凭证无效（session_tokens 表里没有这条 token），归属记为“未归属”（unattributed）。\n   调 `session_start`（带同一个 session_name）换一条新凭证：公民不变，只换 token。",
@@ -3298,7 +3308,7 @@ function hashSessionToken(token) {
 function nowUtc(at = /* @__PURE__ */ new Date()) {
 	return `${at.toISOString().slice(0, 19)}Z`;
 }
-/** 解析定长 UTC 时间戳；解析不了返回 `null`（复刻 `parse_utc`，fish.py:320）。 */
+/** 解析定长 UTC 时间戳；解析不了返回 `null`（复刻 `parse_utc`，fish.py）。 */
 function parseUtc(value) {
 	if (value === null || value === void 0 || value === "") return null;
 	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(value)) return null;
@@ -3359,7 +3369,7 @@ function lookupSessionToken(db, token) {
 /**
 * **MCP 侧的唯一校验契约**：有效 → citizen_id；无效（吊销/过期/不存在）→ `null`。
 *
-* 对应的那条 SQL（fish.py:5217）：
+* 对应的那条 SQL（fish.py）：
 *   `token_hash=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now)`
 * 注意它**不是** SQL 里的一个 WHERE——Python 是取行后在 Python 里判，所以这里也照做：
 * 差异点在 `expires_at <= now`（含等号）与 `revoked_at <= now`，不是 `<`。
@@ -3523,7 +3533,7 @@ const HINT_SELF_EXPLAINED = [
 	"session_start"
 ];
 /**
-* 归属提示（MCP `call_tool` 在**这一层**统一追加，mcp_server.py:1968）。
+* 归属提示（MCP `call_tool` 在**这一层**统一追加，mcp_server.py）。
 *
 * 为什么必须也复刻这一层：漏了它，TS 侧回执就比模型今天看到的少一整段
 * （"你的归属会记成 unattributed" + 怎么拿凭证）——而那段话是**唯一**告诉读者
@@ -3539,7 +3549,7 @@ function appendIdentityHint(text, identity, toolName) {
 /**
 * 把"本次调用带的凭证"解析成 `Identity`（**纯函数：不写任何状态**）。
 *
-* 与 MCP `_resolve_identity`（mcp_server.py:631）同口径：
+* 与 MCP `_resolve_identity`（mcp_server.py）同口径：
 *   · 没 token → `none`；
 *   · 有 token 但库里查不到 → `invalid`；
 *   · 查得到但已吊销 / 已过期 → `revoked` / `expired`（**只为选提示文案**，判定仍只有一处）；
@@ -3610,7 +3620,7 @@ function whoami(db, input = {}) {
 	};
 }
 /**
-* `whoami` 的**完整回执文本**（逐行对齐 MCP `tool_whoami`，mcp_server.py:1088）。
+* `whoami` 的**完整回执文本**（逐行对齐 MCP `tool_whoami`，mcp_server.py）。
 *
 * @param fishHome 含 `fish.py` 的目录（CLI 入口行要用；由调用方给，模块不猜）
 */
@@ -4042,7 +4052,7 @@ function ensureFtsReadable(db) {
 		}
 	});
 }
-/** `recall` 的完整回执（逐行对齐 MCP `tool_recall`，mcp_server.py:819）。 */
+/** `recall` 的完整回执（逐行对齐 MCP `tool_recall`，mcp_server.py）。 */
 function renderRecall(db, options = {}, identity = IDENTITY_ANONYMOUS) {
 	const query = (options.query ?? "").trim();
 	const code = options.code ?? null;
@@ -4213,7 +4223,7 @@ function renderPresencePanel(panel) {
 * ## 影子期的三条硬边界（与生产语义逐条对齐，不是"简化版"）
 *
 *   1. **只读不索引**：知识库内容永不进 `memory_fts` / `recall` / 注入包；`search` 是
-*      "按需扫描"，回执必须写明"未建索引"——它不是第二个 recall。
+*      "按需扫描"，回执必须写明"不走索引"——它不是第二个 recall。
 *   2. **忽略规则是硬边界**：`.obsidian/**`、`.trash/**`、`90-模板/**` 是**强制项**，
 *      判定层每次合并（`effectiveGlobs`），删不掉。判定对象是"路径本身 + 每一级祖先目录"，
 *      且先做逐段归一（大小写 + 尾随点/空格）再匹配——Windows 会吃掉组件尾随的空格，
@@ -4224,7 +4234,7 @@ function renderPresencePanel(panel) {
 * ## 与生产的一处**有意差异**（影形期纪律，登记在 NOTES-T05 §5）
 *
 * 生产 `kb_tree` / `kb_open` / `kb_search` 每次读都会往 `kb_access` 追一条审计
-* （`p0/fish_kb.py:1643`、`:1826`、`:2083`，词表见 `KB_ACTIONS`）。影子期
+* （`p0/fish_kb.py`，词表见 `KB_ACTIONS`）。影子期
 * **一个字节都不写**，所以本模块**没有** `kbAccessLog` 的实现——不是漏了，是不能有。
 * 代价：DSH 里的读取不会出现在"未读/读次数"里；收益：读命令永远不可能改库。
 *
@@ -4998,7 +5008,7 @@ function treeLines(vault, startRel, tree, depth, asOf, ignoreGlobs) {
 	const lines = [
 		`# 知识库目录 · ${vault.name}`,
 		"",
-		`> source=知识库（未建索引）｜as_of ${asOf}`,
+		`> source=知识库（按需扫描，非索引检索）｜as_of ${asOf}`,
 		`> vault=\`${vault.path}\`（mode=${vault.mode}）｜起点=\`${startRel !== "" ? startRel : "/"}\`｜深度=${depth}`,
 		`> 生效忽略规则：${ignoreGlobs.length > 0 ? ignoreGlobs.join(", ") : "（无）"}`,
 		KB_TREE_DEPTH_RULE,
@@ -5146,8 +5156,8 @@ function kbOpen(vault, rel, options = {}) {
 	const shownText = truncated ? sliceCodePoints(text, 0, cap) : text;
 	const shownBytes = truncated ? Buffer.byteLength(shownText, "utf8") : raw.length;
 	const statements = [
-		"来源=知识库（未建索引），不是 fish 记忆；不进 recall / 全文索引。",
-		"本库未建索引；要检索请显式 `fish kb search`（按需扫描）。",
+		"来源=知识库（按需扫描，非索引检索），不是 fish 记忆；不进 recall / 全文索引。",
+		"本次按需扫描文件、不查索引；要检索请显式 `fish kb search`。",
 		(truncated ? "已截断" : "未截断") + `（${raw.length}/${limit} B 上限；显示 ${codePointLength(shownText)}/${codePointLength(text)} 字）`
 	];
 	if (sensitive) statements.push("本文件命中敏感名单：正文是在**显式授权**（allow_sensitive）下读出的。");
@@ -5254,7 +5264,7 @@ function kbSearch(vault, query, options = {}) {
 	const lines = [
 		`# 知识库检索 · ${vault.name}`,
 		"",
-		`> source=知识库（未建索引）｜as_of ${asOf}`,
+		`> source=知识库（按需扫描，非索引检索）｜as_of ${asOf}`,
 		`> scan=${scannedFiles} files / ${scannedBytes} bytes / ${ms} ms｜命中 ${total} 文件，显示 ${shown.length} 个`,
 		`> 跳过：大文件 ${skippedLarge} / 二进制 ${skippedBinary} / 编码不可读 ${skippedEncoding} / 敏感名单 ${skippedSensitive}（单文件上限 ${KB_SEARCH_MAX_FILE_BYTES} B）`,
 		"> 只扫已登记 vault 的 `.md`；不建索引、不进 `memory_fts`——找 fish 记忆请用 `recall`。",
@@ -5556,9 +5566,9 @@ function recentLessonRows(db, sinceZ, limit, exclude = /* @__PURE__ */ new Set()
 *
 * ## 只读依据（逐条对过源码，不是"看起来像读"）
 *
-*   · `project_status_rows`（`p0/fish.py:14517`，docstring 明写"**只读**：不改任何表、不写盘"）；
-*   · `alias` 的 list 分支（`p0/fish.py:6722-6738`：两条 SELECT + `resolve_name`）；
-*   · `workspace` 的 list 分支（`p0/fish.py:10065-10076` → `list_workspace_mappings`，纯 SELECT）。
+*   · `project_status_rows`（`p0/fish.py`，docstring 明写"**只读**：不改任何表、不写盘"）；
+*   · `alias` 的 list 分支（`p0/fish.py`：两条 SELECT + `resolve_name`）；
+*   · `workspace` 的 list 分支（`p0/fish.py` → `list_workspace_mappings`，纯 SELECT）。
 *
 * ## 与生产的一处**有意差异**
 *
@@ -5999,7 +6009,7 @@ function projectStatusPayload(result) {
 *
 * ## 为什么不能"直接转发"
 *
-* 生产树里**每一条** `cmd_*` 都是这个开头（`p0/fish.py:980` 的 `connect()`）：
+* 生产树里**每一条** `cmd_*` 都是这个开头（`p0/fish.py` 的 `connect()`）：
 *
 * ```python
 * conn = connect(Path(args.root)); conn.executescript(SCHEMA); migrate(conn)

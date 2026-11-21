@@ -1,8 +1,8 @@
 /**
- * 配置读取（复刻 `p0/fish.py` 的 `CONFIG_DEFAULTS` + `get_config`，fish.py:92 / fish.py:1870）。
+ * 配置读取（复刻 `p0/fish.py` 的 `CONFIG_DEFAULTS` + `get_config`，fish.py）。
  *
  * 为什么要把整张键表搬过来而不是"用到哪个读哪个"：
- *   `get_config` 对**未知键**是抛 `KeyError` 的（`_key_type`，fish.py:1864）。如果 TS 侧只认
+ *   `get_config` 对**未知键**是抛 `KeyError` 的（`_key_type`，fish.py）。如果 TS 侧只认
  *   自己用到的几个键，那么"库里有人写了一个 TS 不认识的键"与"键拼错了"在行为上就会分叉——
  *   一边响亮报错、一边静默回落默认值。键表是**契约**，不是实现细节。
  *
@@ -28,7 +28,7 @@ export interface ConfigKeyDef {
 }
 
 /**
- * 配置键表（**逐条对齐** `fish.py:92` 的 `CONFIG_DEFAULTS`）。
+ * 配置键表（**逐条对齐** `fish.py` 的 `CONFIG_DEFAULTS`）。
  *
  * 只收键名/默认值/类型三件事：`enum` 的可选值只在写入侧校验，读侧不需要它，
  * 但为了让"这张表就是契约"这件事完整，枚举键的 allowed 一并记录。
@@ -108,7 +108,7 @@ export function configKeyDef(key: string): ConfigKeyDef {
 }
 
 /**
- * 读一个配置键（复刻 `get_config`，fish.py:1870）。
+ * 读一个配置键（复刻 `get_config`，fish.py）。
  *
  * 口径逐条对齐 Python：库里没有该行 → 默认值；`int` 走 `parseInt`、`float` 走 `parseFloat`、
  * `bool` 只在原值为字符串 `"true"` 时为真（Python 是 `raw == "true"`，**不是**真值判断）。
@@ -167,7 +167,7 @@ export function getConfigString(db: DatabaseSync, key: string): string {
   return typeof value === 'string' ? value : String(value)
 }
 
-/** 全部 `decay.*` 键的现值（复刻 `load_decay_cfg`，fish.py:6198）。 */
+/** 全部 `decay.*` 键的现值（复刻 `load_decay_cfg`，fish.py）。 */
 export function loadDecayConfig(db: DatabaseSync): Record<string, number> {
   const out: Record<string, number> = {}
   for (const key of Object.keys(CONFIG_DEFAULTS)) {

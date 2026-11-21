@@ -2,12 +2,12 @@
  * 记忆检索（只读）：`search_memories` / `recent_fallback` / 列出模式 / 回执渲染。
  *
  * 依据（逐条对齐 Python）：
- *   · `search_memories`（fish.py:3941）——CLI 与 MCP **共用的唯一读入口**（ADR-005）
- *   · `_like_literal` / `LIKE_ESCAPE_SQL` / `tag_like_pattern`（fish.py:4057 / 4076 / 4079）
- *   · `_list_where` / `count_memories` / `list_memories` / `format_list_declaration`（fish.py:4099 / 4120 / 4131 / 4155）
- *   · `recent_fallback`（fish.py:4190）——未命中回退
- *   · `RECALL_DIMENSION_NOTE` / `format_status_tag`（fish.py:4182 / 4185）
- *   · MCP `tool_recall` 的回执文本（mcp_server.py:819）
+ *   · `search_memories`（fish.py）——CLI 与 MCP **共用的唯一读入口**（ADR-005）
+ *   · `_like_literal` / `LIKE_ESCAPE_SQL` / `tag_like_pattern`（fish.py）
+ *   · `_list_where` / `count_memories` / `list_memories` / `format_list_declaration`（fish.py）
+ *   · `recent_fallback`（fish.py）——未命中回退
+ *   · `RECALL_DIMENSION_NOTE` / `format_status_tag`（fish.py）
+ *   · MCP `tool_recall` 的回执文本（mcp_server.py）
  *
  * ## 三条纪律（都在 Python 里付过学费）
  *
@@ -409,7 +409,7 @@ export function ensureFtsReadable(db: DatabaseSync): void {
   }
 }
 
-/** `recall` 的完整回执（逐行对齐 MCP `tool_recall`，mcp_server.py:819）。 */
+/** `recall` 的完整回执（逐行对齐 MCP `tool_recall`，mcp_server.py）。 */
 export function renderRecall(
   db: DatabaseSync,
   options: {

@@ -3,7 +3,7 @@
  *
  * ## 为什么不能"直接转发"
  *
- * 生产树里**每一条** `cmd_*` 都是这个开头（`p0/fish.py:980` 的 `connect()`）：
+ * 生产树里**每一条** `cmd_*` 都是这个开头（`p0/fish.py` 的 `connect()`）：
  *
  * ```python
  * conn = connect(Path(args.root)); conn.executescript(SCHEMA); migrate(conn)

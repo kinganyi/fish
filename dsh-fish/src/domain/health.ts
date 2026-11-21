@@ -1,5 +1,5 @@
 /**
- * 自检（复刻 `cmd_healthcheck`，fish.py:10851 的**核心读数**）。
+ * 自检（复刻 `fish.py` 的 `cmd_healthcheck` 的**核心读数**）。
  *
  * 七项读数：事件数 / 活跃记忆 / 休眠 / 作废 / 断链 / FTS 是否落后 / owner 是否有效公民。
  *

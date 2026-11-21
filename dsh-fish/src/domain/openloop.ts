@@ -11,7 +11,7 @@
 
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite'
 
-/** ④ 段的窗口与上限（fish.py:7322）。 */
+/** ④ 段的窗口与上限（fish.py）。 */
 export const ATTENTION_PER_TYPE_LIMIT = 2
 export const ATTENTION_BLOCK_MAX_TOKENS = 400
 export const ATTENTION_TITLE_MAX_CHARS = 50

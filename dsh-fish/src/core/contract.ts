@@ -1,15 +1,25 @@
 /**
- * 契约门禁：**fail closed** —— 任一要素不匹配就抛错，插件拒绝启用。
+ * 契约门禁：比对四处，**不一致时告警并降级**（2026-11-09 从 fail closed 改为 warn）。
  *
- * 为什么宁可"启动失败"也不要"带病启动"：影子期 TS 侧只读，读错结构的后果不是崩溃，
- * 而是**静默返回空结果**（例如少了 `status='active'` 这一列）。那种坏会一路走到
- * 注入包里说"这里什么都没有"。所以三处版本必须同时对上：
+ * 为什么改：影子期 TS 侧**只读**。起不来比读不全新更糟——版本漂移时插件直接拒绝
+ * 启动，等于把一个"只读补充"变成"整个宿主少一块"。所以现在是 `warnings.push(...)`，
+ * 让调用方把漂移**显示出来**而不是拦住。
+ *
+ * 仍然会抛的只有两种（真正无法继续的情况）：
+ *   · `strictHostVersion=true` 且探测不到宿主版本；
+ *   · `spec/schema.fingerprint.json` 结构本身不合法（algorithm/fingerprint 缺字段）。
+ *
+ * 比对的四项：
  *
  *   1. `contract.json.contractVersion` === 插件常量 `SUPPORTED_CONTRACT_VERSION`
  *   2. `spec/schema.fingerprint.json` === 现网库实时算出的指纹
  *   3. 宿主版本 >= `contract.json.minHostVersion`
  *   4. 附带：`contract.json.specFiles` 里登记的文件摘要 === 文件实际摘要
  *      （防止"只改了 events.json 忘了重算契约"这种半更新）
+ *
+ * 为什么这四项仍值得比对（哪怕只是告警）：影子期读错结构的后果不是崩溃，而是
+ * **静默返回空结果**（例如少了 `status='active'` 这一列），那种坏会一路走到
+ * 注入包里说"这里什么都没有"。降级不等于不报。
  *
  * `runStartupGate` 是 `apply()` 与验收脚本**共用的同一条路径**：验收脚本另写一条
  * 轻量校验，等于验了个不存在的门。
