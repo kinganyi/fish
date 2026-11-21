@@ -54,6 +54,14 @@ from fish_db import append_event
 KB_UNATTRIBUTED = "unattributed"
 
 # K2：错误码是契约，中文文案是解释。CLI 与 MCP 都按 code 判，不按文案判。
+#
+# 2026-11-21（措辞纠正）：来源标签原来写「知识库（未建索引）」。**那句话是假陈述**——
+# 库**有**索引（`kb_index`），只是 `kb tree` / `kb open` / `kb search` 这三条路
+# **按需扫描文件、不查索引**（索引服务的是推送候选，另一条链路）。
+# 「未建索引」听起来像"这个库没建索引"（状态缺失），而事实是"这次不走索引"（行为选择）。
+# 统一成行为陈述，并**只在这一个常量里写一次**——原来散在 9 处，改口径必然漂。
+KB_SOURCE_LABEL = "知识库（按需扫描，非索引检索）"
+# 注：`mcp_server.KB_SOURCE_LINE` 由本常量拼出（那边是回执第一行的字面量）。
 KB_ERROR_CODES = (
     "bad_usage", "path_invalid", "outside_vault", "reparse_point", "ignored",
     "not_found", "offline", "too_large", "media", "bad_encoding",
@@ -218,7 +226,7 @@ def _kb_commands_ready() -> bool:
 #
 # 这一段的四条硬边界（破了任何一条都算越权）：
 #   ① **只读不索引**：知识库内容永不进 `memory_fts` / `recall` / 注入包（裁决 C1 + KB-10）；
-#      `kb search` 是"按需扫描"，回执上必须写明"未建索引"——它不是第二个 recall；
+#      `kb search` 是"按需扫描"，回执上必须写明"不走索引"——它不是第二个 recall；
 #   ② **路径只能相对**：`..` / 绝对 / 盘符 / UNC / `\\?\` / junction 一律拒绝，
 #      判定用 `realpath + commonpath`，**禁止 `str.startswith`**（裁决 §四.7 / K8）；
 #   ③ **写要显式授权**：只有 `mode='rw'` 的 vault 能写；写前只备份**被写的那一个文件**，
@@ -1727,7 +1735,7 @@ def _kb_tree_lines(vault, start_rel, tree, *, depth, as_of, ignore_globs) -> lis
     lines = [
         f"# 知识库目录 · {vault['name']}",
         "",
-        f"> source=知识库（未建索引）｜as_of {iso_local(as_of)}",
+        f"> source={KB_SOURCE_LABEL}｜as_of {iso_local(as_of)}",
         f"> vault=`{vault['path']}`（mode={vault['mode']}）｜起点=`{start_rel or '/'}`"
         f"｜深度={depth}",
         f"> 生效忽略规则：{', '.join(ignore_globs) if ignore_globs else '（无）'}",
@@ -2196,8 +2204,8 @@ def kb_open(conn, vault_row, rel, *, max_chars=64000, allow_sensitive=False,
     """读单文件（必须给显式相对路径）——§4.2 / KB-7 / KB-8。
 
     三句声明是**固定文案**（判据认它们）：
-      ① 来源=知识库（未建索引），不是 fish 记忆；
-      ② 本库未建索引，检索按需扫描；
+      ① 来源=知识库（按需扫描），不是 fish 记忆；
+      ② 本次检索按需扫描文件，不查索引；
       ③ 是否截断 + 字节比例。
     不写 `events`（KB-8：open 前后 events 行数不变）——知识库的读不产生"记忆事件"。
 
@@ -2272,8 +2280,8 @@ def _kb_open_impl(conn, vault_row, rel, *, max_chars, allow_sensitive, citizen_i
     shown_text = text[:cap]
     shown_bytes = (len(shown_text.encode("utf-8")) if truncated else len(raw))
     statements = [
-        "来源=知识库（未建索引），不是 fish 记忆；不进 recall / 全文索引。",
-        "本库未建索引；要检索请显式 `fish kb search`（按需扫描）。",
+        f"来源={KB_SOURCE_LABEL}，不是 fish 记忆；不进 recall / 全文索引。",
+        "本次按需扫描文件、不查索引；要检索请显式 `fish kb search`。",
         ("已截断" if truncated else "未截断") +
         f"（{len(raw)}/{limit} B 上限；"
         f"显示 {len(shown_text)}/{len(text)} 字）",
@@ -2430,7 +2438,7 @@ def kb_search(conn, vault_row, query, *, limit=10, max_chars=8000, max_tokens=18
               citizen_id=None, via="cli:kb") -> dict:
     """在 vault 内**按需扫描**检索（不建索引）——§4.3 / KB-10 / KB-9。
 
-    只扫已登记 vault 的 `.md`；回执头部必须写明「来源=知识库（未建索引）」+
+    只扫已登记 vault 的 `.md`；回执头部必须写明「来源=知识库（按需扫描）」+
     「扫描 N 文件 / M 字节 / x ms」。**它与 `recall` 是两套东西**：不查 `memory_fts`、
     不写 `code_index`、不产生记忆事件——KB-10 的判据就是拿一个只存在于知识库里的独特词
     去 `recall`（0 命中）与 `kb search`（1 命中）做对照。
@@ -2523,7 +2531,7 @@ def _kb_search_impl(conn, vault_row, query, *, limit, max_chars, max_tokens,
     lines = [
         f"# 知识库检索 · {vault_row['name']}",
         "",
-        f"> source=知识库（未建索引）｜as_of {iso_local(as_of)}",
+        f"> source={KB_SOURCE_LABEL}｜as_of {iso_local(as_of)}",
         f"> scan={scanned_files} files / {scanned_bytes} bytes / {ms} ms"
         f"｜命中 {total} 文件，显示 {len(shown)} 个",
         f"> 跳过：大文件 {skipped_large} / 二进制 {skipped_binary} / 编码不可读 "
@@ -2559,7 +2567,7 @@ def _kb_search_impl(conn, vault_row, query, *, limit, max_chars, max_tokens,
                       meta={"query_hash": query_hash})
     return {"vault": _kb_vault_brief(vault_row), "as_of": iso_local(as_of),
             "query_hash": query_hash, "qlen": len(q), "limit": want,
-            "source": "知识库（未建索引）",
+            "source": KB_SOURCE_LABEL,
             "scanned": {"files": scanned_files, "bytes": scanned_bytes, "ms": ms,
                         "skipped_large": skipped_large,
                         "skipped_binary": skipped_binary,

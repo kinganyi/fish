@@ -43,6 +43,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fish
 import fish_activity
+# 2026-11-21：只为 `KB_SOURCE_LABEL`（来源标签的唯一真源）。
+import fish_kb
 import fish_git_store
 import fish_surface
 import fish_trust
@@ -125,7 +127,11 @@ TOKEN_PROPERTY = {
 # 而集中成常量后，新加一个 action 只改一处、判据也只认这一处。
 KB_TOOL_ACTIONS = ("vaults", "tree", "open", "search")
 KB_WRITE_ACTIONS = ("create", "append", "update")
-KB_SOURCE_LINE = "source=知识库（未建索引）"   # 回执第 1 行（判据认这句字面量）
+# 2026-11-21（措辞纠正）：原来写死「知识库（未建索引）」——**那句话是假陈述**。
+# 库有索引（`kb_index`），只是 kb 的读路径按需扫描、不查它（索引服务的是推送候选）。
+# 「未建索引」听起来像"这个库没建"（状态缺失），事实是"这次不走索引"（行为选择）。
+# 现在由 `fish_kb.KB_SOURCE_LABEL` 拼出——**唯一真源在那边**，这里不再存一份字面量。
+KB_SOURCE_LINE = "source=" + fish_kb.KB_SOURCE_LABEL
 KB_TOOL_MAX_CHARS = 8000                      # 与 `kb` schema 的 max_chars 默认值同源
 
 # T03：对话语料的**只读**面。三个动作刻意**不含** ingest/forget/rebuild——
@@ -658,7 +664,11 @@ TOOLS = [
                        "最近没被采过，状态不代表当下。\n\n"
                        "四态如实返回：`clean`（净）/ `dirty`（有未提交改动）/ "
                        "`unknown`（**没采到**，不是干净）/ `degraded`（采到但不可靠：浅克隆等）。\n"
-                       "判不到时明说「没有记录」，**不会编一个状态出来**。",
+                       "判不到时明说「没有记录」，**不会编一个状态出来**。\n\n"
+                       "**什么会被采到**：只有挂着 hook 的宿主里、通过 AI 工具调用做的操作。"
+                       "人在终端里手动 `git commit`、在编辑器 GUI 里提交、用没挂 hook 的宿主提交"
+                       "——**都不会被记录**。所以「没有记录」可能只是「那条路没挂 hook」，"
+                       "不一定是「这个仓库不存在」。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -675,7 +685,10 @@ TOOLS = [
         "description": "查一个仓库**已被采集到**的提交（sha / 时间 / 标题 / 是否 merge）。\n\n"
                        "只列已入库的提交——本工具不去跑 `git log`。默认只采「从今往后」的新提交"
                        "（方案 §4.3：历史全量回填会让事件表 ×5.6，所以它是独立的可选任务）。\n\n"
-                       "所以条数少不代表仓库没历史，只代表**还没采**。判不到时明说。",
+                       "所以条数少不代表仓库没历史，只代表**还没采**。判不到时明说。\n\n"
+                       "**采不到的情况**（与 `git_repo_status` 同源）：终端手动 `git commit`、"
+                       "编辑器 GUI 提交、没挂 hook 的宿主提交。所以条数少也可能是"
+                       "**那几次提交没走 hook**，而不只是「从今往后才开始采」。",
         "inputSchema": {
             "type": "object",
             "properties": {

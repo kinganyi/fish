@@ -7,7 +7,7 @@
   KB-3  双预算（`chars ≤ max_chars` **且** `tokens ≤ max_tokens`），截断要明示原因；
   KB-7  `open` 必须给显式相对路径；`> max_open_bytes` 拒绝并给字节数；
   KB-8  `open` **不写 events**（知识库的读不产生记忆事件）；
-  KB-9  `search` 的头部三行固定（来源/未建索引/扫描读数），每条命中给全路径+行号；
+  KB-9  `search` 的头部三行固定（来源/非索引检索/扫描读数），每条命中给全路径+行号；
   KB-10 `search` **不建索引**：独特词只被 kb search 命中，`recall` 0 命中；
   KB-11 只扫已登记 vault 的 `.md`（.txt / 忽略目录不扫）；
   KB-14 `doctor` 探 Obsidian CLI：app 未运行 → `unavailable`，读写照常。
@@ -136,7 +136,7 @@ class KBReadTest(unittest.TestCase):
         self.assertEqual(res["summary"]["attachments"], 1)
         self.assertIn("生效忽略规则", res["text"])
         self.assertIn(".obsidian/**", res["text"])
-        self.assertIn("source=知识库（未建索引）", res["text"])
+        self.assertIn("source=知识库（按需扫描，非索引检索）", res["text"])
 
     def test_tree_budget_both_limits(self):
         """KB-3：字符与 token 两个上限**同时**成立，并说明截断原因。"""
@@ -197,7 +197,7 @@ class KBReadTest(unittest.TestCase):
         self.assertEqual(res["encoding"], "utf-8")
         self.assertFalse(res["truncated"])
         self.assertEqual(len(res["statements"]), 3)
-        self.assertIn("知识库（未建索引）", res["statements"][0])
+        self.assertIn("知识库（按需扫描", res["statements"][0])
         self.assertIn("按需扫描", res["statements"][1])
         self.assertIn("未截断", res["statements"][2])
 
@@ -277,7 +277,7 @@ class KBReadTest(unittest.TestCase):
 
     # ============================================================ search
     def test_search_hits_md_with_path_and_line(self):
-        """KB-9：命中给全路径 + 行号 + 上下文；头部三行（来源/未建索引/扫描读数）。"""
+        """KB-9：命中给全路径 + 行号 + 上下文；头部三行（来源/非索引检索/扫描读数）。"""
         res = fish.kb_search(self.conn, self.vault, "独特词甲")
         self.assertEqual(res["total"], 1)
         hit = res["hits"][0]
@@ -285,7 +285,7 @@ class KBReadTest(unittest.TestCase):
         self.assertEqual(hit["lines"][0]["lineno"], 3)
         self.assertIn("独特词甲", hit["lines"][0]["text"])
         self.assertEqual(hit["abs"], str(self.vault_dir / "00-首页" / "说明.md"))
-        self.assertIn("source=知识库（未建索引）", res["text"])
+        self.assertIn("source=知识库（按需扫描，非索引检索）", res["text"])
         self.assertIn("scan=", res["text"])
         self.assertIn("files /", res["text"])
         self.assertIn("ms", res["text"])
@@ -414,14 +414,14 @@ class KBReadTest(unittest.TestCase):
             ["--root", str(self.root), "kb", "open", "00-首页/欢迎.md",
              "--vault", "读测试库"])
         self.assertIsNone(code, f"open 应 exit 0；stderr={err}")
-        self.assertIn("知识库（未建索引）", out)
+        self.assertIn("知识库（按需扫描", out)
         self.assertIn("这是第一篇", out)
         code, out, err = self._run_main(
             ["--root", str(self.root), "kb", "search", "独特词甲",
              "--vault", "读测试库"])
         self.assertIsNone(code, f"search 应 exit 0；stderr={err}")
         self.assertIn("00-首页/说明.md", out)
-        self.assertIn("未建索引", out)
+        self.assertIn("按需扫描", out)
 
     def test_cli_open_bad_path_exits_1(self):
         code, _out, err = self._run_main(

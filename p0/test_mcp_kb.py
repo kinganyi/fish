@@ -38,7 +38,7 @@ TOOL_NAMES = {
     "reopen_project", "resolve_code", "session_start", "supersede", "whoami",
 }
 
-SOURCE_LINE = "source=知识库（未建索引）"
+SOURCE_LINE = "source=知识库（按需扫描，非索引检索）"
 CITIZEN_ID = "01CIT00000000000000000001"
 
 
