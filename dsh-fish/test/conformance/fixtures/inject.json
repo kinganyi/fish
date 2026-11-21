@@ -1,0 +1,13 @@
+{
+  "id": "inject-status-only",
+  "op": "inject",
+  "toolName": "inject",
+  "snapshotDb": "data/index.sqlite",
+  "args": {
+    "sections": ["status"],
+    "budget": 900
+  },
+  "token": { "mode": "anonymous" },
+  "normalize": ["strip-iso-timestamp", "strip-ulid", "mask-abs-path", "drop-as-of-line"],
+  "notes": "只要 L1 坐标段（不含看板/规矩/候选），把注入包压到最小可对拍形态；as-of 行按规则丢弃（时刻天然不等，但它是否出现要由包尾结构断言）"
+}

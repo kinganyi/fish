@@ -1,0 +1,15 @@
+{
+  "id": "recall-keyword",
+  "op": "recall",
+  "toolName": "recall",
+  "snapshotDb": "data/index.sqlite",
+  "args": {
+    "query": "协作约定",
+    "limit": 5,
+    "scope": "all",
+    "include_superseded": false
+  },
+  "token": { "mode": "anonymous" },
+  "normalize": ["strip-iso-timestamp", "strip-ulid", "strip-sha256", "mask-abs-path"],
+  "notes": "检索必须对拍的是**排序与匹配来源**（精确编码 > 编码片段 > 标题 > 正文），所以回包文本原样保留，只抹掉时间与标识"
+}

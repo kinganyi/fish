@@ -1,0 +1,16 @@
+{
+  "id": "whoami-token",
+  "op": "whoami",
+  "toolName": "whoami",
+  "snapshotDb": "data/index.sqlite",
+  "args": {},
+  "token": {
+    "mode": "issue",
+    "citizenId": "179261404173893688AC120C04",
+    "sessionKey": "fixture:whoami",
+    "evidence": "machine",
+    "channel": "cli"
+  },
+  "normalize": ["strip-iso-timestamp", "strip-ulid", "strip-sha256", "mask-abs-path"],
+  "notes": "身份回执必须交代三件事：登记身份、凭证状态、身份来源行。token 由 fixture 在**临时副本**里签发（不碰生产库），citizenId 取真实库中的主人公民"
+}

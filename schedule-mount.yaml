@@ -1,0 +1,12 @@
+
+# ── 调度能力承接（2026-10-30，DSH 0.2.1）──────────────────────────────
+# 0.2.1 把 dsh-experimental-schedule-bundle 标为 RETIRED（会自动从 bundles 删行），
+# 而它的 3 个组件仍在 npm 上。用户拍板「保留调度」，故在此直接挂这 3 行。
+# 回滚：删掉本段，或恢复历史版本里的 cordis.patch.yml
+- insert:
+    - id: time-context
+      name: '@deepseek-ai/dsh-time-context'
+    - id: schedule
+      name: '@deepseek-ai/dsh-schedule'
+    - id: ui-schedule
+      name: '@deepseek-ai/dsh-tool-schedule'

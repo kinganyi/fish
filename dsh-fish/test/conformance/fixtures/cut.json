@@ -1,0 +1,24 @@
+{
+  "id": "cut-tokens",
+  "op": "cut",
+  "snapshotDb": null,
+  "inputs": [
+    "中文重叠 bigram 切分",
+    "协作约定",
+    "记",
+    "CR-12",
+    "v1.0.0",
+    "name_alias 表",
+    "ANYI-261025-01",
+    "「生活」是默认项目：用户没指定具体项目时的个人生活类对话落这里",
+    "中文 English 混合 2026-10-27T13:37:00Z",
+    "半角，标点。分组！问号？",
+    "emoji 🐟 与文本",
+    "",
+    "两件事",
+    "三件事呢",
+    "重叠滑窗必须逐位对齐"
+  ],
+  "normalize": [],
+  "notes": "纯函数对拍：TS lib.cutTokens vs Python fish.index_tokens。这一条是**机器可证 0 diff** 的那一条，也是步骤 5 变异（bigram 差一位）的判据载体"
+}

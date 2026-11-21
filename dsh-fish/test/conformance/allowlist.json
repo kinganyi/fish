@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "notes": [
+    "已知差异 / 未实现项的登记表：条目必须带责任人（owner）与到期日（expires）。",
+    "到期即红——允许清单不是'永久豁免'，它是'这件事有人认领、有期限'的凭据。",
+    "kind=pending-impl：TS 侧执行器尚未实现（T02 的活）；kind=known-diff：两侧都实现了但已知不等，必须写清原因。"
+  ],
+  "entries": [
+    {
+      "fixture": "inject-status-only",
+      "op": "inject",
+      "side": "ts",
+      "kind": "pending-impl",
+      "owner": "T02（记忆写读 + 注入 + 4 hook 桥）",
+      "expires": "2026-11-15",
+      "reason": "注入包的 8 段来源全部依赖 domain/inject 与 domain/memory 的读路径，属 T02 范围；T01 只交付双跑器机制与 Python 侧基准"
+    },
+    {
+      "fixture": "recall-keyword",
+      "op": "recall",
+      "side": "ts",
+      "kind": "pending-impl",
+      "owner": "T02（记忆写读 + 注入 + 4 hook 桥）",
+      "expires": "2026-11-15",
+      "reason": "检索的排序口径（精确编码 > 编码片段 > 标题 > 正文）与 access_log 副作用在 src/domain/memory.ts 里实现；T01 不复制一份临时实现"
+    },
+    {
+      "fixture": "whoami-token",
+      "op": "whoami",
+      "side": "ts",
+      "kind": "pending-impl",
+      "owner": "T02（记忆写读 + 注入 + 4 hook 桥）",
+      "expires": "2026-11-15",
+      "reason": "whoami 的措辞与证据分级（machine/inherited/self-reported）在 src/domain/identity.ts 里实现；措辞逐字对齐是 T02 的判据，T01 不猜文案"
+    }
+  ]
+}
