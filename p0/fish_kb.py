@@ -44,6 +44,10 @@ from pathlib import Path
 # ——这样主库 `SCHEMA` 能拼它而不必依赖本 domain 模块（避免分层倒置）。
 from fish_schema import (_KB_ACCESS_DDL, _KB_ACCESS_INDEXES, _KB_PATH_STATS_COLUMNS, _KB_PATH_STATS_VIEW, _KB_SCHEMA, _KB_VAULT_COLS, _KB_VAULT_DDL, _KB_VAULT_INDEXES)
 from fish_common import _exc_text, count_tokens, iso_local, now_utc, ulid, warn_derived
+# 2026-11-21（E-1）：`kb_vault_fix_path` 要记事件。方向是 `fish_kb → fish_db`——
+# J2 名单里 `FISH_DB` 的禁止列表含 `fish_kb`（即 db 不许反向 import kb），
+# 所以这个方向合法；`fish_db` 自身只依赖 `fish_common` + `fish_schema`。
+from fish_db import append_event
 
 # K3：`None → 'unattributed'` 的映射只在写入审计时做一次；常量在这里定死，
 # MCP 侧（mcp_server.UNATTRIBUTED）靠判据锁住两处字面量一致。
@@ -2041,6 +2045,89 @@ def kb_toc(conn, vault_row, *, rel="", depth=2, limit=None, offset=0,
             "tokens": fitted["tokens"], "truncated": fitted["truncated"]}
 
 
+def kb_vault_fix_path(conn, key, new_path, *, dry_run=True, note=None) -> dict:
+    """纠正一条**指向错误**的库登记（不是搬家）。
+
+    ## 与 `kb_vault_relocate` 的区别（两者不能互相替代）
+
+    | | relocate | fix_path |
+    |---|---|---|
+    | 场景 | 文件搬到新地方了，更新登记 | 登记从一开始就指错了地方 |
+    | 要求源路径存在 | **是**（否则没法搬/没法校验哈希） | **否**（它本来就不存在） |
+    | 搬文件 | 可选 | 绝不 |
+    | 校验哈希 | 搬/复制时必做 | 无对象可校验 |
+
+    实测 `安逸知识库` 就是第二种：登记指向 `p0/data/kb/安逸知识库`，该目录不存在，
+    而真实目录在 `E:\\Obsidian\\安逸知识库`。对它调 `relocate` 会在
+    `if not src.is_dir(): raise KBError("not_found")` 那一行直接失败——**而那个失败
+    看起来像"用户搞错了"，实际是"登记错了"**。
+
+    ## 唯一的硬要求：新路径必须真的存在
+
+    否则只是从一个坏的换成另一个坏的。这一条不接受 `--force` 之类的绕过：
+    "改完还是打不开"是这一整类 bug 的形态，不该给它留后门。
+    """
+    row = kb_vault_get(conn, key)
+    dst = Path(str(new_path))
+    if not dst.is_absolute():
+        raise KBError("bad_usage", f"新路径必须是绝对路径：{new_path!r}")
+    if not dst.is_dir():
+        raise KBError(
+            "not_found", f"新路径不存在或不是目录：{dst}",
+            hint="改完还是会打不开——所以这一步必须先成立。确认目录后重试。")
+    src = str(row.get("path") or "")
+    plan = {"name": row.get("name"), "vault_id": row.get("vault_id"),
+            "from": src, "to": str(dst), "from_exists": Path(src).is_dir() if src else False,
+            "dst_exists": True}
+    if dry_run:
+        return {"dry_run": True, **plan}
+    conn.execute(
+        "UPDATE kb_vault SET path=?, path_key=?, updated_at=? WHERE vault_id=?",
+        (str(dst), str(dst).lower(), now_utc(), row["vault_id"]))
+    append_event(conn, "kb.vault_path_fixed",
+                 {"citizen_id": "system", "evidence_level": "signed"},
+                 {"kind": "kb_vault", "id": row["vault_id"]},
+                 {"name": row.get("name"), "from": src, "to": str(dst),
+                  "why": note or "登记指向不存在的目录，按真实位置纠正"})
+    conn.commit()
+    return {"dry_run": False, **plan, "updated": True}
+
+
+def kb_vault_availability(vault_row) -> str:
+    """vault 的**实际可用态**：`ok` / `missing`（路径不存在或没登记）。
+
+    ## 为什么要有它，而不是只看 `kb_vault.status`
+
+    `status` 是**写一次就永远 active** 的字段。实测 `安逸知识库` 的 path 指向
+    `p0/data/kb/安逸知识库`（该目录不存在），而 status 还是 `active` ——于是：
+
+      · `kb tree` / `kb search` 恒报离线（用户和 czhy--开发-3 都撞到过）；
+      · **`kb` 推送候选仍从旧索引产出：612 条推送，accepted 0**——
+        推的是已经打不开的东西。
+
+    **状态字段只写不核，就一定会漂移。** 所以可用态每次按磁盘现算，不存字段。
+
+    ## 为什么不直接把 status 改成 offline
+
+    那只是把「写一次」变成「再写一次」——下一次目录被移动，它还是错的。
+    **要么不存状态（每次算），要么每次读之前核。** 这里选前者：
+    `status` 保留它原本的语义（人显式停用/启用），可用性另算。
+
+    ## 为什么不抛异常
+
+    调它的人往往正在做"要不要用这个 vault"的判断，抛异常会让整个列表失败。
+    返回 `missing` 是**可判定的坏消息**，比异常更好用。
+    """
+    path = (vault_row or {}).get("path")
+    if not path:
+        return "missing"
+    try:
+        return "ok" if Path(path).exists() else "missing"
+    except OSError:
+        # 路径里有非法字符等——那本身也是"读不到"，按 missing 处理
+        return "missing"
+
+
 def _kb_vault_brief(vault_row) -> dict:
     return {"name": vault_row.get("name"), "id": vault_row.get("vault_id"),
             "mode": vault_row.get("mode"), "path": vault_row.get("path")}
@@ -3646,6 +3733,9 @@ _IMPORTED = frozenset({
     "datetime", "fnmatch", "functools", "hashlib", "json", "ntpath", "os", "re",
     "secrets", "shutil", "sqlite3", "stat", "subprocess", "sys", "time", "Path",
     "count_tokens", "iso_local", "now_utc", "ulid", "_exc_text", "warn_derived",
+    # 2026-11-21（E-1）：`kb_vault_fix_path` 要记事件，所以 `append_event`
+    # 从 `fish_db` 导入——它同样是**导入**来的，必须登记，否则会被当成导出面。
+    "append_event",
     # 自己也在 globals 里，必须显式排除，否则会被算进 __all__
     # 2026-11-11（E-11 拆包第三刀）：知识库 DDL 常量上移到 `fish_schema`。
     # 它们是**导入**来的，必须登记——否则会被 `__all__` 当成导出面（J1/J1b 会红）。

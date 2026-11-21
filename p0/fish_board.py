@@ -793,17 +793,40 @@ def board_auto_checkin(conn, citizen_id, *, project=None, session_key=None,
                 "skipped": f"{type(exc).__name__}: {exc}"}
 
 
+def display_text(text):
+    """把一段文本截成**渲染用**的显示版本（B-1：库里存全文，显示才截）。
+
+    为什么单独抽出来：`board_post` 曾自己截断（写入时），而 `board_post_rows`
+    直接返回库里的值——两处关于"哪一步截断"的理解不一致，就是数据丢失的来源。
+    现在只有这一处截断，写的和读的都调它（或者是它的逆：写不截、读截）。
+    """
+    t = text or ""
+    if len(t) > BOARD_MAX_POST_CHARS:
+        return t[:BOARD_MAX_POST_CHARS - 1] + "…"
+    return t
+
+
 def board_post(conn, board, citizen_id, kind, text):
-    """往看板"今日动态"加一条（≤200 字，超长硬截断并标省略号）。
+    """往看板"今日动态"加一条。**存全文**，渲染时才截断。
 
     `kind`：checkin | progress | done | note
     为什么动态单独一张表而不复用 `events`：events 是**不可变事实流**，
     而看板动态是**可滚动的展示层**——把展示层塞进事实流，
     会让"重建投影"多一类要处理的事件（`rebuild_projection` 已经够复杂了）。
+
+    ## 2026-11-21 改（系统级修复 B-1）：从「写入时截断」改成「渲染时截断」
+
+    旧实现在这行就截：`text = text[:199] + "…"`，而**表定义与常量注释都写着
+    「渲染时硬截断」——两处注释在说谎**。
+
+    后果是**原文永久丢失**：czhy--开发-3 读到一条只剩 200 字的 note，作者写的
+    「保留引用 / 开分支约定 / 沙箱构建坑」三项全没了，而且没有任何地方能查到全文
+    （知识库路径当时又离线）。**截断本身没错，错的是截在一个不可恢复的位置。**
+
+    老数据不需要区分：它们本来就只有 200 字，丢失的部分已经追不回来。
+    新数据从这一刻起是完整的，`board_post_rows` 返回显示用的截断版本。
     """
     text = (text or "").strip()
-    if len(text) > BOARD_MAX_POST_CHARS:
-        text = text[:BOARD_MAX_POST_CHARS - 1] + "…"
     if not text:
         return None
     cur = conn.execute(
@@ -811,6 +834,36 @@ def board_post(conn, board, citizen_id, kind, text):
         "VALUES (?,?,?,?,?)", (board["id"], citizen_id, kind, text, now_utc()))
     conn.commit()
     return cur.lastrowid
+
+
+def board_post_full(conn, post_id):
+    """取一条动态的**全文**（B-1 的配套读口）。
+
+    为什么要它：`board_post_rows` 返回的是显示用截断文本，所以"我想看全文"
+    必须有另一条路——否则用户知道有全文却取不到，和之前没区别。
+    """
+    row = conn.execute(
+        "SELECT id, citizen_id, kind, text, created_at FROM board_posts WHERE id=?",
+        (post_id,)).fetchone()
+    if not row:
+        return None
+    return {"id": row[0], "citizen_id": row[1], "kind": row[2],
+            "text": row[3], "created_at": row[4],
+            "chars": len(row[3] or ""),
+            # 是否超过显示上限——调用方据此判断"要不要提示有全文"
+            "truncated_for_display": len(row[3] or "") > BOARD_MAX_POST_CHARS}
+
+
+def _was_truncated_at_write(text):
+    """这条是**旧实现留下的**截断文本吗（长度刚好 200 且以 `…` 结尾）。
+
+    只用于提示，不用于任何判定：老数据与"刚好 200 字且以省略号收尾的新数据"
+    在这个判据下无法区分。**宁可少提示一次，也不假装能区分**——所以措辞是
+    「可能是历史数据」，不是「这是历史数据」。
+    """
+    t = text or ""
+    return len(t) == BOARD_MAX_POST_CHARS and t.endswith("…")
+
 
 
 def board_checkin_or_remind(conn, citizen_id, project=None):
@@ -1458,10 +1511,15 @@ def _state_suffix(state, inferred) -> str:
 
 
 def board_post_rows(conn, board, limit=BOARD_POSTS_PER_FILE):
-    """今日动态：按时间**倒序**（最新的在最上面，符合"此刻"的语义）。"""
-    return conn.execute(
+    """今日动态：按时间**倒序**（最新的在最上面，符合"此刻"的语义）。
+
+    **返回显示用文本**（B-1：库里是全文，这里才截到 `BOARD_MAX_POST_CHARS`）。
+    要全文用 `board_post_full(conn, post_id)`。
+    """
+    rows = conn.execute(
         "SELECT citizen_id, kind, text, created_at FROM board_posts "
         "WHERE board_id=? ORDER BY id DESC LIMIT ?", (board["id"], limit)).fetchall()
+    return [(c, k, display_text(t), ts) for c, k, t, ts in rows]
 
 
 def _actual_dirs_text(p, limit=2) -> str:

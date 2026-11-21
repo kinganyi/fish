@@ -37,6 +37,8 @@ from fish_kb import (  # T02：拆包后的跨模块引用
     _kb_search_multi,
     count_tokens,
     kb_vault_list,
+    # 2026-11-21（E-2）：可用性前置检查——「索引新鲜」不等于「库能打开」
+    kb_vault_availability,
     now_utc,
 )
 
@@ -397,6 +399,17 @@ def _kb_push_candidates_index(conn, q, *, project, exclude, limit, now) -> list:
         # 所以不在这里告警（否则"索引旧了"会刷屏）；它的可观测面在
         # `fish healthcheck` 的 KB 段（🔴1c，2026-11-11 接上）。
         return []
+    # 2026-11-21（E-2）：**「索引新鲜」不等于「打不开」**。`安逸知识库` 的 path 指向
+    # 不存在的目录，索引照样新鲜、status 照样 active——于是 612 条候选推的全是打不开的
+    # 东西（accepted 0）。这与 K7 是两道闸：K7 管索引可不可信，这里管库在不在。
+    try:
+        vaults = kb_vault_list(conn)
+    except Exception as exc:       # noqa: BLE001 —— 拿不到 vault 列表就当没有可用的
+        warn_derived("fish_push._kb_push_candidates_index:vaults", exc)
+        return []
+    usable = {v.get("name") for v in vaults if kb_vault_availability(v) == "ok"}
+    if not usable:
+        return []
     try:
         res = fish_kb_index.search_kb(conn, query=q, limit=max(int(limit) * 3, 6))
     except Exception as exc:       # noqa: BLE001
@@ -407,6 +420,9 @@ def _kb_push_candidates_index(conn, q, *, project, exclude, limit, now) -> list:
     since = (now_dt - datetime.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
     out = []
     for hit in res.get("hits") or []:
+        if hit.get("vault_name") not in usable:
+            # 这个 vault 的目录不存在（或没登记）——它的条目推出去也没人能打开
+            continue
         code = f"kb:{hit.get('vault_name')}:{hit.get('rel')}"
         if code in exclude:
             continue
@@ -699,17 +715,12 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
                 "FROM board_seen s JOIN boards b ON b.id = s.board_id "
                 "WHERE s.citizen_id=? AND b.status='open' AND b.period_key=?" + sk_where,
                 sk_params).fetchall():
-                # 2026-11-21（系统级修复 C-1）：**这个数曾经虚高 7251 倍。**
-                #
-                # 旧写法是 `MAX(id) - seen_post`。`board_posts.id` 是**全局自增**
-                # （所有板共享一个 AUTOINCREMENT 序列），所以 `MAX(id) WHERE board_id=X`
-                # 拿到的是「所有板里最大的 id」，不是「X 板有几条动态」。
-                # 差值里混进了别板动态的 id —— 实测 board_id=46：MAX(id)=141 但实际动态
-                # 只有 2 条；全库 open 板 MAX(id) 求和 7395 vs 实际动态 144。
-                #
-                # 正确算法是**数区间内的行**：`count(*) WHERE board_id=? AND id > seen`。
-                # 注意 `seen_post` 本身记的也是全局 id，所以 `id > seen` 这个增量口径是对的，
-                # 错的只是「用 MAX(id) 当总数」。
+                # 2026-11-21（C-1）：**这个数曾经虚高 7251 倍。** 旧写法是
+                # `MAX(id) - seen`，而 `board_posts.id` 是**全局自增**（所有板共享
+                # 一个序列）——`MAX(id) WHERE board_id=X` 拿到的是"所有板里最大的 id"，
+                # 不是"X 板有几条"。实测 board_id=46：MAX=141 但实际只有 2 条。
+                # 正确算法是数区间内的行；`seen` 记的也是全局 id，所以 `id > seen` 这个
+                # 增量口径本来就对，错的只是"用 MAX(id) 当总数"。
                 cur_post = conn.execute(
                     "SELECT count(*) FROM board_posts WHERE board_id=?", (bid,)).fetchone()[0]
                 cur_pres = conn.execute(

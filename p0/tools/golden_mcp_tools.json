@@ -23,15 +23,16 @@
   }
  },
  "board": {
-  "description": "看板回答的是「**此刻谁在动哪块**」——不是发生了什么（那是记忆）。\n\n三个动作：\n　· action=show（默认）：这个项目今天有谁在、在做什么、占了哪些面、**谁跟你撞了**（占用面重叠会单独警告）\n　· action=checkin：登记你自己（doing 必填，surface 强烈建议：它是防撞车的唯一依据）\n　· action=post：往今日动态写一条（kind=progress/done/note）——**做完用 done 标掉**，否则看板只剩在场表，丢掉\"动到哪了\"那一半\n\n**未登记 = 未发生**：看板上没有你的行，别人就无法判断会不会跟你撞车。开工前先 checkin，是这个系统的协作协议，不是礼貌。",
+  "description": "看板回答的是「**此刻谁在动哪块**」——不是发生了什么（那是记忆）。\n\n三个动作：\n　· action=show（默认）：这个项目今天有谁在、在做什么、占了哪些面、**谁跟你撞了**（占用面重叠会单独警告）\n　· action=checkin：登记你自己（doing 必填，surface 强烈建议：它是防撞车的唯一依据）\n　· action=post：往今日动态写一条（kind=progress/done/note）——**做完用 done 标掉**，否则看板只剩在场表，丢掉\"动到哪了\"那一半。**长文本照写**：库内存全文，看板渲染时才截到 200 字\n　· action=post_full：取某条动态的**全文**（post_id 必填）——看板上看到的是截断版，用这个拿原话\n\n**未登记 = 未发生**：看板上没有你的行，别人就无法判断会不会跟你撞车。开工前先 checkin，是这个系统的协作协议，不是礼貌。",
   "inputSchema": {
    "properties": {
     "action": {
-     "description": "show 看板 / checkin 登记自己 / post 写动态（默认 show）",
+     "description": "show 看板 / checkin 登记自己 / post 写动态 / post_full 取某条全文（默认 show）",
      "enum": [
       "show",
       "checkin",
       "post",
+      "post_full",
       "simulate"
      ],
      "type": "string"
@@ -53,6 +54,10 @@
      ],
      "type": "string"
     },
+    "post_id": {
+     "description": "post_full 必填：要取全文的那条动态 id（看板渲染里每条都带 id）",
+     "type": "integer"
+    },
     "project": {
      "description": "看哪个项目的板（不传则用根看板）",
      "type": "string"
@@ -70,7 +75,7 @@
      "type": "string"
     },
     "text": {
-     "description": "post 必填：动态内容（≤200 字）",
+     "description": "post 必填：动态内容。**写多长都行**——库内存全文，看板渲染时才截到 200 字（B-1，2026-11-21）",
      "type": "string"
     },
     "token": {

@@ -127,7 +127,7 @@ from fish_board import (_presence_write_shape, _board_seen_write_shape, _fold_pr
     board_post, board_checkin_or_remind, board_auto_presence, _fmt_period, _hhmm, citizen_labels,
     who_label, board_overlaps, board_observed_overlaps, board_simulate, board_stale_rows,
     board_prev_note, effective_last, _age_minutes, _collapse_presence_raw, board_presence_rows,
-    _presence_state, _state_suffix, board_post_rows, _actual_dirs_text, board_unchecked_sessions,
+    _presence_state, _state_suffix, board_post_rows, board_post_full, _actual_dirs_text, board_unchecked_sessions,
     _unchecked_dirs_text, render_unchecked_section, _presence_heading, _render_one, _pack_by_bytes,
     board_render_root, board_sweep, board_render, board_show, board_close, _home_guard_dirs,
     _guard_home_location, resolve_home_root, _board_entry_of, ACTIVITY_COLUMN_NOTE, BOARD_DOING_MAX,
@@ -163,7 +163,7 @@ from fish_kb import ( # noqa: F401
  _strict_bool, kb_atomic_write, kb_backup, kb_backup_prune, kb_detect_eol,
  kb_detect_text, kb_doctor, kb_log_access, kb_open, kb_read_text, kb_resolve_target,
  kb_rollback, kb_search, kb_sha256_bytes, kb_sha256_file, kb_stats, kb_toc, kb_tree,
- kb_vault_add, kb_vault_get, kb_vault_list, kb_vault_remove, kb_vault_scan,
+ kb_vault_add, kb_vault_get, kb_vault_list, kb_vault_remove, kb_vault_scan, kb_vault_fix_path, kb_vault_availability,
     _kb_free_bytes, _kb_relocate_plan, _relocate_journal, _relocate_state,  # F-P1-4
     kb_vault_init, kb_vault_relocate,  # W2 (2026-11-18) vault init / relocate
  kb_vault_set_default, kb_vault_set_mode, kb_write)

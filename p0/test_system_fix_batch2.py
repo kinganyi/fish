@@ -180,5 +180,215 @@ class ReportTest(_PurgeCase):
         self.assertIn("broken_by_project", rep)
 
 
+class BoardPostFullTest(unittest.TestCase):
+    """B-1：`board_posts.text` 必须存全文，**渲染时**才截断。
+
+    ## 这条判据守的是什么
+
+    旧实现在写入时就截断（`text[:199] + "…"`），而表定义与常量注释都写着
+    「渲染时硬截断」——**两处注释在说谎**。后果是原文永久丢失：
+    czhy--开发-3 读到一条只剩 200 字的 note，作者写的三项内容全没了，
+    而且无处可查。
+
+    ## 变异体（去掉 → 必红）
+
+    · `board_post` 里恢复 `text = text[:199] + "…"` → 判据 1 红
+    · `board_post_rows` 把 `display_text` 去掉 → 判据 2 红
+    """
+
+    def setUp(self):
+        import fish_board
+        self.fb = fish_board
+        self.tmp = Path(tempfile.mkdtemp(prefix="fish-b1-"))
+        self.data = self.tmp / "data"
+        self.data.mkdir(parents=True)
+        self.conn = fish.connect(self.data)
+        self.conn.executescript(fish.SCHEMA)
+        fish.migrate(self.conn)
+        self.board = fish_board.board_ensure(self.conn, scope="project", scope_key="X")
+
+    def tearDown(self):
+        try:
+            self.conn.close()
+        finally:
+            shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _long(self, n=600):
+        return "基线372afade 分支清理结果：" + "很长内容" * (n // 4)
+
+    def test_db_stores_full_text(self):
+        """**库里必须是全文**（判据 1）。
+
+        变异体：把 `text = text[:199] + "…"` 加回 `board_post` → 红。
+        """
+        text = self._long()
+        pid = self.fb.board_post(self.conn, self.board, "C1", "note", text)
+        self.conn.commit()
+        stored = self.conn.execute(
+            "SELECT text FROM board_posts WHERE id=?", (pid,)).fetchone()[0]
+        self.assertEqual(len(stored), len(text),
+                         f"库里只有 {len(stored)} 字符（原文 {len(text)}）——写入时被截了")
+        self.assertFalse(stored.endswith("…"), "库里存的是截断版（以省略号结尾）")
+
+    def test_render_is_truncated(self):
+        """**渲染时截断**（判据 2）。
+
+        变异体：`board_post_rows` 去掉 `display_text` → 红。
+        """
+        text = self._long()
+        self.fb.board_post(self.conn, self.board, "C1", "note", text)
+        self.conn.commit()
+        rows = self.fb.board_post_rows(self.conn, self.board)
+        shown = rows[0][2]
+        self.assertLessEqual(len(shown), self.fb.BOARD_MAX_POST_CHARS,
+                             f"渲染没截断：{len(shown)} 字符")
+        self.assertTrue(shown.endswith("…"), "截断了但没标省略号")
+        self.assertNotEqual(shown, text, "渲染返回了全文（显示层没截）")
+
+    def test_full_reader_returns_original(self):
+        """能取回全文——否则「库里有」和「没有」对用户没区别。"""
+        text = self._long()
+        pid = self.fb.board_post(self.conn, self.board, "C1", "note", text)
+        self.conn.commit()
+        rec = self.fb.board_post_full(self.conn, pid)
+        self.assertEqual(rec["text"], text)
+        self.assertTrue(rec["truncated_for_display"])
+        self.assertEqual(rec["chars"], len(text))
+
+    def test_short_text_unaffected(self):
+        """**反向断言**：短文本不该被动手脚（避免"一律截断"的过度修正）。"""
+        pid = self.fb.board_post(self.conn, self.board, "C1", "note", "短消息")
+        self.conn.commit()
+        stored = self.conn.execute(
+            "SELECT text FROM board_posts WHERE id=?", (pid,)).fetchone()[0]
+        self.assertEqual(stored, "短消息")
+        self.assertEqual(self.fb.board_post_rows(self.conn, self.board)[0][2], "短消息")
+        self.assertFalse(self.fb.board_post_full(self.conn, pid)["truncated_for_display"])
+
+
+class KbVaultAvailabilityTest(unittest.TestCase):
+    """E-1 / E-2：知识库的可用性必须**按磁盘现算**，不能只看 `status` 字段。
+
+    ## 这一组守的是什么
+
+    `kb_vault.status` 是**写一次就永远 active** 的字段。实测 `安逸知识库` 的 path
+    指向 `p0/data/kb/安逸知识库`（目录不存在），而 status 还是 active ——于是：
+
+      · `kb tree` / `kb search` 恒报离线（用户和 czhy--开发-3 都撞到过）；
+      · **612 条 kb 推送候选全是从打不开的库产出的（accepted 0）**。
+
+    ## 变异体（去掉 → 必红）
+
+    · `kb_vault_availability` 改成 `return "ok"`（不看磁盘）→ 判据 1 红
+    · `_kb_push_candidates_index` 去掉 usable 过滤 → 判据 3 红
+    · `kb_vault_fix_path` 去掉 `dst.is_dir()` 检查 → 判据 4 红
+    """
+
+    def setUp(self):
+        import fish_kb_index
+        self.tmp = Path(tempfile.mkdtemp(prefix="fish-e1-"))
+        self.data = self.tmp / "data"
+        self.data.mkdir(parents=True)
+        self.conn = fish.connect(self.data)
+        self.conn.executescript(fish.SCHEMA)
+        fish.migrate(self.conn)
+        fish_kb_index.ensure_kb_index(self.conn)
+        self.missing = self.tmp / "nope"
+        self.conn.execute(
+            "INSERT INTO kb_vault (vault_id, name, path, path_key, mode, status, "
+            "is_default, created_at, updated_at) VALUES ('V1','测试库',?,'v1','ro','active',"
+            "1,'2026-11-21T00:00:00Z','2026-11-21T00:00:00Z')", (str(self.missing),))
+        # ⚠️ 造一条 active 的 kb_index 行：`kb_index_fresh` 要求 `active_rows > 0`，
+        # 否则它会判 fresh=False 直接早退——那样 `_kb_push_candidates_index` 永远
+        # 在 K7 那道闸就返回空，usable 过滤根本没被走到（第一版判据就是这么假绿的）。
+        self.conn.execute(
+            "INSERT INTO kb_index (vault_id, rel_path, mtime, size, content_hash, "
+            "status, indexed_at) VALUES ('V1','a.md',0.0,10,'h1','active',"
+            "'2099-01-01T00:00:00Z')")
+        # ⚠️ 还必须造 `kb_fts` 行：`search_kb` 查的是这张虚表，没有它的话
+        # 命中恒为空——那样"去掉可用性过滤"也不会多出候选，判据就是假绿的。
+        self.conn.execute(
+            "INSERT INTO kb_fts (vault_id, rel_path, title, body_excerpt) "
+            "VALUES ('V1','a.md','测试标题','hello 的内容')")
+        self.conn.commit()
+        self._fts_ready = True
+
+    def tearDown(self):
+        try:
+            self.conn.close()
+        finally:
+            shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _vault(self):
+        import fish_kb
+        return fish_kb.kb_vault_list(self.conn)[0]
+
+    def test_availability_follows_disk_not_status(self):
+        """判据 1：**status 是 active 但目录不存在 → 必须是 missing**。
+
+        变异体：`return "ok"` → 红。
+        """
+        import fish_kb
+        v = self._vault()
+        self.assertEqual(v.get("status"), "active", "前置：status 字段是 active")
+        self.assertFalse(Path(v["path"]).exists(), "前置：目录确实不存在")
+        self.assertEqual(fish_kb.kb_vault_availability(v), "missing",
+                         "只看 status 不看磁盘 —— 这就是 612 条零采纳推送的根因")
+
+    def test_availability_ok_when_dir_exists(self):
+        """反向断言：目录真在时必须是 ok（不能一律报 missing）。"""
+        import fish_kb
+        real = self.tmp / "real"
+        real.mkdir()
+        self.conn.execute("UPDATE kb_vault SET path=?, path_key=? WHERE vault_id='V1'",
+                          (str(real), str(real).lower()))
+        self.conn.commit()
+        self.assertEqual(fish_kb.kb_vault_availability(self._vault()), "ok")
+
+    def test_push_skips_entries_from_missing_vault(self):
+        """判据 3：vault 打不开时**不产候选**。
+
+        变异体：去掉 usable 过滤 → 红。
+        """
+        import fish_push
+        out = fish_push._kb_push_candidates_index(
+            self.conn, "hello", project=None, exclude=(), limit=2, now=None)
+        self.assertEqual(out, [],
+                         f"目录不存在却产出了 {len(out)} 条候选——推的是打不开的东西")
+
+    def test_fix_path_refuses_nonexistent_target(self):
+        """判据 4：改登记时**新路径必须真的存在**，否则只是从一个坏的换成另一个。
+
+        变异体：去掉 `if not dst.is_dir(): raise` → 红。
+        """
+        import fish_kb
+        with self.assertRaises(fish_kb.KBError):
+            fish_kb.kb_vault_fix_path(
+                self.conn, None, str(self.tmp / "also-nope"), dry_run=False)
+
+    def test_fix_path_updates_and_is_auditable(self):
+        """修正必须改登记 **且** 进事件流（半年后能查"为什么变了"）。"""
+        import fish_kb
+        real = self.tmp / "real"
+        real.mkdir()
+        before = self.conn.execute(
+            "SELECT count(*) FROM events WHERE type='kb.vault_path_fixed'").fetchone()[0]
+        fish_kb.kb_vault_fix_path(self.conn, None, str(real), dry_run=False,
+                                  note="测试")
+        after = self.conn.execute(
+            "SELECT count(*) FROM events WHERE type='kb.vault_path_fixed'").fetchone()[0]
+        self.assertEqual(after, before + 1, "改登记没有留事件")
+        self.assertEqual(fish_kb.kb_vault_availability(self._vault()), "ok")
+
+    def test_fix_path_dry_run_writes_nothing(self):
+        """默认 dry-run：改登记会改变所有 kb 检索的落点，不能一句话就改。"""
+        import fish_kb
+        real = self.tmp / "real"
+        real.mkdir()
+        r = fish_kb.kb_vault_fix_path(self.conn, None, str(real), dry_run=True)
+        self.assertTrue(r["dry_run"])
+        self.assertEqual(self._vault()["path"], str(self.missing), "dry-run 改了库")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -93,8 +93,11 @@ BASELINE_TOOL_PROPS = {
     # 想"收工下板"的人做不到。补上后 left 才从词汇变成动作。
     # 2026-10-25 再加 assume_surface（EVAL-261025-16）：单人时 simulate 对比 0 人，
     # 验证不了撞车检测；这个参数让 AI 假设一个占用者，走同一套 surface_hit。
+    # 2026-11-21（系统级修复 B-1）：加 post_id。看板渲染把动态截到 200 字，
+    # 而库内存全文——没有取全文的入口就等于"知道有却拿不到"，和截断没区别。
+    # action 枚举同步加了 post_full（见 mcp_server 的 board schema）。
     "board": {"action", "project", "doing", "surface", "kind", "text",
-              "status", "assume_surface"},
+              "status", "assume_surface", "post_id"},
     # 2026-10-26（T05 / B3）：知识库读 / 写两个工具。字段与架构设计 §3.3 逐字一致，
     # **都不含 token**（`_attach_token` 统一补），所以这里列的是业务字段。
     # 第二轮（R15）：`kb` 增了可选 `allow_sensitive`（敏感文件正文的二次授权）。

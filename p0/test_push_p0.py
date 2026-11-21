@@ -732,8 +732,10 @@ CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL,
             "healthcheck": set(),
             # 2026-10-25 加（用户批准的工具数变更）：MCP 面唯一的签发口。
             "session_start": {"citizen", "display_name", "session_name", "project", "kind"},
+            # 2026-11-21（系统级修复 B-1）：加 post_id（取某条动态全文；
+            # 看板渲染截断 200 字，库内存全文）。
             "board": {"action", "project", "doing", "surface", "kind", "text",
-                      "status", "assume_surface"},
+                      "status", "assume_surface", "post_id"},
             # 2026-10-26（T05 / B3）：字段与架构设计 §3.3 逐字一致；token 由 `_attach_token` 补。
             # 第二轮（R15）：`kb` 增了可选 `allow_sensitive`（敏感文件正文的二次授权）。
             # 第四轮（S6 / S8）：`kb_write` 也增了可选 `allow_sensitive`——写面同样要求

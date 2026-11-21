@@ -465,15 +465,19 @@ TOOLS = [
                        "　· action=checkin：登记你自己（doing 必填，surface 强烈建议："
                        "它是防撞车的唯一依据）\n"
                        "　· action=post：往今日动态写一条（kind=progress/done/note）——"
-                       "**做完用 done 标掉**，否则看板只剩在场表，丢掉\"动到哪了\"那一半\n\n"
+                       "**做完用 done 标掉**，否则看板只剩在场表，丢掉\"动到哪了\"那一半。"
+                       "**长文本照写**：库内存全文，看板渲染时才截到 200 字\n"
+                       "　· action=post_full：取某条动态的**全文**（post_id 必填）——"
+                       "看板上看到的是截断版，用这个拿原话\n\n"
                        "**未登记 = 未发生**：看板上没有你的行，别人就无法判断会不会跟你撞车。"
                        "开工前先 checkin，是这个系统的协作协议，不是礼貌。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "action": {"type": "string",
-                           "enum": ["show", "checkin", "post", "simulate"],
-                           "description": "show 看板 / checkin 登记自己 / post 写动态（默认 show）"},
+                           "enum": ["show", "checkin", "post", "post_full", "simulate"],
+                           "description": "show 看板 / checkin 登记自己 / post 写动态 / "
+                                          "post_full 取某条全文（默认 show）"},
                 "project": {"type": "string",
                             "description": "看哪个项目的板（不传则用根看板）"},
                 "doing": {"type": "string",
@@ -484,7 +488,12 @@ TOOLS = [
                                            "simulate 时用它做假设（不写库）"},
                 "kind": {"type": "string", "enum": ["progress", "done", "note"],
                          "description": "post 用：进度 / 做完了 / 备注"},
-                "text": {"type": "string", "description": "post 必填：动态内容（≤200 字）"},
+                "text": {"type": "string",
+                         "description": "post 必填：动态内容。**写多长都行**——"
+                                        "库内存全文，看板渲染时才截到 200 字（B-1，2026-11-21）"},
+                "post_id": {"type": "integer",
+                            "description": "post_full 必填：要取全文的那条动态 id"
+                                           "（看板渲染里每条都带 id）"},
                 # 2026-10-25（`EVAL-261025-14`）：`status='left'` 在 DDL 里写着，
                 # 但 CLI 与 MCP 都没有入口——**想收工的人下不了板**，行只能自然变 idle。
                 # 补上之后，"做完了"才有一个正式动作。
@@ -1879,6 +1888,22 @@ class FishServer:
             return (f"已记录 {kind}：{board['path']}（{size} B" 
                     + ("，已按字节切分" if split else "") + "）\n"
                     f"　内容：{text[:80]}" + ("…" if len(text) > 80 else ""))
+
+        if action == "post_full":
+            # 2026-11-21（B-1）：看板渲染把动态截到 200 字，但**库里是全文**。
+            # 没有这个动作就等于"知道有全文却取不到"，和截断没区别。
+            # 不要凭证：读是只读的（与 show 同理），不该被"先签才能看"绑架。
+            pid = a.get("post_id")
+            if pid is None:
+                raise ValueError("post_full 需要 post_id（看板渲染里每条动态都带 id）")
+            rec = fish.board_post_full(self.conn, int(pid))
+            if rec is None:
+                raise ValueError(f"没有 id={pid} 的动态")
+            hint = ("（看板上是截断版，这里是全文）" if rec["truncated_for_display"]
+                    else "（未超过显示上限）")
+            return (f"动态 #{rec['id']}（{rec['kind']}，{rec['citizen_id']}，"
+                    f"{rec['created_at']}）\n"
+                    f"　{rec['chars']} 字符{hint}\n\n{rec['text']}\n")
 
         if action == "simulate":
             # 2026-10-25（`EVAL-261025-16` 建议 2）：让撞车检测**可自助验证**。

@@ -142,14 +142,30 @@ class BoardTest(unittest.TestCase):
 
     # ------------------------------------------------------------------ B6
     def test_B6_post_truncated(self):
-        """单条动态 ≤200 字（超长硬截断并标省略号）。"""
+        """单条动态**渲染时** ≤200 字（超长标省略号）。
+
+        ## 2026-11-21 改写（系统级修复 B-1）
+
+        原版断言的是「**库里** ≤200 字」——那是旧实现（写入时截断）的行为，
+        也正是**原文永久丢失**的根因（czhy--开发-3 读到一条只剩 200 字的 note，
+        作者写的三项内容全没了且无处可查）。
+
+        现在库里存全文、**渲染时**才截断。所以这条判据要验的仍是"超长不许
+        无损进渲染面"这个原始意图，只是验证层从"库里"换到"渲染结果"。
+        它和 `test_system_fix_batch2.BoardPostFullTest` 是互补的：
+        那边验「库里是全文」，这边验「渲染面是截断的」。
+        """
         board = fish.board_ensure(self.conn, "project", "P1")
         long_text = "长" * 500
         fish.board_post(self.conn, board, CID_A, "note", long_text)
-        row = self.conn.execute("SELECT text FROM board_posts").fetchone()
-        self.assertLessEqual(len(row[0]), fish.BOARD_MAX_POST_CHARS,
-                             f"动态未被截断：{len(row[0])} 字")
-        self.assertTrue(row[0].endswith("…"), "截断应标省略号")
+
+        stored = self.conn.execute("SELECT text FROM board_posts").fetchone()[0]
+        self.assertEqual(len(stored), 500, "库里应当存全文（B-1）")
+
+        shown = fish.board_post_rows(self.conn, board)[0][2]
+        self.assertLessEqual(len(shown), fish.BOARD_MAX_POST_CHARS,
+                             f"渲染面未被截断：{len(shown)} 字")
+        self.assertTrue(shown.endswith("…"), "截断应标省略号")
 
     # ------------------------------------------------------------------ B5/B9
     def test_B5_capacity_split(self):
