@@ -107,7 +107,6 @@ def _exc_text(exc) -> str:
 _CJK = re.compile(r"[\u4e00-\u9fff]+")
 _WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-_.]*")
 
-
 def index_tokens(text: str) -> list:
     """把文本切成可入 FTS 的 token（ADR-005 的切分规则）。
 
@@ -142,12 +141,10 @@ def fts_match_expr(query: str):
         return None
     return " AND ".join('"' + t.replace('"', '""') + '"' for t in toks)
 
-
 # F-P2-1：注入标记原来定义在 `fish_activity`（上层），而 `clean_prompt` 在本模块
 # （基层）要用它——于是有个函数内 `import fish_activity`。那是**隐藏的上行依赖**：
 # 写进代码不留痕，J2 也看不见。下沉后方向是 `fish_activity → fish_common`，单向。
 INJECTION_MARKERS = ("fsh_", "【当前状态", "[fish]", "登记身份")
-
 
 # ============================================================
 # 基础层下沉（T02，2026-10-27）：配置/时间/衰减/别名/FTS/看板辅助
@@ -180,7 +177,6 @@ def warn_derived(conn, what, exc=None) -> None:
         sys.stderr.flush()
     except Exception:      # noqa: BLE001 —— 警告本身绝不能炸
         pass
-
 
 CONFIG_DEFAULTS = {
     # F-P1-3：附件大小上限（MB）。**必须是 (默认, 类型, 可选值) 三元组**——
@@ -590,7 +586,12 @@ def _index_one_fts(conn, code, title, tags, body, *, commit=True):
         conn.commit()
 
 def reindex_fts(conn, root) -> int:
-    """全量重建全文索引；返回索引条数。可从 code_index + 正文文件完整重建。"""
+    """全量重建全文索引；返回索引条数。可从 code_index + 正文文件完整重建。
+
+    索引**所有状态**的行。2026-11-21 试过只索引 active，但 `test_status_filter`
+    的判据 F 需要「作废条目在 FTS 候选池里」来见证「结果里没有它是 status 过滤的
+    功劳」——少那行会让见证失效。清理靠 status 过滤，不靠索引。
+    """
     root = Path(root)
     conn.execute("DELETE FROM memory_fts")
     n = 0
@@ -752,7 +753,6 @@ def clean_prompt(text, *, max_len=4000) -> str:
 def board_period(period_key=None) -> str:
     """看板的周期键：按日（`YYYYMMDD`），与 `daily` 的切分口径一致。"""
     return period_key or local_date()
-
 
 # ============================================================
 # 从 fish.py 下沉（2026-11-11，错题本 E-11 拆包）

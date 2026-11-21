@@ -214,6 +214,48 @@ def main():
                         help="用这个凭证解析身份（可替代 --citizen；显式 --citizen 优先）")
         return bp
 
+    def _cmd_purge_broken(a):
+        """`fish purge-broken [--apply]`：把正文已丢失的记忆正式作废（系统级修复 A-1）。
+
+        ## 为什么这个包装在本模块而不在 `fish.py`
+
+        `fish.py` 是 10600 行的满窗口（J4 只许降不许抬），而清理是**独立领域**
+        （不是记忆编排、不是身份、不是 git）。往满窗口里硬挤会重演
+        「撞窗 → 抬窗 → 再撞」的循环，那正是外部审查批评过的做法。
+
+        ## 为什么库函数在 `fish_purge` 而入口在这里
+
+        `fish_purge` 受 J2 约束**不许 import fish**（它是库，判据要能在临时库里单独跑）。
+        而这里要的是 `connect` / `SCHEMA` 两个装配件——所以由 CLI 层提供。
+        方向是 `fish_cli → fish` + `fish_purge`，单向。
+
+        ## 为什么 `args.root` 就是 data 目录
+
+        `DEFAULT_ROOT` = `<p0>/data`。第一版写成 `Path(args.root) / "data"`，
+        拼出 `p0/data/data`，于是 670 条全部判成断链（本应 318）。**同一个错我在
+        调查报告里也犯过**（把 root 当成 p0 去算断链，同样得 669）——所以这里写死注释。
+        """
+        from fish_purge import purge_broken
+
+        conn = _f.connect(Path(a.root))
+        conn.executescript(_f.SCHEMA)
+        res = purge_broken(conn, Path(a.root), dry_run=not a.apply)
+        if res["dry_run"]:
+            print(f"断链 {res['count']} 条（dry-run，未写入任何东西）")
+            if res["by_date"]:
+                print("　按日期（连续多日 100% 断链 = 迁移/批量事故；零星 = 偶发删改）：")
+                for day, n in res["by_date"].items():
+                    print(f"　　{day}  {n}")
+            if res["by_project"]:
+                print("　按项目：")
+                for pj, n in res["by_project"].items():
+                    print(f"　　{pj}  {n}")
+            if res["count"]:
+                print("　加 `--apply` 才会真的作废（复用 memory.retired；可追溯、rebuild 不复活）")
+        else:
+            print(f"已作废 {res['purged']} 条（FTS 清理 {res['fts_removed']} 行）")
+        conn.close()
+
     # show：读看板（默认动作）
     bsh = _board_common(bsub.add_parser("show", help="读看板（不渲染）"))
     bsh.add_argument("--json", dest="as_json", action="store_true",
@@ -767,6 +809,14 @@ def main():
     # 让那句提示第一次真的可执行。
     p.add_argument("--code", help="只看与这条记忆相关的事件（按 subject.id 匹配）")
     p.set_defaults(func=_f.cmd_events)
+
+    # ---- 记忆作废（2026-11-21 · 系统级修复 A-1）----
+    # 实现放在 `fish_purge`（新独立领域），不放 `fish.py`——后者是 10600 行的满窗口，
+    # 而清理不是记忆编排的一部分。默认 dry-run：作废不可逆（recall 从此不返回）。
+    p = sub.add_parser("purge-broken",
+                       help="把正文已丢失的记忆正式作废（复用 memory.retired，可追溯）")
+    p.add_argument("--apply", action="store_true", help="真的写（缺省只 dry-run）")
+    p.set_defaults(func=_cmd_purge_broken)
 
     # ---- 主人画像（R1-1/R1-2/R1-4/R1-5/R1-6，2026-11-11）----
     # 人通道：set/remove/accept/reject/render/sync/ask/defer。

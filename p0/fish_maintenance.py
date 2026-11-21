@@ -554,6 +554,18 @@ def _task_fts_verify(conn, root, deps, now_dt):
 
     为什么不"每次都重建"：重建是 O(全库) 且要读全部正文文件；行数相等是**便宜的
     必要条件**，用它当闸门能把"每天一次全量重建"降到"只在真的对不上时"。
+
+    ## 一个刻意的取舍（2026-11-21 · A-1）
+
+    `purge_broken` 会删掉作废条目的 FTS 行，于是行数变成 `总数 - 已purge`，
+    下一次本任务判定"不等"→ 全量重建 → 那些行又回来。**这是可接受的**：
+    重建回来的是**索引行**，不是可检索的内容（`search_memories` 下推过滤带
+    `status='active'`，作废条目查不出来）。清理的真正目标"recall 不返回"由
+    status 过滤保证，不依赖 FTS 里有没有那一行。
+
+    试过改成"只索引 active"来让清理更彻底，但 `test_status_filter` 的判据 F
+    需要「作废条目在 FTS 候选池里」才能见证「结果里没有它」——那个见证是
+    status 过滤这道防线的独立证明，比"索引少几行"重要，所以回退了。
     """
     code_rows = _count(conn, "code_index")
     missing = False
