@@ -332,7 +332,7 @@ def probe_shallow(root):
 
 
 # 一次 git 调用取全部需要的提交字段（\x00 分隔，避免 subject 里有空格干扰）
-_COMMIT_FORMAT = "%H%x00%at%x00%ct%x00%ae%x00%an%x00%s%x00%P%x00%T"
+_COMMIT_FORMAT = "%H%x00%at%x00%ct%x00%ae%x00%an%x00%s%x00%P%x00%T%x00%b"
 
 
 def read_commit(root, rev="HEAD"):
@@ -345,6 +345,9 @@ def read_commit(root, rev="HEAD"):
     · `%P` —— 父提交列表，`len(parents) > 1` 即 merge。
     · `%T` —— tree SHA（`content_root`）。**抗 SHA 失效**：rebase/force-push 会改
       commit SHA 但不改 tree 内容，存下它才能在 SHA 变了之后回答「这段内容还在不在」。
+    · `%b` —— 提交正文（2026-11-21 加）。**唯一用途**：从 message 里认出被提到的
+      记忆编码，连成 `git_link` 的 `discussed_in` 关联（见 `fish_git_link`）。
+      不存库、不入投影——它只在采集那一刻被读一次，用完就丢。
     """
     ok, out, _ = _run_git(["log", "-1", "--format=" + _COMMIT_FORMAT, rev], cwd=root)
     if not ok:
@@ -353,6 +356,7 @@ def read_commit(root, rev="HEAD"):
     if len(parts) < 8:
         return None
     sha, at, ct, ae, an, subj, parents, tree = parts[:8]
+    body = parts[8] if len(parts) > 8 else ""
     if not sha.strip():
         return None
     plist = parents.split()
@@ -364,6 +368,7 @@ def read_commit(root, rev="HEAD"):
         "is_merge": 1 if len(plist) > 1 else 0,
         "content_root": tree.strip() or None,
         "parents": plist,
+        "body": body or "",
     }
 
 

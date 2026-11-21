@@ -32,6 +32,7 @@
 import sqlite3
 
 import fish_git
+import fish_git_link
 import fish_git_store
 import fish_surface
 from fish_common import now_utc, warn_ignored
@@ -130,6 +131,21 @@ def collect_git(conn, *, cwd, session_key, tool_name, tool_input,
                     res["commit"] = fish_git_store.record_commit(
                         conn, root=root, repo_id=rid, session_key=session_key)
                     say("commit collect: %r" % (res["commit"],))
+                    # ── ③ 提交 message 提到记忆编码 → `discussed_in` 关联 ──────
+                    #
+                    # 2026-11-21（用户裁定「接上」）：`fish_git_link` 原来有实现、
+                    # 有 21 条判据、生产侧 0 个调用点——`git_link` 表永远 0 行。
+                    # **判据绿着但能力不存在**，比 bug 更隐蔽。
+                    #
+                    # 只接「message 提到编码」这一种，因为它是 rel 四种关系里
+                    # **唯一零猜测**的（implemented_by / produced / revised_in
+                    # 都要语义判断）。详见 `fish_git_link.link_commit_mentions`。
+                    c = res["commit"]
+                    if c and c.get("recorded"):
+                        res["linked"] = fish_git_link.link_commit_mentions(
+                            conn, sha=c.get("sha"),
+                            text="%s\n%s" % (c.get("subject") or "", c.get("body") or ""))
+                        say("commit link: %r" % (res["linked"],))
                 else:
                     say("commit collect: observe 没拿到 repo_id（%r）" % (obs,))
 

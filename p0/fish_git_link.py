@@ -97,3 +97,58 @@ def links_of(conn, *, src_kind=None, src_id=None, dst_kind=None, dst_id=None,
     return [dict(zip(("id", "src_kind", "src_id", "dst_kind", "dst_id", "rel",
                       "source", "confidence", "evidence", "content_hash",
                       "created_at", "removed_at"), r)) for r in conn.execute(sql, params)]
+
+
+def _drop_shadowed(codes):
+    """去掉被更长编码包含的那些（`A-261121-01` 被 `A-261121-011` 遮蔽）。
+
+    为什么需要：编码是 `PREFIX-YYMMDD-NN`，序号可以到 4 位（`-261022-1001`）。
+    正文里出现 `A-261121-011` 时，子串匹配也会命中 `A-261121-01`——
+    **那是这条编码的前缀，不是同一个对象。** 不处理就会给错的记忆挂上关联。
+    """
+    out = []
+    for code in sorted(codes, key=len, reverse=True):
+        if not any(code != seen and code in seen for seen in out):
+            out.append(code)
+    return out
+
+
+def link_commit_mentions(conn, *, sha, text, now=None):
+    """把提交 message 里**提到的记忆编码**连成 `discussed_in` 关联。
+
+    ## 为什么这条能自动建立，别的不能
+
+    `rel` 的四种关系里，`implemented_by` / `produced` / `revised_in` 都需要
+    **语义判断**（这条记忆描述的工作是不是被这个提交做完了？），机械推断必然错。
+    只有 `discussed_in` 可以零猜测：**提交正文里写没写这个编码，是一个确定的事实。**
+
+    ## 为什么不用正则去切文本
+
+    `fish.py` 的 `CODE_MENTION_RE` 是为「正文里找像编码的串」设计的粗筛（中文没有
+    空格，它还得靠 `code_mentions_in()` 回查裁决）。这里反过来了：**拿库里真实
+    存在的编码去正文里做子串匹配**——编码是唯一标识符，匹配就是匹配，不需要裁决。
+
+    两个好处：① 不会把 `见企业智能-261022-01` 的前半截汉字并进前缀；
+    ② 不需要在本模块复制一份正则（那样两份口径迟早漂）。
+
+    成本：库里 300 余条编码 × 一次 `in` 判断，毫秒级。
+
+    ## 返回
+
+    `{"linked": [code...], "checked": 编码总数}`——`linked` 是**本次新建或恢复**的
+    （已存在的不重复计入，因为 `link_create` 幂等）。
+    """
+    stamp = now or fish_common.now_utc()
+    if not sha or not text:
+        return {"linked": [], "checked": 0}
+    # **不过滤 status**（2026-11-21 判据抓到的）：`withdrawn` 的记忆也要能挂关联——
+    # 「提交提到这个编码」与「这条记忆此刻是不是作废了」是两件无关的事。
+    # 尤其相反的场景才常见：提交正是在**清理/修复**一条已作废的记忆。
+    rows = conn.execute("SELECT code FROM code_index").fetchall()
+    codes = [r[0] for r in rows if r[0]]
+    hits = _drop_shadowed([c for c in codes if c in text])
+    for code in hits:
+        link_create(conn, src_kind="memory", src_id=code, dst_kind="commit",
+                    dst_id=sha, rel="discussed_in", source="inferred",
+                    confidence=1.0, evidence="commit message 提到该编码", now=stamp)
+    return {"linked": hits, "checked": len(codes)}

@@ -201,7 +201,10 @@ def record_commit(conn, *, root, repo_id, branch=None, now=None, session_key=Non
          _iso(info["committed_at"]) or stamp,
          info["author_email"], info["author_name"], info["subject"],
          info["is_merge"], branch, info["content_root"], event_id))
-    return {"sha": sha, "recorded": True, "event_id": event_id}
+    return {"sha": sha, "recorded": True, "event_id": event_id,
+            # 2026-11-21：把正文透给调用方（`fish_git_hook` 要用它认编码 → `git_link`）。
+            # 不存库：正文只在采集那一刻有用，存下来是纯冗余。
+            "subject": info["subject"], "body": info.get("body") or ""}
 
 
 def rebuild_commit_projection(conn):
