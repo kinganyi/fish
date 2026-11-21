@@ -1,6 +1,49 @@
 # dsh-fish
 
-> ## ⚠️ 2026-11-09 方向变更 + 减重状态（**先读这段，下面正文有部分已过时**）
+## 2026-11-21 · 维护已冻结
+
+> 用户裁定：「**先不维护了**」。
+>
+> 本目录后续**不再更新**（代码、spec、判据都停）。留着是因为它仍然能启动、
+> 只读面仍然可用；不是因为还要继续开发它。
+
+### 这意味着什么
+
+**`check-spec` 当前是 27/31，这 4 条红是预期内的，不是 bug：**
+
+```
+gate.fingerprint_verified   库指纹 != spec 里的指纹（库已演进）
+gate.business_tables        库 36 张表 vs spec 记 24 张
+spec.tools_match_production  spec 缺 profile_show/profile_propose/git_repo_status/git_repo_commits
+spec.cli_map_matches_help    spec 缺 citizen-restore/citizen-set-kind/dataplane/profile/purge-broken/token
+```
+
+**根因不是「忘了重跑生成器」，是生成器坏了**：`gen:spec` 依赖
+`scripts/probe/dump-cli.py`，而那个脚本**既不在探针目录里（9 个文件都没有它）、
+也不在 git 里**——要么从未入库，要么删了就没法恢复。
+
+所以 spec 的过时**只能靠重写生成逻辑来修**，不是「恢复一下就能跑」。
+既然已冻结，这条就留着，别再试着 `pnpm run gen:spec`（会失败在 gen-spec.mjs:445）。
+
+**`check-contract` 仍然是 PASS 的**（EXIT 0，插件可启用）——那才是「能不能跑」的判据。
+
+### 冻结前的最后一次修正（2026-11-21）
+
+- **注释与行为脱钩四处已修**：`core/contract.ts` 头部原写「fail closed」而实际是 warn
+  （文件第 235 行自己都写着「fail closed -> warn」）；`index.ts` 同；`domain/kb.ts`
+  五处「未建索引」改成「按需扫描，非索引检索」；`domain/health.ts` 去掉会漂的行号。
+- **40 处 `fish.py:NNNN` 行号引用改为只留函数名**。核验结果：能对应到函数的 17 处
+  **无一例外全部已漂**（0 处对得上），最大偏差 4429 行。行号必然漂，函数名不会。
+
+另：`scripts/probe/`（9 个）与 `test/conformance/`（11 个）在此之前
+**0 个已跟踪文件**（减重清单声称删了，实际磁盘上还在）。已入库——不为恢复开发，
+只为让它们**可追溯**，不再处于「git status 看不见、`git clean -fd` 就没了」的状态。
+
+---
+
+## 历史：2026-11-09 方向变更 + 减重状态（以下部分已过时）
+
+
 >
 > 用户拍板：「后续不准备在 DSH 进行全量实现了，DSH 侧的插件作为**只读和本体能力的补充**就行」+「DSH 更新频率高、破坏性大，插件侧要轻」。
 >
