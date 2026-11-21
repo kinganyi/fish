@@ -71,6 +71,10 @@ FISH_PURGE = P0 / "fish_purge.py"
 # 它**不 import fish_activity**（那会成环：fish_activity → fish_git_hook → fish_activity），
 # 所以判断函数由调用方传参。
 FISH_GIT_HOOK = P0 / "fish_git_hook.py"
+# 2026-11-21（F-3）：身份诊断从 fish.py 搬出（`whoami all=true` 的取数与渲染）。
+# 它**零内部依赖**（只 stdlib）：原来要 `load_citizen`，搬出后改成由调用方传
+# citizen dict——没必要为拿一个记录制造 `identity_diag → fish` 的上行依赖。
+FISH_IDENTITY_DIAG = P0 / "fish_identity_diag.py"
 
 spec = importlib.util.spec_from_file_location("fish", str(FISH))
 fish = importlib.util.module_from_spec(spec)
@@ -256,6 +260,9 @@ FISH_PURGE_LINES_MAX = 380
 # git 采集（hook 侧）：当前 160 行 → 上界 320
 FISH_GIT_HOOK_LINES_MIN = 90
 FISH_GIT_HOOK_LINES_MAX = 320
+# 身份诊断：当前 250 行 → 上界 420
+FISH_IDENTITY_DIAG_LINES_MIN = 150
+FISH_IDENTITY_DIAG_LINES_MAX = 420
 
 
 def _read(path: Path) -> str:
@@ -502,7 +509,15 @@ class SplitDependencyTest(unittest.TestCase):
                                 (FISH_GIT_HOOK, {"fish", "fish_kb", "fish_push", "fish_trust",
                                                  "fish_rebuild", "fish_profile",
                                                  "fish_activity", "fish_board",
-                                                 "fish_cli", "mcp_server"})):
+                                                 "fish_cli", "mcp_server"}),
+                                # 身份诊断：**零内部依赖**（只 stdlib）。它不该 import
+                                # 任何 fish_* —— 那是它"能单独测、不带上行依赖"的前提。
+                                (FISH_IDENTITY_DIAG, {"fish", "fish_kb", "fish_push",
+                                                      "fish_trust", "fish_rebuild",
+                                                      "fish_profile", "fish_activity",
+                                                      "fish_board", "fish_common",
+                                                      "fish_schema", "fish_db",
+                                                      "fish_cli", "mcp_server"})):
             mods = _imported_modules(ast.parse(_read(path)))
             bad = sorted(m for m in mods if m in forbidden)
             self.assertEqual(bad, [], f"{path.name} 反向依赖了 {bad}")
@@ -810,7 +825,9 @@ class SplitSizeTest(unittest.TestCase):
                 ("fish_git_store.py", FISH_GIT_STORE_LINES_MIN, FISH_GIT_STORE_LINES_MAX),
                 ("fish_git_link.py", FISH_GIT_LINK_LINES_MIN, FISH_GIT_LINK_LINES_MAX),
                 ("fish_purge.py", FISH_PURGE_LINES_MIN, FISH_PURGE_LINES_MAX),
-                ("fish_git_hook.py", FISH_GIT_HOOK_LINES_MIN, FISH_GIT_HOOK_LINES_MAX)):
+                ("fish_git_hook.py", FISH_GIT_HOOK_LINES_MIN, FISH_GIT_HOOK_LINES_MAX),
+                ("fish_identity_diag.py", FISH_IDENTITY_DIAG_LINES_MIN,
+                 FISH_IDENTITY_DIAG_LINES_MAX)):
             count = len(_read(P0 / module).split("\n"))
             self.assertGreaterEqual(count, low, f"{module} 只有 {count} 行：搬漏了")
             self.assertLessEqual(count, high, f"{module} 有 {count} 行：长回去了")

@@ -118,7 +118,7 @@ BASELINE_TOOL_PROPS = {
 # 方案 §6 明确「不加写仓库的工具」——所以这两个只能读已采下来的快照，
 # 不会去跑 git、更不会改仓库。用户已授权这次名单扩充。
 "git_repo_status": {"path", "repo_id"},
-"git_repo_commits": {"repo_id", "limit"},
+"git_repo_commits": {"path", "repo_id", "limit"},  # 2026-11-21：补 path（与兄弟 git_repo_status 对齐）
 }
 
 # 进程态身份的名字——判据 H 的扫描目标（出现即红，注释不算：只看语法树里的属性访问）。

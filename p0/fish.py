@@ -1356,34 +1356,22 @@ def add_link(conn, src, dst, rel, source="explicit", weight=1.0, evidence=None,
     return cur.rowcount > 0
 
 
-# 正文里「像编码」的串（13 §2.3 路 1 第 3 步）。
-# 为什么不能只认 `[A-Z]{2,8}`：库里真实存在中文前缀（企业智能 / 言纹 / 常用会话，
-# 见 07 D-14）。只认大写字母，那些记忆永远建不出「正文提及」边。
-# 中文没有空格，所以这里只做**粗筛**——`见企业智能-261022-01` 前半截汉字会被并进前缀，
-# 真伪交给 code_mentions_in() 用库里真实编码集合裁决。
+# 正文里「像编码」的串（13 §2.3 路 1 第 3 步）。三次迭代后的口径，每条都是实测踩出来的：
+#   · **不能只认 `[A-Z]{2,8}`**：库里有中文前缀（企业智能 / 言纹 / 常用会话，07 D-14），
+#     只认大写字母那些记忆永远建不出「正文提及」边；
+#   · **前缀字符集含数字与下划线**（2026-10-25 T2）：旧口径让 `A1` / `PROJ_2` / `3D`
+#     这类前缀**永远**建不出边——recall 查得到、正文里写着编码却连不上，静默假阴性；
+#   · **右锚定到任意非空白字符**（2026-10-25 R2，研判见 `33-编码方案研究与研判`）：
+#     `anyi-studio` 里的 `-` 正是分隔符，旧口径对它直接返回 None（16 组用例实测）。
+#     右边 `<6位日期>-<2~4位序号>` 是固定格式，天然是锚点——「取满足该后缀的最右一段，
+#     左边剩下的全是前缀」，与 semver 从右解析 prerelease 同构（204 条既有编码逐条一致）。
 #
-# 2026-10-25 放宽（T2）：前缀字符集补上**数字与下划线**。
-#   旧口径 `[A-Za-z\u4e00-\u9fff]{2,20}` 让 `A1` / `PROJ_2` / `3D` 这类前缀**永远**建不出
-#   「正文提及」边——recall 查得到这条记忆，正文里写着它的编码却连不上，是静默的假阴性。
-#   为什么敢放宽：本正则只负责粗筛（见上），真伪由 code_mentions_in() 拿库里真实编码集合
-#   裁决；`tails()` 还会剥掉左侧误并进来的字符。误报的代价是几次空 IN 查询，漏报的代价是
-#   一条永久的断链。
-#   负向前瞻**保持原样**（不含中文）：把中文也挡掉会让 `见企业智能-…` 这类紧贴汉字的引用
-#   全部失配，那正是本正则存在的理由。
+# 中文没有空格，所以这里只做**粗筛**，真伪交给 `code_mentions_in()` 用库里真实编码集合
+# 裁决（`tails()` 还会剥掉左侧误并进来的字符）。**误报的代价是几次空 IN 查询，
+# 漏报的代价是一条永久的断链**——这就是每次都选择放宽的理由。
 #
-# 2026-10-25 改为「右锚定」（R2，研判见 `33-编码方案研究与研判`）：
-#   前缀从"写死的字符集"放开到**任意非空白字符**——因为 `anyi-studio` 里的 `-` 正是
-#   编码的分隔符，旧口径对 `anyi-studio-261022-01` 直接返回 None（16 组用例实测）。
-#   为什么这样仍无歧义：右边 `<6位日期>-<2~4位序号>` 是固定格式，天然是锚点；
-#   解析规则是「取满足 -\d{6}-\d{2,4}$ 的**最右**一段，左边剩下的全是前缀」。
-#   与 semver `1.2.3-alpha.1`（从右解析 prerelease，core 自由）同构。
-#   向后兼容：204 条既有编码的解析结果逐条与改动前一致（判据 E2 钉住）。
-#   仍不支持：空格（`[^\s]` 排除）与 Windows 非法字符 `<>:"/\|?*`——编码要当文件夹名。
-#
-# ⚠️ 必须是**非贪婪** `[^\s]+?`（2026-10-25 实测踩到）：
-#   贪婪版在「先看 PROJA-261025-01，再看企业智能-261025-01」里会一路吃到句尾，
-#   把第一个编码整个吞掉（因为中文逗号不是空白字符）——回归判据 M3 当场红。
-#   非贪婪版会把最短的「能满足右侧锚点」的片段作为前缀，两个编码分别命中。
+# ⚠️ 必须是**非贪婪** `[^\s]+?`：贪婪版在「先看 PROJA-261025-01，再看企业智能-261025-01」
+# 里会一路吃到句尾（中文逗号不是空白），把第一个编码整个吞掉——回归判据 M3 当场红。
 CODE_MENTION_RE = re.compile(
     r"(?<![0-9A-Za-z_\u4e00-\u9fff])([^\s]+?)-(\d{6})-(\d{2,4})(?!\d)")
 
@@ -2409,12 +2397,23 @@ def search_memories(conn, *, query=None, code=None, project=None, tags=None,
             (f"%{q}%", limit))], "编码")
         expr = fts_match_expr(q)
         if expr:
-            if scope in ("all", "title"):
-                add([r[0] for r in conn.execute(
-                    _fts_sql, (f"title_idx:({expr})", *_fparams, limit))], "标题")
-            if scope in ("all", "body"):
-                add([r[0] for r in conn.execute(
-                    _fts_sql, (f"body_idx:({expr})", *_fparams, limit))], "正文")
+            # F-2（2026-11-21）：**精确优先，但绝不空手而归**。中文按 bigram 切词会产生
+            # 跨词冗余 token（`积分账本 漂移` → `"积分" AND "分账" AND "账本" AND "漂移"`，
+            # `分账` 很少出现 → 整条零命中）。**这不是"不分词"，是"分词后 AND 太严"。**
+            # 所以 AND 零命中时降级 OR，并标注"宽匹配"——不让人以为零命中是真没有。
+            _wide = expr.replace(" AND ", " OR ") if " AND " in expr else None
+            for _sc, _label in (("title", "标题"), ("body", "正文")):
+                if scope not in ("all", _sc):
+                    continue
+                got = [r[0] for r in conn.execute(
+                    _fts_sql, (f"{_sc}_idx:({expr})", *_fparams, limit))]
+                via = _label
+                if not got and _wide:
+                    got = [r[0] for r in conn.execute(
+                        _fts_sql, (f"{_sc}_idx:({_wide})", *_fparams, limit))]
+                    via = _label + "(宽匹配)"
+                if got:
+                    add(got, via)
 
     if not order:
         return [], {}
@@ -3008,125 +3007,21 @@ def same_name_notice(citizen_id, kind) -> str:
 # `related_citizens` 允许的**锚定列白名单**（关系名 → 列名）。
 # 为什么是白名单而不是让调用方传列名：SQL 里的列名只能来自实现内部的常量表，
 # 传进来的永远是**值**。否则这个函数就是一个 ORDER BY/WHERE 注入口。
-RELATED_ANCHORS = (("session", "host_session_key"),
-                   ("name", "display_name"),
-                   ("account", "account_id"))
-
-# 相关公民清单的硬上限（`whoami all=true`）。20 足够覆盖"同一 AI 的两三套身份"，
-# 又不至于让一次诊断变成全库扫描——这个清单的用途是**对人**，不是导出。
-RELATED_CITIZENS_LIMIT = 20
-
-
-def related_citizens(conn, *, display_name=None, host_session_key=None,
-                     account_id=None, exclude_citizen_id=None,
-                     limit=RELATED_CITIZENS_LIMIT) -> list:
-    """与本会话上下文相关的公民（`whoami all=true` 的唯一取数口，FB-03）。
-
-    三条锚**任一命中**即算相关，按 citizen_id 去重后回一行一条：
-      · `session` —— `host_session_key` 相同（同一个宿主会话建出了两个公民）；
-      · `name`    —— `display_name` 相同（决策 14：同名就是两个公民，不合并）；
-      · `account` —— `account_id` 相同（同一账号在不同宿主/设备上的身份）。
-
-    这正是"身份双视图"的取证面：`register` 说 A、带 token 的 `whoami` 说 B，
-    两个公民都活着、都不报错。系统**不合并**（那是人的决定），但必须能一眼看见
-    "原来有两条身份"以及它们各自长什么样、手上还有几条有效凭证。
-
-    几条实现纪律：
-      · **不是全库 dump**：一个锚都没有就直接空转返回（`[]`），绝不"没锚就列全部"；
-        有锚也受 `limit` 截断，调用方负责说明"被截断了"。
-      · `status` 不过滤：退役的公民也要在清单里被看见（列上有 status 一栏）；
-        但排序把 `active` 放前面——"谁现在还在用"才是诊断的第一问题。
-      · `token_count` 只数**未吊销**的凭证：一条已吊销的 token 说明不了"它还活着"。
-      · 读的是热表 `citizens`（归档公民不参与"当前的上下文"，它们已经搬去冷表）。
-    """
-    values = {"session": host_session_key, "name": display_name,
-              "account": account_id}
-    columns = ("citizen_id", "display_name", "kind", "status", "host",
-               "last_seen_at", "created_at")
-    found = {}
-    for relation, column in RELATED_ANCHORS:
-        anchor = values[relation]
-        anchor = anchor.strip() if isinstance(anchor, str) else anchor
-        if not anchor:
-            continue
-        rows = conn.execute(
-            f"SELECT {', '.join(columns)} FROM citizens WHERE {column}=? "
-            "ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, "
-            "created_at, citizen_id", (anchor,)).fetchall()
-        for row in rows:
-            item = found.get(row[0])
-            if item is None:
-                item = dict(zip(columns, row))
-                item["relations"] = []
-                item["token_count"] = 0
-                found[row[0]] = item
-            if relation not in item["relations"]:
-                item["relations"].append(relation)
-    if exclude_citizen_id:
-        found.pop(exclude_citizen_id, None)
-    if not found:
-        return []
-    ids = list(found.keys())
-    placeholders = ",".join("?" * len(ids))
-    counts = dict(conn.execute(
-        "SELECT citizen_id,COUNT(*) FROM session_tokens WHERE revoked_at IS NULL "
-        f"AND citizen_id IN ({placeholders}) GROUP BY citizen_id",
-        ids).fetchall())
-    order = {relation: index for index, (relation, _column) in enumerate(RELATED_ANCHORS)}
-    items = sorted(
-        found.values(),
-        key=lambda it: (0 if it["status"] == "active" else 1,
-                        min(order[r] for r in it["relations"]),
-                        it["created_at"] or "", it["citizen_id"]))
-    for item in items:
-        # 关系名按白名单顺序归一（session → name → account），保证输出稳定可判。
-        item["relations"] = [r for r, _c in RELATED_ANCHORS if r in item["relations"]]
-        item["token_count"] = int(counts.get(item["citizen_id"], 0))
-    cut = int(limit or 0)
-    return items[:cut] if cut > 0 else []
+# 2026-11-21（F-3）：身份诊断搬进 `fish_identity_diag`（约 110 行）——
+# `fish.py` 是满窗口，而「诊断」本该有独立位置（它不发凭证、不裁决归属）。
+# 这里只留转发，既有调用方零改动。
+from fish_identity_diag import (RELATED_ANCHORS, RELATED_CITIZENS_LIMIT,  # noqa: F401
+                                related_citizens)
+from fish_identity_diag import related_citizens_lines as _rc_lines_raw
 
 
 def related_citizens_lines(conn, citizen_id=None) -> list:
-    """`whoami --all`（CLI）与 `whoami all=true`（MCP）的**唯一渲染**。
+    """转发到 `fish_identity_diag`；它只吃 citizen dict，不吃 id。
 
-    2026-10-26（评审 🟠3）：CLI 原来没有 `--all`，MCP 有——同一句"还有谁和我占着
-    同一个上下文"，在一个入口能问、在另一个入口问不到。补 CLI 的那一刻必须
-    **把渲染也搬下来**：两个入口各写一段文案，第二次改口径就会漂（本轮修的
-    三处漂移里有两处正是这个来源）。所以 MCP 的 `_related_citizens_lines` 现在
-    只做一件事——把 `ident` 变成一个 citizen_id 然后调这里。
-
-    `citizen_id` 为空 = 没有锚（没带有效凭证）：必须说清"不是库里没有人"，
-    否则"没列"会被读成"没有"。
+    这么分是为了让新模块**零内部依赖**：拿 citizen 记录是调用方（这里）的事，
+    没必要为了它制造一条 `identity_diag → fish` 的上行依赖。
     """
-    head = ("相关公民（**不含你自己**；按 会话/同名/账号 关联，不是全库清单；"
-            "token 数 = 未吊销凭证数，最多 "
-            f"{RELATED_CITIZENS_LIMIT} 条）：")
-    if not citizen_id:
-        return [head,
-                "- （未列出）这份清单需要一条**有效 token** 当锚：没凭证就没有"
-                "会话键、公民名与账号可关联——这不等于“库里没有人”。"]
-    me = load_citizen(conn, citizen_id) or {}
-    rows = related_citizens(
-        conn,
-        display_name=me.get("display_name"),
-        host_session_key=me.get("host_session_key"),
-        account_id=me.get("account_id"),
-        exclude_citizen_id=citizen_id)
-    if not rows:
-        return [head, "- （没有匹配到相关公民：本会话、同名、同账号都没有别人）"]
-    lines = [head]
-    for it in rows:
-        lines.append(
-            f"- {it['citizen_id']}｜{it['display_name'] or '（无名）'}｜"
-            f"{it['kind'] or 'unknown'}｜{it['status'] or 'unknown'}｜"
-            f"宿主 {it['host'] or '未记录'}｜最近活跃 {it['last_seen_at'] or '未记录'}｜"
-            f"token {it['token_count']}｜关联：{'/'.join(it['relations'])}")
-    if len(rows) >= RELATED_CITIZENS_LIMIT:
-        lines.append(f"（已达上限 {RELATED_CITIZENS_LIMIT} 条，可能还有更多；"
-                     "全库清单请用 `fish citizen list`）")
-    return lines
-
-
+    return _rc_lines_raw(conn, load_citizen(conn, citizen_id) if citizen_id else None)
 def find_duplicate_display_names(conn) -> list:
     """列出有重复的 display_name（同名多公民）。
 

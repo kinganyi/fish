@@ -628,7 +628,10 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
 
     def seen(code):
         if session_key:
-            return _seen_in_session(conn, code, session_key)
+            if _seen_in_session(conn, code, session_key):
+                return True
+            # F-1（2026-11-21）：tool_after 此前从不查 push_log（决策 B 只落在 prompt）。
+            return code in _recent_pushed_codes(conn, session_key, hours=24, now=now_dt)
         return conn.execute(
             "SELECT 1 FROM memory_access_log WHERE code=? AND citizen_id IS ? LIMIT 1",
             (code, citizen_id)).fetchone() is not None
@@ -817,10 +820,9 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
 def _recent_pushed_codes(conn, session_key, *, hours=24, now=None) -> set:
     """本会话最近 N 小时**已经推过**的编码（去重用；prompt 与 tool_after 共用一份）。
 
-    2026-10-28（推送研究 P0-1）：**没有会话身份不等于"没推过"**。旧实现直接返回空集，
-    而 tool_after 通道（生产 push_log 的 80.6%）恰恰没有 session_key → 去重完全失效
-    （实测同一记忆被推 1,554 次、间隔中位 2 分钟）。缺 session_key 时改为**全局**去重：
-    宁可少推，不可重复打扰。
+    2026-10-28（P0-1）：**没有会话身份不等于"没推过"**。旧实现返回空集，而 tool_after
+    通道（生产 push_log 的 80.6%）恰恰没有 session_key → 去重失效（实测同一记忆被推
+    1,554 次）。缺 session_key 时改为**全局**去重：宁可少推，不可重复打扰。
     """
     window = int(hours or 0)
     if window <= 0:

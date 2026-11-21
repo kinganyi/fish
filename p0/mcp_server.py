@@ -679,8 +679,13 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                # 2026-11-21：补 `path`。此前只有 `repo_id`，而兄弟工具
+                # `git_repo_status` 一直都有——**同一个仓库族，一个能按路径查一个不能**，
+                # 而"我知道仓库路径但不知道 repo_id"是最常见的调用姿势。
+                "path": {"type": "string",
+                         "description": "仓库路径或其子目录（可选；缺省用本会话的 cwd）"},
                 "repo_id": {"type": "integer",
-                            "description": "按 repo_id 查（可选；缺省用本会话 cwd 解析出的仓库）"},
+                            "description": "按 repo_id 查（可选，优先于 path；都缺省时用会话 cwd）"},
                 "limit": {"type": "integer",
                           "description": "最多返回几条（缺省 20，上限 200）"},
             },
@@ -2396,7 +2401,8 @@ class FishServer:
     def tool_git_repo_commits(self, a, ident):
         """查仓库**已采集到**的提交（**只读**：不跑 git log）。"""
         try:
-            row = self._git_checkout_for("", a.get("repo_id"), ident)
+            # 2026-11-21：接上 `path`（此前写死空串，等于"只认 repo_id 或会话 cwd"）。
+            row = self._git_checkout_for(a.get("path") or "", a.get("repo_id"), ident)
         except Exception as exc:
             return f"这个库还没有 git 表（{type(exc).__name__}）——先升级库结构再查。\n"
         if not row:

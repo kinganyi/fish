@@ -752,7 +752,7 @@ CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL,
             # 2026-11-20（P4-4）：两个只读 git 工具。token 同样由 _attach_token 补，
             # 这里只列业务字段。**没有写仓库的工具**（方案 §6）。
             "git_repo_status": {"path", "repo_id"},
-            "git_repo_commits": {"repo_id", "limit"},
+            "git_repo_commits": {"path", "repo_id", "limit"},
         }
         for t in mcp_server.TOOLS:
             extra = {"token"} | ({"bind_token"} if t["name"] == "session_start" else set())
