@@ -2354,7 +2354,7 @@ def compute_session_profile(conn, *, session_actor=None, citizen_id=None,
 
 def search_memories(conn, *, query=None, code=None, project=None, tags=None,
                     scope="all", limit=10, include_superseded=False,
-                    viewer_citizen_id=None):
+                    viewer_citizen_id=None, since=None, until=None):
     """检索记忆——**CLI 与 MCP 共用的唯一读入口**（ADR-005）。
 
     排序优先级：精确编码 > 编码片段 > 标题命中 > 正文命中。
@@ -2395,6 +2395,13 @@ def search_memories(conn, *, query=None, code=None, project=None, tags=None,
             # 否则 tag 里的 `%` / `_` 会当通配符用。
             _filters.append("ci.tags LIKE ?" + LIKE_ESCAPE_SQL)
             _fparams.append(tag_like_pattern(_t))
+    # 2026-11-22：日期边界。**必须和 MATCH 一起下推**——否则先 LIMIT 再过滤，
+    # 会把"当天确实命中"的条目整体滤空（这正是上面那段注释记的同类病）。
+    for _bound, _op, _end in ((since, ">=", False), (until, "<=", True)):
+        _v = _norm_date_bound(_bound, end=_end)
+        if _v:
+            _filters.append(f"COALESCE(ci.occurred_at, ci.recorded_at) {_op} ?")
+            _fparams.append(_v)
     _where = (" AND " + " AND ".join(_filters)) if _filters else ""
     _fts_sql = ("SELECT f.code FROM memory_fts f JOIN code_index ci ON ci.code = f.code "
                 "WHERE memory_fts MATCH ?" + _where + " LIMIT ?")
@@ -2524,7 +2531,32 @@ def tag_like_pattern(tag) -> str:
     return f'%"{_like_literal(json_literal)}"%'
 
 
-def _list_where(conn, *, project=None, tags=None, include_superseded=False):
+def _norm_date_bound(value, *, end=False):
+    """把日期边界规范成可直接比较的 ISO 时间戳（`recall --since/--until` 用）。
+
+    ## 为什么不能直接拿日期去比字符串
+
+    `occurred_at` 存的是 `2026-11-22T08:42:08Z`。若 `--until 2026-11-22` 直接拼成
+    `occurred_at <= '2026-11-22'`，**当天的每一条都会被排除**（`'…T08:42:08Z' > '2026-11-22'`）
+    ——这是日期过滤最常见的 off-by-one：用户要"到 22 号"，拿到的是"到 21 号"。
+    所以纯日期补足：`since` → `T00:00:00Z`，`until` → `T23:59:59Z`。
+    完整 ISO 时间戳原样透传（调用方给了精确时刻就尊重它）。
+
+    `COALESCE(occurred_at, recorded_at)`：`occurred_at` 可能为空（虽然现存 681 条
+    全有值，但历史导入与未来写入路径都不保证）。为空退回记录时间——
+    **宁可多返回一条，也不让一条真记忆因为缺字段而永远查不到**。
+    """
+    s = str(value or "").strip()
+    if not s:
+        return None
+    # 已经是完整时间戳（含 T 或空格分隔）就原样用
+    if len(s) > 10 and ("T" in s or " " in s):
+        return s
+    return f"{s}T23:59:59Z" if end else f"{s}T00:00:00Z"
+
+
+def _list_where(conn, *, project=None, tags=None, include_superseded=False,
+                since=None, until=None):
     """列出模式的 WHERE 子句 + 参数——`count_memories` 与 `list_memories` 共用。
 
     分出来是因为"总数"与"这一页"必须用**同一个谓词**：两处各拼一份，
@@ -2542,14 +2574,22 @@ def _list_where(conn, *, project=None, tags=None, include_superseded=False):
         if t:
             where.append("tags LIKE ?" + LIKE_ESCAPE_SQL)
             params.append(tag_like_pattern(t))
+    # 2026-11-22：日期边界（`recall --since/--until`）。用 COALESCE 兜底，
+    # 理由见 `_norm_date_bound` 的 docstring。
+    for _bound, _op, _end in ((since, ">=", False), (until, "<=", True)):
+        _v = _norm_date_bound(_bound, end=_end)
+        if _v:
+            where.append(f"COALESCE(occurred_at, recorded_at) {_op} ?")
+            params.append(_v)
     return ((" WHERE " + " AND ".join(where)) if where else ""), params
 
 
 def count_memories(conn, *, project=None, tags=None, include_superseded=False,
-                    viewer_citizen_id=None) -> int:
+                    viewer_citizen_id=None, since=None, until=None) -> int:
     """列出模式命中多少条（**不含** limit）——回包首行的"共 N 条"用它，不用 len(rows)。"""
     clause, params = _list_where(conn, project=project, tags=tags,
-                                 include_superseded=include_superseded)
+                                 include_superseded=include_superseded,
+                                 since=since, until=until)
     # F-P1-X（第二轮评审）：计数必须和列表**同口径**。
     # 否则回执写"共 2 条"却只列 1 条——不是泄露，是回执在说谎。
     _cvis_sql, _cvis_params = _visibility_sql(conn, viewer_citizen_id)
@@ -2565,7 +2605,8 @@ def count_memories(conn, *, project=None, tags=None, include_superseded=False,
 
 
 def list_memories(conn, *, project=None, tags=None, limit=LIST_DEFAULT_LIMIT,
-                  include_superseded=False, viewer_citizen_id=None):
+                  include_superseded=False, viewer_citizen_id=None,
+                  since=None, until=None):
     """**列出模式**：无 query 时按 项目（含别名展开）+ 标签 过滤，时间倒序。
 
     与 `search_memories` 的区别是"不猜"：检索要做 FTS + 排序 + 来源标注，
@@ -2581,7 +2622,8 @@ def list_memories(conn, *, project=None, tags=None, limit=LIST_DEFAULT_LIMIT,
     """
     limit = max(1, int(limit or LIST_DEFAULT_LIMIT))
     clause, params = _list_where(conn, project=project, tags=tags,
-                                 include_superseded=include_superseded)
+                                 include_superseded=include_superseded,
+                                 since=since, until=until)
     # F-P1-X（评审 🟠-2）：private 必须在**列出模式**里也过滤。
     # 只挡 search 不挡 list，等于"搜不到但列得出来"——那不是私有，是难找。
     #
@@ -5294,8 +5336,12 @@ def cmd_recall(args):
                       "或项目（--project）——本命令不猜。")
             conn.close()
             return
-        rows = list_memories(conn, project=project, tags=tags, limit=limit)
-        total = count_memories(conn, project=project, tags=tags)
+        _since = getattr(args, "since", None)
+        _until = getattr(args, "until", None)
+        rows = list_memories(conn, project=project, tags=tags, limit=limit,
+                             since=_since, until=_until)
+        total = count_memories(conn, project=project, tags=tags,
+                               since=_since, until=_until)
         print(format_list_declaration(project=project, tags=tags,
                                       shown=len(rows), total=total))
         if not rows:
@@ -5324,7 +5370,8 @@ def cmd_recall(args):
     else:
         rows, src_of = search_memories(
             conn, query=q, code=code, project=project, tags=tags,
-            scope=getattr(args, "scope", "all"), limit=limit)
+            scope=getattr(args, "scope", "all"), limit=limit,
+            since=getattr(args, "since", None), until=getattr(args, "until", None))
     # ⑥ 统计行（外部审查 R-03/Q 的收口，2026-10-29）：
     # 旧实现把"匹配来源分布（含被 status/superseded 过滤掉的）"与"返回条数"并排写，
     # 读者会做加法——真实库出现过 `8+7=15≠10`；而"扫描 N 条"是项目/标签的**全库量**、

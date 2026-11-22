@@ -518,6 +518,13 @@ def main():
     p.add_argument("--code", default=None, help="精确编码（与 query 二选一或并用）")
     p.add_argument("--project", default=None, help="只查该项目前缀")
     p.add_argument("--tags", nargs="*", default=[], help="标签过滤（需同时满足）")
+    # 2026-11-22：日期边界（按 occurred_at，为空时退回 recorded_at）。
+    # `--until 2026-11-22` **包含 22 号全天**——纯日期会补成 23:59:59Z，
+    # 否则当天的条目全被排除（off-by-one，见 `_norm_date_bound`）。
+    p.add_argument("--since", default=None,
+                   help="只看这个日期之后的（YYYY-MM-DD 或完整 ISO）")
+    p.add_argument("--until", default=None,
+                   help="只看这个日期之前的（YYYY-MM-DD 含当天）")
     p.set_defaults(func=_f.cmd_recall)
 
     p = sub.add_parser("neighbors")
