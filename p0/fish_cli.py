@@ -778,6 +778,12 @@ def main():
     act_stats = actsub.add_parser("stats", help="写动作统计（行数/会话/高频目录/按小时）")
     act_stats.add_argument("--days", type=int, default=1)
     act_stats.set_defaults(func=_f.cmd_activity)
+    act_attr = actsub.add_parser(
+        "attribute", help="把某会话的历史无归属写入显式归到某公民（干跑缺省）")
+    act_attr.add_argument("--session", required=True, help="会话键，如 codebuddy:xxx")
+    act_attr.add_argument("--citizen", required=True, help="目标公民 id")
+    act_attr.add_argument("--apply", action="store_true", help="真写；不加只干跑")
+    act_attr.set_defaults(func=_f.cmd_activity)
     act_prune = actsub.add_parser("prune", help="按保留期清理（缺省取 activity.retention_days）")
     act_prune.add_argument("--days", type=int, default=None)
     act_prune.set_defaults(func=_f.cmd_activity)

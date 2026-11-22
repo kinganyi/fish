@@ -3069,6 +3069,8 @@ def same_name_notice(citizen_id, kind) -> str:
 # 这里只留转发，既有调用方零改动。
 from fish_identity_diag import (RELATED_ANCHORS, RELATED_CITIZENS_LIMIT,  # noqa: F401
                                 related_citizens)
+from fish_identity_diag import (attribute_session as _attr_session,
+                                render_unattributed_line as _unattr_line)
 from fish_identity_diag import related_citizens_lines as _rc_lines_raw
 # 2026-11-21（A-3）：体检要复用 `scan_broken`（它只扫 active、带日期结构）。
 # 方向是 `fish → fish_purge`（后者 J2 禁 import fish，反向才合法）。
@@ -3441,12 +3443,7 @@ def resolve_account_id(account=None, alias=None, environ=None):
 
 
 def auto_session_display_name(host, session_key, role=None) -> str:
-    """自动占位名（`未命名·<宿主>#<短码>`）—— **实现已下沉到 `fish_naming`**。
-
-    2026-11-22：生成器原先在这里、检测器在 `fish_naming`，两者靠"照印象写正则"
-    同步，结果 173 个自动名 100% 漏判。搬到一起后可精确比对；保留这个转发壳是
-    为了不改调用面。完整背景见 `fish_naming.auto_session_display_name`。
-    """
+    """自动占位名（`未命名·<宿主>#<短码>`）。实现已下沉到 `fish_naming`（曾 173 个漏判）。"""
     return fish_naming.auto_session_display_name(host, session_key, role)
 
 
@@ -7661,9 +7658,7 @@ def _print_session_start(res):
     print(f"issued_at: {res['issued_at']}")
     print(f"expires_at: {res['expires_at'] or '永久'}")
     print(f"citizen: {'新建' if res['created'] else '复用'}")
-    # 2026-11-22（用户要求）：**起名时就把"该怎么起"递过去**。
-    # 只在当前是自动占位名时出现——已经有真名字的人不该再被劝一次。
-    # 文案与看板注入包共用 `fish_naming.rename_guidance()`（唯一一份）。
+    # 起名引导（2026-11-22）：只在自动占位名时出现，文案与注入包共用一份。
     if fish_naming.is_auto_name(res["display_name"], host=res["host"],
                                 session_key=res["session_key"]):
         print("")
@@ -8351,6 +8346,10 @@ def cmd_activity(args):
     conn.executescript(SCHEMA)
     migrate(conn)
     try:
+        if args.action == "attribute":
+            _m, _c = _attr_session(conn, args.session, args.citizen, apply=bool(args.apply))
+            print(f"归属补账：匹配 {_m} 条，已改 {_c} 条" + ("" if args.apply else "（干跑；加 --apply 才真写）"))
+            return
         if args.action == "prune":
             days = args.days if args.days is not None else int(
                 get_config(conn, "activity.retention_days"))
@@ -8560,6 +8559,7 @@ def cmd_healthcheck(args):
               f"{', '.join(_ghost[:5])}")
     try:                            # 语料层（T03）：库不存在 → 空读数（"没采过"不是"坏了"）
         cst = fish_corpus.stats(root=root)
+        print(_unattr_line(conn), end="")
         print(f"  语料 {cst['segments']} 段 / 会话 {cst['sessions']} / 降级 {len(cst['degraded'])}"
               + (f"  ⚠ 停滞 {cst['alarm']}（连续 {cst['stall']['zero_streak']} 轮 0 新增）"
                  if cst.get("alarm") else ""))

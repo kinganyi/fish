@@ -191,3 +191,69 @@ def related_citizens_lines(conn, citizen=None) -> list:
         lines.append(f"（已达上限 {RELATED_CITIZENS_LIMIT} 条，可能还有更多；"
                      "全库清单请用 `fish citizen list`）")
     return lines
+
+
+def unattributed_sessions(conn, *, limit=12):
+    """「有写入、但没有公民归属」的会话清单。`[(session_key, writes, last_seen)]`。
+
+    ## 为什么只报不改
+
+    实测 11,395 条写入没有 `citizen_id`（占全部写的 89.7%），只涉及 12 个会话键。
+    它们是**接入侧缺口**——那些会话从没调用过 `fish session start`。
+
+    **fish 不去替它们建公民。** 身份的唯一来源是凭证；从会话键推一段身份，
+    正是本模块那句「不知道是谁 ≠ 谁都可以」禁止的事。所以这里只把缺口**说出来**，
+    补账走 `fish activity attribute`（要人显式指定）。
+    """
+    rows = conn.execute(
+        "SELECT session_key, COUNT(*), MAX(seen_at) FROM tool_activity "
+        "WHERE action='write' AND (citizen_id IS NULL OR citizen_id='') "
+        "AND session_key IS NOT NULL AND session_key!='' "
+        "GROUP BY session_key ORDER BY 2 DESC LIMIT ?", (int(limit),)).fetchall()
+    return [(str(sk), int(n), str(last or "")) for sk, n, last in rows]
+
+
+def attribute_session(conn, session_key, citizen_id, *, apply=False):
+    """把某会话**历史**的无归属写入显式归到某个公民名下。返回 `(matched, changed)`。
+
+    ## 为什么必须是显式动作
+
+    这是"补账"不是"推断"：谁该算谁的，只有人（或主代理）能决定。所以
+    `apply=False` 是缺省（干跑），真写要显式 `--apply`。
+
+    ## 三条校验
+
+      1. 会话键必须真的有**无归属**行——否则返回 0，不做无意义的 UPDATE；
+      2. `citizen_id` 必须是**已知**公民（含归档）——沿用 `citizen_ids_known` 的口径，
+         避免把补账指向一个拼错的 id；
+      3. 只改**无归属**行。已有归属的一行都不碰——那可能是别人显式写下的。
+    """
+    sk = (session_key or "").strip()
+    cid = (citizen_id or "").strip()
+    if not sk or not cid:
+        raise ValueError("session 与 citizen 都必须给")
+    matched = int(conn.execute(
+        "SELECT COUNT(*) FROM tool_activity WHERE action='write' "
+        "AND (citizen_id IS NULL OR citizen_id='') AND session_key=?",
+        (sk,)).fetchone()[0] or 0)
+    if not matched or not apply:
+        return matched, 0
+    changed = int(conn.execute(
+        "UPDATE tool_activity SET citizen_id=? WHERE action='write' "
+        "AND (citizen_id IS NULL OR citizen_id='') AND session_key=?",
+        (cid, sk)).rowcount or 0)
+    conn.commit()
+    return matched, changed
+
+
+def render_unattributed_line(conn, *, limit=6):
+    """healthcheck 用的一行：有写入但无公民的会话。没有缺口返回空串。"""
+    rows = unattributed_sessions(conn, limit=limit)
+    if not rows:
+        return ""
+    total = sum(n for _sk, n, _l in rows)
+    names = "、".join(f"`{sk}`（{n} 次）" for sk, n, _l in rows[:3])
+    more = f" 等 {len(rows)} 个会话" if len(rows) > 3 else ""
+    return (f"  ⚠ 归属缺口：{total} 条写入没有公民（{names}{more}）"
+            "——它们没调用过 `fish session start`。补账："
+            "`fish activity attribute --session <key> --citizen <id> [--apply]`\n")
