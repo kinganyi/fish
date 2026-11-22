@@ -452,18 +452,17 @@ def _kb_push_candidates(conn, root, *, query, project=None, exclude=(), limit=2,
 
     ## 为什么单独一类
 
-    记忆候选（`_cand`）的 `code` 是记忆编码；知识库文件不是记忆，走同一份
-    `push_log` 只会把两种东西混在一个键空间里。所以 kb 候选的 `code` 用
-    `kb:<vault>:<rel>`（可读、可去重、可回填），`kind="kb"` 独立成一类。
+    记忆候选的 `code` 是记忆编码；知识库文件不是记忆，混进同一份 `push_log`
+    会把两种东西塞进一个键空间。所以 kb 候选的 `code` 用 `kb:<vault>:<rel>`
+    （可读、可去重、可回填），`kind="kb"` 独立成一类。
 
     ## 三条纪律
 
-      · **只在你问到时才产**：`query` 为空（tool_after 没 prompt、没项目）→ 返回 []；
-      · **vault 未登记 → 不产**（不噪音）；
-      · **24h 内推过的同一个文件不重复推**（按 `push_log.code` 去重）。
+      · **只在你问到时才产**：`query` 为空（tool_after 没 prompt、没项目）→ []；
+      · **vault 未登记 → 不产**（不噪音）；· **24h 内推过的同一文件不重推**。
 
-    断路器（T03b）：整段计时交给 `_breaker`——超过 `push.breaker_seconds` 就
-    **本次不推**（返回 []）并落一行诊断：慢到 3s 的检索进注入包时已落后上下文。
+    断路器（T03b）：整段计时交给 `_breaker`——超过 `push.breaker_seconds` 就本次不推
+    并落诊断：慢到 3s 的检索进注入包时已落后上下文。
     """
     started = time.monotonic()
     q = (query or "").strip()
@@ -810,6 +809,23 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
             out = same + other[:3 - len(same)]
 
     out.sort(key=lambda c: (-c["score"], c["code"]))
+    # ── git 关联缺口（2026-11-22 · F1/F8）：提交在发生、记忆没跟上 ─────
+    # 合成 `code`（`activity:<dir>` 也不是真记忆，F10 实测能过门）；低 benefit——
+    # 这是 fish 自己的观测缺口，靠它"被看见"就够，不该占掉用户内容的格。
+    try:
+        _g = conn.execute(
+            "SELECT r.repo_id, COALESCE(r.display_name, r.identity, '?'), COUNT(*) "
+            "FROM git_commit k JOIN git_repo r ON r.repo_id=k.repo_id "
+            "GROUP BY r.repo_id HAVING COUNT(*)>=10 ORDER BY COUNT(*) DESC LIMIT 1").fetchone()
+        if _g and not conn.execute(
+                "SELECT 1 FROM git_link WHERE dst_kind='commit' AND removed_at IS NULL "
+                "AND dst_id IN (SELECT sha FROM git_commit WHERE repo_id=?) LIMIT 1", (_g[0],)).fetchone():
+            out.append({"code": f"git:{_g[0]}", "kind": "situational", "project": None,
+                        "title": f"{_g[1]} 有 {_g[2]} 条提交，但 0 条关联到记忆",
+                        "reason": "提交在发生、记忆没跟上（fish 的观测缺口，不是仓库的问题）",
+                        "benefit": 0.5, "cost": 0.1, "weight": 1.0, "key": False, "score": 0.4})
+    except sqlite3.Error as exc:      # 老库没有 git 表
+        warn_ignored("fish_push.build_push_candidates git_gap", exc)
     # 外部审查 🔴2（2026-10-29）：**分通道时效门必须挂在真实候选上**。
     # 旧实现只挂在 `_activity_overlap_candidates` 的返回处，而那里产出的
     # `activity:...` 候选既没有 `freshness` 也没有 `mtype` → 丢弃数恒为 0
@@ -915,33 +931,23 @@ def _activity_overlap_candidates(conn, *, project=None, citizen_id=None,
                                  session_key=None, now=None) -> list:
     """「动作事实 → 撞车候选」：`activity:<dir>`，24h 内同会话同目录最多一次。
 
-    为什么它值 0.8 benefit / 0.05 cost（设计 §6.7 表）：
-    真撞车（两个人同时在改同一块）是**高收益低打扰**的信号——一句话就能避免互相覆盖；
-    而它的触发条件很窄（30 分钟窗口 + 有目录 + 不是我），所以噪音天然很低。
+    为什么值 0.8 benefit / 0.05 cost（设计 §6.7）：真撞车是**高收益低打扰**信号——
+    一句话就能避免互相覆盖；触发条件又窄（30 分钟窗口 + 有目录 + 不是我），噪音天然低。
 
-     ## 三条纪律（评审 L5：这里曾经绕过 `min_segments`）
+     ## 五条纪律（每条都对应一次实测踩坑）
 
-      1. **候选生成走 `path_hit(..., min_segments=board.collision_min_segments)`**——
-         与 `find_collisions` 同一份门槛。旧代码用无门槛的 `surface_hit`
-         （只比同基准前缀），于是 `p0` 这种**单段同名目录**能跨项目命中，制造假撞车；
-      2. **两边都换成绝对路径**再比：我的声明按**本项目根**解析（`make_abs`），
-         我/别人的实际目录取事实列推出来的 `dir_abs`。相对 vs 绝对的字符串比较
-         是"同名单段目录误报"的另一个来源；
-      3. **临时/缓存目录跳过**（`fish_activity.is_noise_dir`，`%TEMP%`/`node_modules`…）：
-         那里到处同名，也没有"两个人同改一块"这回事。
-
-     ## 两条补充（2026-10-26 评审 F4 / F5）
-
-      4. **目标的两种形态都要判**（F4）：`path_hit` 对文件面只做后缀匹配（"一个文件
-         不能包含更深的路径"）。我声明文件面 `p0/fish.py`、对方在同一个文件里写时，
-         对方给的是目录键 `i:/other/p0`（比我的面短），正向永远 `None`——所以目标
-         清单取「对方的实际目录 ∪ 对方的实际文件路径」（`auto_surfaces.files`），
-         见 `_activity_overlap_hit`；
-      5. **我的声明面也只在窗口内算**（F5）：`find_collisions` 用
-         `board.overlap_window_min` 判声明面的有效期，而这里曾经"今日板 status!=left
-         即算"——两条撞车通道的时间窗口径不一致，等于同一个事实两个答案。
-         现在两边都读 `board.overlap_window_min`（`last_seen/auto_seen` 任一在窗内即算，
-         时间戳缺失时**算有效**：宁可多判一条声明，也不许把人的声明静默抹掉）。
+      1. **走 `path_hit(..., min_segments=board.collision_min_segments)`**，与
+         `find_collisions` 同一份门槛。旧代码用无门槛的 `surface_hit`，于是 `p0`
+         这种单段同名目录能跨项目命中，制造假撞车（评审 L5）；
+      2. **两边都换绝对路径**再比（我这边 `make_abs`、对方取事实列的 `dir_abs`）
+         ——相对 vs 绝对的字符串比较是"同名单段目录误报"的另一个来源；
+      3. **临时/缓存目录跳过**（`fish_activity.is_noise_dir`）：那里到处同名；
+      4. **目标两种形态都判**（F4）：`path_hit` 对文件面只做后缀匹配，我声明文件面
+         `p0/fish.py`、对方给的是更短的目录键时正向永远 `None`——所以目标清单取
+         「对方的实际目录 ∪ 实际文件路径」（`auto_surfaces.files`）；
+      5. **我的声明面也只在窗口内算**（F5）：两条撞车通道时间窗口径必须一致，
+         都读 `board.overlap_window_min`。时间戳缺失时**算有效**——宁可多判一条
+         声明，也不许把人的声明静默抹掉。
     """
     now_dt = now or datetime.datetime.now(datetime.timezone.utc)
     now_text = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1225,18 +1231,12 @@ def build_prompt_candidates(conn, root, *, prompt, citizen_id=None, session_key=
                             project=None, now=None, limit=3) -> list:
     """提示词命中的高置信记忆 → 候选（`prompt_related`）。
 
-    打分（设计 §6.4）：
-        1.00 编码精确命中
-      + 0.40 项目名命中且记忆 project 一致
-      + 0.30 × 标题命中的不同词数（≤0.6）
-      + 0.15 仅正文/标签命中
-      （cap 1.0）
+    打分（设计 §6.4）：编码精确 1.00 ／ 项目名命中且 project 一致 +0.40 ／
+    标题命中的不同词数 ×0.30（≤0.6）／ 仅正文或标签命中 +0.15（cap 1.0）。
+    然后 `rel_eff = relevance × (0.5 + 0.5 × freshness.factor)`，门槛
+    `push.prompt_min_relevance`（默认 0.6），`stale` **硬过滤**。
 
-    然后 `rel_eff = relevance × (0.5 + 0.5 × freshness.factor)`，
-    门槛 `push.prompt_min_relevance`（默认 0.6），且 `stale` **硬过滤**。
-
-    ⚠️ 传给 `_cand` 时用 `relevance=rel_eff, freshness=None`：
-    折扣只乘一次（设计 §6.5 的"避免双重折扣"）。
+    ⚠️ 传给 `_cand` 时用 `relevance=rel_eff, freshness=None`：折扣只乘一次（§6.5）。
     """
     if not prompt:
         return []

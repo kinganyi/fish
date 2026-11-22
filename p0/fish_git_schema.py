@@ -159,12 +159,23 @@ _GIT_COMMIT_DDL = """CREATE TABLE IF NOT EXISTS git_commit (
   author_name   TEXT,
   subject       TEXT,
   is_merge      INTEGER NOT NULL DEFAULT 0,
+  -- ⚠️ 以下三列是**预留字段，当前不采集**（`record_commit` 的 INSERT 不写它们，
+  -- 生产实测 0/175 有值）。采它们要额外一次 `git log --shortstat`，而即使采到
+  -- 也只能做「记忆正文提到这个文件」这种弱关联——收益不抵调用成本。
+  -- **要用之前先想清楚消费方是谁**，别以为"有列就等于有数据"。
   files_changed INTEGER,
   insertions    INTEGER,
   deletions     INTEGER,
   branch_seen   TEXT,
   content_root  TEXT,
   event_id      TEXT,
+  -- 2026-11-22（F3）：提交是哪个会话做的。**从事件 actor 还原，历史事件也有**
+  -- （175/175 都带 session_key）。注意：它能回答「谁做的」，但**不能**用来关联
+  -- 记忆——实测提交侧 3 个会话 vs 记忆侧 121 个，交集只有 1 个（F5）。
+  session_key   TEXT,
+  -- 2026-11-22（F1）：提交正文里有没有 `Session:` trailer。0/1，NULL=不知道
+  -- （历史 175 条 body 不存库，无从判断）。它解释「为什么关联不上」，不是关联本身。
+  has_trailer   INTEGER,
   superseded_by TEXT,
   unreachable_since TEXT
 );"""

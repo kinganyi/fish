@@ -2485,17 +2485,35 @@ class FishServer:
             limit = 20
         limit = max(1, min(limit, 200))
         rows = self.conn.execute(
-            "SELECT sha, authored_at, committed_at, subject, is_merge, branch_seen "
+            "SELECT sha, authored_at, committed_at, subject, is_merge, branch_seen, "
+            "session_key, has_trailer "
             "FROM git_commit WHERE repo_id=? ORDER BY committed_at DESC LIMIT ?",
             (rid, limit)).fetchall()
         if not rows:
             return ("这个仓库还没有采集到任何提交。\n\n"
                     "**这不是「没有提交」**——只代表还没采。默认只采从现在起的新提交。\n")
+        # 2026-11-22（F1）：一次查出所有已关联的 sha——**不能每条查一次**
+        # （175 条提交 = 175 次查询）。这里的"关联"指任意 rel 的未撤销边。
+        linked = {r[0] for r in self.conn.execute(
+            "SELECT DISTINCT dst_id FROM git_link "
+            "WHERE dst_kind='commit' AND removed_at IS NULL")}
         out = [f"仓库 {rid}（{cpath}）最近的 {len(rows)} 条提交："]
-        for sha, authored, committed, subject, is_merge, branch in rows:
+        for sha, authored, committed, subject, is_merge, branch, skey, trailer in rows:
             mark = " [merge]" if is_merge else ""
+            tags = ["已关联" if sha in linked else "未关联"]
+            if skey:
+                tags.append(str(skey)[:26])
+            if trailer is None:
+                tags.append("trailer未知")
+            elif trailer:
+                tags.append("有trailer")
             out.append(f"- {sha[:12]} {committed or authored or ''} "
-                       f"{(subject or '')[:60]}{mark}")
+                       f"{(subject or '')[:50]}{mark}  ［{'｜'.join(tags)}］")
+        if not any(r[0] in linked for r in rows):
+            out.append("")
+            out.append(f"⚠ 这 {len(rows)} 条**都还没关联到记忆**——自动推断只认"
+                       "「提交正文提到记忆编码」，而真实提交很少这么写。"
+                       "要建立关联用 `git_link` 显式断言。")
         return "\n".join(out) + "\n"
 
     def tool_git_link(self, a, ident):

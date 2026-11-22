@@ -4,34 +4,29 @@
 
 ## 为什么从 `fish_git.py` 拆出来
 
-`fish_git.py` 一度同时承担六个职责（发现 / 身份归一 / 探针 / 扫描 / 写库 /
-观测），涨到 589 行、超了它的 J4 窗口（250–550）。
+`fish_git.py` 一度承担六个职责（发现/身份归一/探针/扫描/写库/观测），涨到 589 行、
+超了 J4 窗口（250–550）。**抬窗是最差的选项**——那是放松门禁。正确做法是承认两个职责：
 
-**抬窗是最差的选项**——那是放松门禁。正确做法是承认它本来就有两个职责：
-
-· `fish_git.py`  —— **读**：从磁盘/仓库读事实（发现器、身份归一、L0/L1 探针、扫描）
-· `fish_git_store.py` —— **写**：把事实落到五张表（仓库 / 工作副本 / 观测快照）
+· `fish_git.py` —— **读**：从磁盘/仓库读事实（发现器、身份归一、L0/L1 探针、扫描）
+· `fish_git_store.py` —— **写**：把事实落到六张表（仓库/工作副本/观测/提交/关联）
 
 分层方向：**store → git 是向下**（写层依赖读层的解析结果），反向绝不允许。
-所以 `fish_git.py` 一个字都不 import 本模块。
 
 ## 写库层的三条纪律
 
-**① `identity` 为 NULL 时不能做等值查找。**
-SQL 里 `NULL = NULL` 恒为 false。无远端仓库（空仓库、本地仓库）如果按
-`WHERE identity = NULL` 查，每次都会新建一行——同一个仓库被算成 N 个。
-所以 `ensure_repo` 在 identity 为空时改用「这个路径已属于哪个 repo」反向锚定。
+**① `identity` 为 NULL 时不能做等值查找。** SQL 里 `NULL = NULL` 恒为 false，无远端
+仓库按 `WHERE identity = NULL` 查会每次新建一行——同一个仓库被算成 N 个。所以
+`ensure_repo` 在 identity 为空时改用「这个路径已属于哪个 repo」反向锚定。
 
-**② 一个仓库 N 份工作副本。**
-脏净/分支/ahead 是**工作副本**的属性，不是仓库的属性。两份 clone 可以一个净
-一个脏。`git_checkout.path_key` 的 UNIQUE 保证同一物理路径不登记两次，而
-`repo_id` 相同保证「两份 clone 是同一个仓库」（J2 判据）。
+**② 一个仓库 N 份工作副本。** 脏净/分支/ahead 是**工作副本**的属性，不是仓库的。
+`git_checkout.path_key` 的 UNIQUE 保证同一物理路径不登记两次，`repo_id` 相同保证
+「两份 clone 是同一个仓库」（J2 判据）。
 
-**③ 四态在写入时定型。**
-`clean` / `dirty` / `unknown` / `degraded`。浅克隆与 partial clone 一律降级为
-`degraded`——它们的「净」不可靠（浅仓 worktree 可能缺对象）。
-「没采到」是 `unknown`，**绝不是 clean**（J4 的正反两向断言靠这条）。
+**③ 四态在写入时定型。** `clean`/`dirty`/`unknown`/`degraded`。浅克隆与 partial
+clone 一律降级——它们的「净」不可靠。「没采到」是 `unknown`，**绝不是 clean**。
 """
+import json
+import re
 import sqlite3
 import time as _time
 from datetime import datetime, timezone
@@ -54,20 +49,17 @@ def _iso(ts):
 def ensure_repo(conn, *, identity=None, identity_kind="unknown",
                 identity_source="discovered", display_name=None, root=None,
                 now=None):
-    """找到或创建仓库行，返回 `repo_id`。
-
-    查找顺序（**顺序本身是判据**，见 J2/J3）：
+    """找到或创建仓库行，返回 `repo_id`。查找顺序**本身是判据**（J2/J3）：
 
     1. `identity` 非空 → 按 identity 查。跨路径稳定：同一个远端的两份独立克隆
-       会命中同一行。这是 J2 的判据基础。
-    2. identity 为空（无远端仓库）→ **按已有 checkout 反查**：如果这个 root
-       已经登记过工作副本，就复用它的 repo_id。
-       为什么不能 `SELECT ... WHERE identity=NULL`：SQL 里 `NULL = NULL` 恒为
-       false，那样每次都会新建一行，同一个无远端仓库会被算成 N 个。
+       命中同一行（J2 的判据基础）。
+    2. identity 为空（无远端）→ **按已有 checkout 反查**：这个 root 已登记过工作副本
+       就复用它的 repo_id。**不能 `WHERE identity=NULL`**——SQL 里 `NULL = NULL` 恒为
+       false，那样每次新建一行，同一个无远端仓库会被算成 N 个。
     3. 都没有 → 新建。
 
-    `identity_source` 记的是「这个身份是怎么来的」（manual/discovered/inferred）——
-    不是装饰：手工登记与自动发现的身份在冲突时优先级不同。
+    `identity_source` 记「这个身份怎么来的」（manual/discovered/inferred）——不是装饰：
+    手工登记与自动发现的身份在冲突时优先级不同。
     """
     stamp = now or fish_common.now_utc()
     if identity:
@@ -157,24 +149,42 @@ def record_obs(conn, *, checkout_id, probe, shallow=False, now=None, probe_ms=No
     return cur.lastrowid
 
 
+def _has_trailer(body):
+    """提交正文里有没有 `Session:` trailer。返回 1 / 0。
+
+    ## 为什么只认 `Session:`
+
+    git trailer 是 message 末尾的 `Key: value` 段。本项目用的是
+    `Session:` / `Surface:`（见 `session_guard.py` 的 `commit` 子命令）。
+    只认 `Session:`——它才是"哪个会话做的"；`Surface:` 是占用面，同一个会话会变。
+
+    ## 为什么只存"有没有"，不解析出值
+
+    值的口径**不统一**（实测见过：纯会话名 / `名字 (sid:xxx)` / token 前缀，
+    见方案文档 F4）。存了会让人以为能拿来 join。真要按会话关联，
+    走 `session_key` 列——那来自 hook 的 actor，口径统一。
+
+    `body` 为空返回 0：「没写 trailer」与「body 都没采到」同样算"没有"。
+    """
+    return 1 if body and re.search(r"^Session:", body, re.M) else 0
+
+
 def record_commit(conn, *, root, repo_id, branch=None, now=None, session_key=None):
     """采集 HEAD 的提交，写事件（真源）+ 投影（派生表）。返回 dict 或 None。
 
-    ## 幂等与增量：**用 sha，不用时间**
+    ## 幂等与增量：**用 sha，不用时间**（J9 要求两个方向都测）
 
-    J9 要求「commit 增量不重不漏，两个方向都测」。这里刻意**不使用任何时间水位**：
+    · **不漏**：`--amend` 换 sha 但 author-date 常被保留（改的是 committer-date）。
+      按 author-date 做水位会漏采（实测 0 条 vs 按 ref 判 1 条）；按 committer-date
+      又会在 rebase 后重采。
+    · **不重**：`sha` 是 PRIMARY KEY，同一 sha 第二次进来直接跳过。
 
-    · **不漏**：`git commit --amend` 会换 sha，但 author-date 通常被保留
-      （改的是 committer-date）。按 author-date 做水位会**漏采**（实测 0 条 vs
-      按 ref 判 1 条）；按 committer-date 做水位又会在 rebase 后**重采**。
-    · **不重**：`git_commit.sha` 是 PRIMARY KEY，同一 sha 第二次进来直接跳过。
-
-    所以两个方向都由「sha 是主键」这一个事实同时保证，不需要额外水位表。
+    两个方向由「sha 是主键」这一个事实同时保证，不需要额外水位表。
 
     ## 先写事件、再写投影
 
-    `events` 是真相源，`git_commit` 可由事件重放重建。事务边界由调用方控制
-    （`append_event(commit=False)`），这样「事件 + 投影」要么一起成、要么一起不成。
+    `events` 是真相源，`git_commit` 可由事件重放重建（见 `rebuild_commit_projection`）。
+    事务边界由调用方控制（`append_event(commit=False)`），两者要么一起成、要么一起不成。
     """
     info = fish_git.read_commit(root, "HEAD")
     if not info:
@@ -189,18 +199,30 @@ def record_commit(conn, *, root, repo_id, branch=None, now=None, session_key=Non
         # 不带的话，提交事件只能说明「有人提交了」，协作上没多大用。
         actor={"kind": "system", "id": "fish_git", "session_key": session_key},
         subject={"repo_id": repo_id, "sha": sha},
+        # 2026-11-22（F9）：payload 原本只有 5 个字段，而投影写了 11 列——
+        # `authored_at` / `committed_at` / `author_email` / `author_name` / `is_merge`
+        # **不在 payload 里，于是 rebuild 原理上就还原不了它们**（F7 的实验就是这么丢的）。
+        # 现在补齐。**只对新事件有效**——老事件的 payload 改不了（append-only），
+        # rebuild 后老行那几列仍是 NULL，那是固有约束不是 bug。
         payload={"sha": sha, "repo_id": repo_id,
                  "content_root": info["content_root"],
-                 "branch_seen": branch, "subject": info["subject"]},
+                 "branch_seen": branch, "subject": info["subject"],
+                 "authored_at": _iso(info["authored_at"]),
+                 "committed_at": _iso(info["committed_at"]),
+                 "author_email": info["author_email"],
+                 "author_name": info["author_name"],
+                 "is_merge": info["is_merge"],
+                 "has_trailer": _has_trailer(info.get("body"))},
         cause="hook:git commit", commit=False)
     conn.execute(
         "INSERT OR IGNORE INTO git_commit (sha, repo_id, authored_at, committed_at, "
         "author_email, author_name, subject, is_merge, branch_seen, content_root, "
-        "event_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "event_id, session_key, has_trailer) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (sha, repo_id, _iso(info["authored_at"]) or stamp,
          _iso(info["committed_at"]) or stamp,
          info["author_email"], info["author_name"], info["subject"],
-         info["is_merge"], branch, info["content_root"], event_id))
+         info["is_merge"], branch, info["content_root"], event_id,
+         session_key, _has_trailer(info.get("body"))))
     return {"sha": sha, "recorded": True, "event_id": event_id,
             # 2026-11-21：把正文透给调用方（`fish_git_hook` 要用它认编码 → `git_link`）。
             # 不存库：正文只在采集那一刻有用，存下来是纯冗余。
@@ -211,55 +233,72 @@ def rebuild_commit_projection(conn):
     """从 `events` 重放 `git.commit` 事件，重建 `git_commit` 投影（P4-1 判据）。
 
     这是「投影可从事件重建」的可执行证明：清空投影表后调它，行数应当回到重放前的值。
-    **只重建投影，不动 events**（events 是不可变的真源）。
-    返回写入的行数。
+    **只重建投影，不动 events**（events 是不可变的真源）。返回写入的行数。
+
+    ## 2026-11-22（F7）：旧实现只还原 7 / 16 列
+
+    实测它把 `author_name` / `branch_seen` / `is_merge` / `files_changed` 全丢成 NULL，
+    而且读 `p.get("committed_at")`——**payload 里根本没这个字段**（F9），
+    于是重建后 `committed_at` 是空串。判据只验行数，所以一直没人发现。
+
+    现在读 `payload` + `actor` 并写全所有列。**`session_key` 从 `actor` 读**
+    （而不是 payload）——因为历史 175 条事件的 actor 全都有它（F3），
+    这样**老提交也能还原会话键**。
+
+    ## 老事件仍然不完整，这是固有约束
+
+    payload 是 append-only 的：老事件里没有 `author_name` 等字段，改不了。
+    所以重建后那些列是 NULL。**如实为 NULL，不猜**——编一个值比留空更坏。
     """
     rows = conn.execute(
-        "SELECT event_id, payload FROM events WHERE type='git.commit' ORDER BY seq"
+        "SELECT event_id, payload, actor FROM events WHERE type='git.commit' ORDER BY seq"
     ).fetchall()
     restored = 0
-    for event_id, payload_json in rows:
+    for event_id, payload_json, actor_json in rows:
         try:
-            import json as _json
-            p = _json.loads(payload_json)
-        except Exception:                  # 坏 payload：跳过，不猜
+            p = json.loads(payload_json)
+            act = json.loads(actor_json or "{}")
+        except Exception as exc:           # noqa: BLE001 —— 坏 payload 跳过，但**留痕**
+            # 2026-11-22：这里原本是裸 `continue`。我自己踩过一次：`_json` 没定义
+            # 导致 NameError，被这个 except 吞掉，于是 rebuild 恒返回 0 行——
+            # **看起来"没有事件"，实际是代码坏了**。坏 payload 必须能查出原因。
+            warn_ignored("fish_git_store.rebuild_commit_projection", exc)
             continue
         sha, repo_id = p.get("sha"), p.get("repo_id")
         if not sha or not repo_id:
             continue
         cur = conn.execute(
             "INSERT OR IGNORE INTO git_commit (sha, repo_id, authored_at, committed_at, "
-            "subject, content_root, event_id) VALUES (?,?,?,?,?,?,?)",
-            (sha, repo_id, p.get("committed_at") or "", p.get("committed_at") or "",
-             p.get("subject"), p.get("content_root"), event_id))
+            "author_email, author_name, subject, is_merge, branch_seen, content_root, "
+            "event_id, session_key, has_trailer) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sha, repo_id,
+             p.get("authored_at") or p.get("committed_at") or "",
+             p.get("committed_at") or "",
+             p.get("author_email"), p.get("author_name"), p.get("subject"),
+             int(p.get("is_merge") or 0), p.get("branch_seen"), p.get("content_root"),
+             event_id, act.get("session_key"), p.get("has_trailer")))
         restored += cur.rowcount or 0
     return restored
 
 
 _OWNERSHIP_VALUES = ("owned", "external", "unknown")
-
-
 def set_ownership(conn, repo_id, ownership, *, evidence=None, now=None):
     """显式设置仓库归属，返回是否命中。
 
     ## 为什么必须有这个入口
 
     `ownership` 默认 `unknown` 是**正确的保守默认**（方案 P10：发现器一跑，
-    ComfyUI、deepseek-harness 这些第三方仓库全会被标成「自己的」，
-    然后「只读红线」就形同虚设）。
-
-    但**字段建了却没有任何东西会写它**，等于没实现——实测本仓代码里
-    `ownership` 只出现在 INSERT 的硬编码与一个 SELECT 里。所以补这个显式入口。
+    ComfyUI、deepseek-harness 这些第三方仓库全会被标成「自己的」，只读红线就虚设）。
+    但**字段建了却没有任何东西会写它**，等于没实现——实测本仓 `ownership` 只出现在
+    INSERT 的硬编码与一个 SELECT 里。所以补这个显式入口。
 
     ## 为什么不做自动判定
 
     判定需要「这个远端 owner 是不是我」的规则，而方案 P9 说「身份是归属不是授权」
-    ——**归属该由人声明，不该由程序猜**。猜错的代价是不对称的：
-    把别人的仓库标成自己的（→ 越界写）比把自己的标成别人的（→ 少采点）严重得多。
-    所以这里只提供「能标」的能力，不提供「替你标」的智能。
+    ——**归属该由人声明，不该由程序猜**。猜错的代价不对称：把别人的标成自己的
+    （→ 越界写）比把自己的标成别人的（→ 少采点）严重得多。这里只提供「能标」的能力。
 
-    `evidence` 是必填语义的（虽然参数可为 None）：标成 owned/external 必须能说出
-    依据，否则下次没法复核这条判断还成不成立。
+    `evidence` 是必填语义的（虽参数可为 None）：标成 owned/external 必须能说出依据。
     """
     if ownership not in _OWNERSHIP_VALUES:
         raise ValueError(

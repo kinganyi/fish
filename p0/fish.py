@@ -514,6 +514,20 @@ def migrate(conn: sqlite3.Connection):
         if name not in cols:
             conn.execute(f"ALTER TABLE code_index ADD COLUMN {name} {decl}")
 
+    # 2026-11-22（F6）：`git_commit` 新增两列，**老库必须在这里补**。
+    #
+    # 为什么不能指望 `_GIT_SCHEMA`：它是 `CREATE TABLE IF NOT EXISTS`——表已存在时
+    # 一个列都不会加；而 `fish_db.migrate()` 只管它自己那三张表。现场实验（造一个
+    # 没有 session_key 的库再跑 migrate）证实：不补列的话，新代码查 session_key
+    # 直接 `no such column: session_key` 报错。
+    try:
+        gcols = {r[1] for r in conn.execute("PRAGMA table_info(git_commit)")}
+        for name, decl in (("session_key", "TEXT"), ("has_trailer", "INTEGER")):
+            if gcols and name not in gcols:
+                conn.execute(f"ALTER TABLE git_commit ADD COLUMN {name} {decl}")
+    except sqlite3.Error as exc:      # 老到连 git 表都没有：留给 SCHEMA 建
+        warn_ignored("fish.py migrate git_commit columns", exc)
+
     # citizens.is_owner（v0.3.1）：owner 从 config 迁回实体属性
     ccols = {r[1] for r in conn.execute("PRAGMA table_info(citizens)")}
     if "is_owner" not in ccols:
@@ -8433,6 +8447,27 @@ def cmd_healthcheck(args):
         for _day, _n in _bi["by_date"].items():
             print(f"    {_day}  {_n}")
         print("  查详情/修复：fish purge-broken（先看 dry-run，确认后加 --apply）")
+    # git 关联度（2026-11-22 · F1/F8）：**让"关联不上"这件事可见**。
+    #
+    # 为什么必须有这一段：fish 建了完整的 git 观测体系（仓库/工作副本/观测/提交/关联
+    # 五张表 + 22 条判据），但生产实测 `git_link` 是 **0 行**——自动关联的前提
+    # （提交正文提到记忆编码）在真实提交里一次都没成立。**最坏的状态不是坏，是
+    # "有实现、有判据、有数据，但产出为零，而且没有任何地方报告这个零"。**
+    # 不报告它，下一个人（包括我自己）会以为关联能力已经可用。
+    try:
+        _nr = conn.execute("SELECT COUNT(*) FROM git_repo").fetchone()[0]
+        _nc = conn.execute("SELECT COUNT(*) FROM git_commit").fetchone()[0]
+        _nl = conn.execute(
+            "SELECT COUNT(*) FROM git_link WHERE removed_at IS NULL").fetchone()[0]
+        if _nc:
+            print(f"  git 采集：{_nr} 仓库 / {_nc} 提交 / {_nl} 条关联")
+            if _nl == 0:
+                print("  ⚠ 提交全部未关联到记忆 —— 不是坏了，是关联的前提没成立：")
+                print("     自动推断只认「提交正文提到记忆编码」，而真实提交很少这么写；")
+                print("     要建立关联：用 `git_link` 工具显式断言"
+                      "（implemented_by / produced / revised_in）")
+    except sqlite3.Error as exc:      # 老库没有 git 表
+        warn_ignored("fish.py healthcheck git_link", exc)
     # 全文索引哨兵（2026-10-24 实测教训：索引落后 1 条时，只有人工比对计数才发现——
     # 那种"存进去但搜不到"是最难发现的失真，必须在自检层报出来）
     try:
