@@ -8829,7 +8829,7 @@ def cmd_board(args):
                                   agent_id=getattr(args, "agent", None),
                                   status=st, session_key=sk)
             board_post(conn, board, citizen, "checkin" if st == "active" else "left",
-                       doing)
+                       doing, session_key=sk)
             path, size, split = board_render(conn, root, board)
             verb = "已签到" if st == "active" else "已下板"
             print(f"{verb}\t{board['path']}\t{size} B" + ("（已切分）" if split else ""))
@@ -8838,7 +8838,9 @@ def cmd_board(args):
         if act == "post":
             citizen = (getattr(args, "citizen", None) or resolve_owner(conn) or "unknown")
             board = board_ensure(conn, scope, key)
-            pid = board_post(conn, board, citizen, args.kind, args.text)
+            sk = (getattr(args, "session_key", None) or os.environ.get("FISH_SESSION_KEY") or "").strip()
+            text = fish_board.autolink_memory_code(conn, args.text, sk)
+            pid = board_post(conn, board, citizen, args.kind, text, session_key=sk)
             if pid is None:
                 print("错误：动态内容为空", file=sys.stderr)
                 return 2

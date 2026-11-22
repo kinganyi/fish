@@ -29,6 +29,7 @@ import fish_activity
 import fish_naming
 import fish_surface
 import os
+import re
 import sqlite3
 import sys
 
@@ -480,6 +481,10 @@ def board_block(conn, project=None, limit=5, citizen_id=None, max_tokens=None, s
     who = _unnamed_hint(conn, citizen_id)
     if who:
         lines.append(who)
+    # 占用面提示（2026-11-22 · Wave 2）：只对**当前会话**、只在其**没填**时说一次。
+    surf = _surface_hint(conn, board, citizen_id, session_key)
+    if surf:
+        lines.append(surf)
     # 跨午夜可见性（`EVAL-261025-11`）：注入包也带一句，否则后半夜开工的人
     # 会把"板上只有我一个人"当成事实。
     prev_note = board_prev_note(conn, board)
@@ -613,6 +618,112 @@ def _unnamed_hint(conn, citizen_id):
     current = name or f"{fish_naming.UNNAMED_LABEL}·{host or '未知宿主'}"
     return (f"你还没有可读名（当前占位 `{current}`）。\n"
             + fish_naming.rename_guidance())
+
+
+def _surface_hint(conn, board, citizen_id, session_key=""):
+    """当前会话**没声明占用面**时，给一句"为什么值得填"。
+
+    ## 为什么要这条（用户 2026-11-22 要求）
+
+    用户要求「让 surface 默认化，并诚恳地强调它的意义与价值，让 AI 有收获感」。
+    但调研发现不能按原设想讲：**碰撞在这套工作流里 20 天只发生过 1 次（目录级）、
+    文件级 0 次**。所以"填了能防别人覆盖你的改动"是**假承诺**——而假提示一旦被
+    验证是假的，整条提示就会被永久学会忽略（`_surfaces_touch` 的注释也写着这句）。
+
+    诚实的价值是**可观测**：填了，看板上那一行就多出 `｜声明 p0/fish.py`，
+    别的 AI（和以后翻看板的你）看得见你在动哪块。这在 89.7% 的写入都还没有
+    归属的环境里尤其值钱。
+
+    ## 三个"不说"（避免变成噪音）
+
+      · **只对当前会话说**：看板上几十行历史公民，逐行提示就是刷屏；
+      · **已经有 surface 就不说**：说一次就够；
+      · **连 doing 都没有就不说**：那是"还没登记"，交给 `checkin` 的引导去管。
+
+    返回空串表示不需要提示。
+    """
+    if not citizen_id or board is None or not board.get("id"):
+        return ""
+    sk = (session_key or "").strip()
+    sql = ("SELECT surface, doing FROM presence WHERE board_id=? AND citizen_id=?"
+           + (" AND session_key=?" if sk else ""))
+    params = (board["id"], citizen_id) + ((sk,) if sk else ())
+    row = conn.execute(sql, params).fetchone()
+    if not row:
+        return ""
+    surface = (row[0] or "").strip()
+    doing = (row[1] or "").strip()
+    if surface or not doing:
+        return ""
+    return ("你还没声明占用面（surface）。**填了，别人在看板上就看得见你在动哪几个"
+            "文件。**\n不用填全 —— 写你最不希望被别人无意识改掉的那几个就够："
+            "`fish board checkin --doing \"...\" --surface p0/fish.py,p0/mcp_server.py`")
+
+
+def recent_memory_code_for_session(conn, session_key, *, hours=2):
+    """本会话最近写入的记忆编码；没有返回 `""`。
+
+    ## 为什么读 `events` 而不是 `code_index`
+
+    实测：`memory.recorded` 事件的 payload 里带 `session_actor`（全库 747 条中
+    564 条有值，75.5%）；而 `code_index` 只有 `owner`（公民），**区分不出同一公民
+    的不同会话**。所以"本会话写了什么"只能走事件流。
+
+    ## 为什么限定时间窗
+
+    跨天的"本会话"没有意义——两天前写的记忆与今天的帖子没有因果关系，
+    硬关联就是编造因果。
+    """
+    sk = (session_key or "").strip()
+    if not sk:
+        return ""
+    since = (datetime.datetime.now(datetime.timezone.utc)
+             - datetime.timedelta(hours=max(1, int(hours)))).strftime(
+                 "%Y-%m-%dT%H:%M:%SZ")
+    try:
+        row = conn.execute(
+            "SELECT json_extract(payload,'$.code') FROM events "
+            "WHERE type='memory.recorded' AND ts>=? "
+            "AND json_extract(payload,'$.session_actor')=? "
+            "ORDER BY seq DESC LIMIT 1", (since, sk)).fetchone()
+    except sqlite3.OperationalError:      # 极老库没有 JSON1：宁可不关联，也不猜
+        return ""
+    return (row[0] or "").strip() if row else ""
+
+
+#: 帖子里出现这个形状就算"已经写了编码"，不再自动补
+_POST_CODE_RE = re.compile(r"\b[A-Za-z][A-Za-z0-9]*-\d{6}-\d+\b")
+
+
+def autolink_memory_code(conn, text, session_key, *, enabled=None, hours=2):
+    """帖子里没写记忆编码时，自动补上本会话最近那条（**标明是自动推断**）。
+
+    ## 为什么这么做
+
+    实测：412 条看板帖子里只有 43 条（10.4%）含记忆编码，其余 369 条是**孤立的**
+    ——内容在，但连不回记忆链。用户 2026-11-22 要求把这条接上。
+
+    ## 三条边界
+
+      1. **只补"最近一条"**：一个会话里可能写 5 条记忆、发 3 条帖子，谁对应谁
+         无法自动判断。补最近一条是**可辩护的猜测**，补多条就是编造。
+      2. **标明是自动推断**：写成 `（自动关联 CODE）` 而不是裸编码——读者要能
+         分清"作者自己指的"与"系统猜的"。
+      3. **已经写了就不补**：正文已有编码形状就原样返回。
+    """
+    body = (text or "").strip()
+    # `enabled=None` = 读配置（`board.post_auto_link`）。把这次读放进函数里，
+    # 是为了让调用点保持一行——`fish.py` 有 J4 行数棘轮，接线代码越薄越好。
+    if enabled is None:
+        enabled = bool(get_config(conn, "board.post_auto_link"))
+    if not enabled or not body:
+        return body
+    if _POST_CODE_RE.search(body):
+        return body
+    code = recent_memory_code_for_session(conn, session_key, hours=hours)
+    if not code:
+        return body
+    return f"{body}（自动关联 {code}）"
 
 
 def board_out_path(data_root, board, *, home_root=None) -> Path:
@@ -865,7 +976,7 @@ def display_text(text):
     return t
 
 
-def board_post(conn, board, citizen_id, kind, text):
+def board_post(conn, board, citizen_id, kind, text, *, session_key=""):
     """往看板"今日动态"加一条。**存全文**，渲染时才截断。
 
     `kind`：checkin | progress | done | note
@@ -888,9 +999,13 @@ def board_post(conn, board, citizen_id, kind, text):
     text = (text or "").strip()
     if not text:
         return None
+    # `session_key`（2026-11-22 · Wave 2）：把帖子绑到会话上，才能回头做
+    # 「本条帖子对应哪条记忆」的关联。空串合法（无会话归属，与 presence 同口径）。
     cur = conn.execute(
-        "INSERT INTO board_posts (board_id, citizen_id, kind, text, created_at) "
-        "VALUES (?,?,?,?,?)", (board["id"], citizen_id, kind, text, now_utc()))
+        "INSERT INTO board_posts (board_id, citizen_id, kind, text, created_at,"
+        " session_key) VALUES (?,?,?,?,?,?)",
+        (board["id"], citizen_id, kind, text, now_utc(),
+         (session_key or "").strip()))
     conn.commit()
     return cur.lastrowid
 

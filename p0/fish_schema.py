@@ -254,8 +254,11 @@ _BOARD_POSTS_DDL = """CREATE TABLE IF NOT EXISTS board_posts (
   citizen_id TEXT NOT NULL,
   kind       TEXT NOT NULL,               -- checkin | progress | done | note
   text       TEXT NOT NULL,               -- ≤200 字（渲染时硬截断）
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  session_key TEXT NOT NULL DEFAULT ''   -- 发帖会话键（Wave 2）：帖子↔记忆关联的落点'
 );"""
+
+_BOARD_POSTS_NEW_COLS = (("session_key", "TEXT NOT NULL DEFAULT ''"),)   # Wave 2
 
 _BOARD_POSTS_INDEXES = (
     "CREATE INDEX IF NOT EXISTS ix_posts_board ON board_posts(board_id, id DESC)",
@@ -398,7 +401,6 @@ AUDIT_DIR_NAME = "_audit"
 
 FALLBACK_PROJECT_NAME = "未分类"
 
-
 # ============================================================
 # 知识库表结构（2026-11-11 从 `fish_kb.py` 上移，E-11 拆包第三刀）
 #
@@ -520,7 +522,6 @@ _KB_VAULT_COLS = ("vault_id", "name", "path", "path_key", "mode", "ignore_globs"
                   "last_scan_notes", "last_scan_bytes", "note", "status",
                   "created_at", "updated_at")
 
-
 # ============================================================
 # 主库 DDL 的拼装 + 连接（2026-11-11 从 `fish.py` 搬入，E-11 拆包第三刀）
 #
@@ -599,7 +600,6 @@ _PROFILE_INDEXES = (
 _PROFILE_SCHEMA = ("\n" + _PROFILE_SLOTS_DDL + _PROFILE_PROPOSALS_DDL
                    + _PROFILE_QUESTIONS_DDL
                    + ";\n".join(_PROFILE_INDEXES) + ";\n")
-
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (

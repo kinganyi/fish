@@ -231,7 +231,12 @@ FISH_TRUST_LINES_MAX = 260
 # 的模块可以无限增长而无人察觉，那是棘轮体系的覆盖漏洞。这里按**当前实测**给它们各自设界：
 # 下界守"搬漏了"，上界守"长成第二个巨石"。
 FISH_BOARD_LINES_MIN = 1800
-FISH_BOARD_LINES_MAX = 2400
+# 2026-11-22（Wave 2）：2400 → 2440。两件事：
+#   ① 占用面提示 `_surface_hint`（只对当前会话、只在其没填时说一句）；
+#   ② 帖子↔记忆关联 `recent_memory_code_for_session` / `autolink_memory_code`。
+# ② 原本写在 `fish.py`（58 行），但那边有 J4 棘轮且它的职责是编排而不是
+# 查事件流；搬到 board 是**为了不抬 fish.py 的窗**，所以这里如实加回。
+FISH_BOARD_LINES_MAX = 2440
 FISH_INJECT_LINES_MIN = 150
 FISH_INJECT_LINES_MAX = 400
 FISH_CLI_LINES_MIN = 700

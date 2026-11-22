@@ -39,7 +39,8 @@ from fish_schema import (
     _KB_PATH_STATS_COLUMNS, _KB_PATH_STATS_VIEW, _KB_SCHEMA, _KB_VAULT_COLS,
     _KB_VAULT_DDL, _KB_VAULT_INDEXES, _LINKS_COLS, _LINKS_DDL,
     _LINKS_INDEXES, _NAME_ALIASES_DDL, _NAME_SCHEMA, _PRESENCE_DDL,
-    _PRESENCE_NEW_COLS, _PRESENCE_PK_COLS, _PRESENCE_V2_COLS, _PRESENCE_V2_DDL,
+    _BOARD_POSTS_NEW_COLS,
+  _PRESENCE_NEW_COLS, _PRESENCE_PK_COLS, _PRESENCE_V2_COLS, _PRESENCE_V2_DDL,
     _PRESENCE_V3_COLS, _PROJECT_STINTS_DDL, _PUSH_LOG_COLS, _PUSH_LOG_DDL,
     _PUSH_LOG_INDEXES, _PUSH_SCHEMA, _SESSION_TOKENS_DDL, _STINT_OPEN_INDEX_COLS,
     _STINT_OPEN_INDEX_DDL, _STINT_OPEN_INDEX_NAME, _TOOL_ACTIVITY_COLS, _TOOL_ACTIVITY_DDL,
@@ -415,10 +416,13 @@ def _ensure_board_tables(conn: sqlite3.Connection):
         table = m.group(1)
         if not conn.execute(f"PRAGMA table_info({table})").fetchall():
             conn.execute(ddl)
-    have = {r[1] for r in conn.execute("PRAGMA table_info(presence)")}
-    for name, decl in _PRESENCE_NEW_COLS:
-        if name not in have:
-            conn.execute(f"ALTER TABLE presence ADD COLUMN {name} {decl}")
+    # 补列必须在建索引之前（is_owner 那条教训）。Wave 2：`board_posts` 也进这张清单。
+    for _table, _cols in (("presence", _PRESENCE_NEW_COLS),
+                          ("board_posts", _BOARD_POSTS_NEW_COLS)):
+        _have = {r[1] for r in conn.execute(f"PRAGMA table_info({_table})")}
+        for name, decl in _cols:
+            if name not in _have:
+                conn.execute(f"ALTER TABLE {_table} ADD COLUMN {name} {decl}")
     # 2026-10-26（撞车自撞修复 T01 · 设计 §2.2）：`presence` 升到 v3
     # （三列主键 + `session_key`）。落点在结构段、**索引之前**——重建会连带
     # DROP 掉 `ix_presence_last`，索引语句必须排在重建之后。
