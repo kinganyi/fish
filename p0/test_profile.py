@@ -403,6 +403,32 @@ class QuestionCadenceTest(_ProfileBase):
         self.assertIn("不回答", block, "提问块里必须明说'可以不回答'")
         self.assertIn("profile defer", block, "要给出不回答的确切命令")
 
+    def test_P1_9f_counter_freezes_while_pending(self):
+        """**pending 期间计数冻结**（2026-11-23 复查 BUG-2）。
+
+        游标语义是"距上次提问"，不是"距上次回答"。旧实现提问挂着时仍继续 +1，
+        实测 245 → 255，`trigger_count` 与实际待答问题脱节。
+
+        变异：删掉 `bump_question_counter` 里的 `_open_pending_question` 守卫
+        → pending 期间仍会涨，本条变红。
+        """
+        for _ in range(10):
+            fish_profile.bump_question_counter(self.conn)
+        self.assertTrue(fish_profile.question_due(self.conn), "前置：必须到点")
+        qid = fish_profile.raise_question_if_needed(self.conn)
+        self.assertIsNotNone(qid, "到点必须留一笔 pending")
+        before = fish_common.get_config(self.conn, "profile.docs_since_ask")
+        for _ in range(3):
+            fish_profile.bump_question_counter(self.conn)
+        self.assertEqual(fish_common.get_config(self.conn, "profile.docs_since_ask"),
+                         before, "pending 期间计数不该再涨")
+        fish_profile.reset_question_counter(self.conn, status="deferred")
+        self.assertEqual(fish_common.get_config(self.conn, "profile.docs_since_ask"), 0,
+                         "延期后必须清零")
+        fish_profile.bump_question_counter(self.conn)
+        self.assertEqual(fish_common.get_config(self.conn, "profile.docs_since_ask"), 1,
+                         "清零后重新开始计数")
+
 
 # ============================================================ P1-10 文件即界面
 class FileAsUiTest(_ProfileBase):

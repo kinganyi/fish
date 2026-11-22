@@ -364,8 +364,15 @@ def bump_question_counter(conn, n=1):
 
     为什么用 config 而不建表：它是一条**游标**（"距上次提问又写了几篇"），
     重建时不该被事件覆盖——和 `code_registry.last_seq` 同类。
+
+    **2026-11-23（复查 BUG-2）：pending 期间冻结。** 游标名字与文档都写的是
+    "距上次提问"，但旧实现只在"回答/延期"时清零——于是提问挂着时它一直涨
+    （实测从 245 涨到 255，trigger_count 与实际待答问题脱节）。冻结后：
+    pending 期间不推进；回答/延期时 `reset_question_counter` 清零并重新计数。
     """
     cur = int(get_config(conn, "profile.docs_since_ask") or 0)
+    if _open_pending_question(conn):
+        return cur
     # `emit_event=False`：游标不是事实，不该进事件流（见 `set_config` 的 docstring）。
     return set_config(conn, "profile.docs_since_ask", cur + int(n), emit_event=False)
 
