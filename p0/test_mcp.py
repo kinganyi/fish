@@ -350,5 +350,44 @@ class MCPProtocolTest(unittest.TestCase):
             c.close()
 
 
+    # ================= 断链口径（2026-11-23 交接轮 F-02） =================
+    #
+    # MCP 的 healthcheck 曾自己内联一份 SQL：`SELECT code,file_path FROM code_index`
+    # 没有 `status='active'`。于是同一时刻 MCP 报"断链 318"、CLI 报"断链 0"——
+    # 318 全是 `withdrawn`（历史迁移丢正文后已正式作废的条目）。
+    # 这条判据同时守两件事：① active 的坏条目要检出；② 作废后必须归零。
+    # 变异：把 MCP 改回"扫全表"→ 第二步仍报 1，本判据红。
+
+    def test_15_healthcheck_counts_only_active_broken(self):
+        import fish
+        self.c.request("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                      "clientInfo": {"name": "t", "version": "0"}})
+        data = Path(self.root)
+        conn = fish.connect(data)
+        try:
+            code, rel = fish.record_memory(conn, data, project="TEST",
+                                           title="断链口径判据", body="x")
+            conn.commit()
+            (data / rel).unlink()
+        finally:
+            conn.close()
+
+        r1 = self.c.request("tools/call", {"name": "healthcheck", "arguments": {}})
+        t1 = r1["result"]["content"][0]["text"]
+        self.assertIn("断链 1", t1, f"active 的坏条目必须被检出；实际={t1!r}")
+
+        conn = fish.connect(data)
+        try:
+            conn.execute("UPDATE code_index SET status='withdrawn' WHERE code=?", (code,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        r2 = self.c.request("tools/call", {"name": "healthcheck", "arguments": {}})
+        t2 = r2["result"]["content"][0]["text"]
+        self.assertIn("断链 0", t2,
+                      f"已作废条目不能算断链（MCP 与 CLI 必须同口径）；实际={t2!r}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

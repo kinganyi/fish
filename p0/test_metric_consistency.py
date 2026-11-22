@@ -130,6 +130,11 @@ class BrokenCountMetricTest(_Base):
         src = (P0 / "fish.py").read_text(encoding="utf-8")
         self.assertIn("fish_purge.scan_broken", src,
                       "体检没有复用 scan_broken —— 两份实现迟早漂")
+        # 2026-11-23（交接轮 F-02）：**MCP 侧也算同一事实**。它曾经内联第二份 SQL
+        # 且漏了 active 过滤（MCP 报 318 / CLI 报 0）。这条钉住"不许再分叉"。
+        mcp_src = (P0 / "mcp_server.py").read_text(encoding="utf-8")
+        self.assertIn("fish_purge.scan_broken", mcp_src,
+                      "MCP healthcheck 没有复用 scan_broken —— 同一事实两套算法")
         self.assertEqual(scan, 1)
 
     def test_purged_does_not_count(self):

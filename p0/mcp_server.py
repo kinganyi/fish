@@ -51,6 +51,11 @@ import fish_surface
 import fish_trust
 import fish_profile   # noqa: E402 —— 主人画像（R1-2：AI 只能 propose）
 import fish_corpus  # noqa: E402
+# 2026-11-23（交接轮 F-02）：断链扫描**只有一个实现**，healthcheck 复用它。
+# 曾经这里自己写了一份内联 SQL，漏了 `status='active'`，把 325 条已作废条目里的
+# 318 条也算成断链，与 CLI 的 `断链 0` 打架 —— "同一个事实两套算法"正是
+# `test_metric_consistency.py` 要防的形态（E-16 同类）。
+import fish_purge  # noqa: E402
 
 MODERN_VERSION = "2026-07-28"
 SUPPORTED_VERSIONS = ["2026-07-28", "2025-11-25", "2025-06-18", "2024-11-05"]
@@ -2592,10 +2597,13 @@ class FishServer:
         total = self.conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         mem = self.conn.execute("SELECT COUNT(*) FROM code_index WHERE status='active'").fetchone()[0]
         dor = self.conn.execute("SELECT COUNT(*) FROM code_index WHERE dormant=1").fetchone()[0]
-        broken = [c for c, fp in self.conn.execute(
-            "SELECT code,file_path FROM code_index").fetchall()
-            if fp and not (self.root / fp).exists()]
-        return f"事件 {total} / 记忆 {mem} / 休眠 {dor} / 断链 {len(broken)}\n"
+        # 2026-11-23（交接轮 F-02）：**复用唯一实现**，不再内联第二份 SQL。
+        # 内联版没有 `status='active'` 过滤：实测全量断链 318、其中 active 0、
+        # withdrawn 318 —— AI 通过 MCP 会以为"正文还在持续丢"，而 CLI 报的是 0。
+        # 判据：test_metric_consistency.py（源码必须复用）+ test_mcp.py
+        # test_15_healthcheck_counts_only_active_broken（行为必须只算 active）。
+        broken = len(fish_purge.scan_broken(self.conn, self.root)["codes"])
+        return f"事件 {total} / 记忆 {mem} / 休眠 {dor} / 断链 {broken}\n"
 
     def call_tool(self, name, args, ident=None):
         """调一个工具。`ident` 可由协议层传入（避免同一请求解析两次 token）。
