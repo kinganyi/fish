@@ -124,7 +124,7 @@ from fish_visibility import (_filter_by_visibility, _visibility_enforced,
 from fish_board import (_presence_write_shape, _board_seen_write_shape, _fold_presence_for_inject,
     board_block, _project_namespace, _surfaces_touch, _surface_overlap_hit, _unnamed_hint,
     board_out_path, board_ensure, board_checkin, _is_auto_doing, _auto_doing_text, board_auto_checkin,
-    board_post, board_checkin_or_remind, board_auto_presence, _fmt_period, _hhmm, citizen_labels,
+    board_post, autolink_memory_code, board_checkin_or_remind, board_auto_presence, _fmt_period, _hhmm, citizen_labels,
     who_label, board_overlaps, board_observed_overlaps, board_simulate, board_stale_rows,
     board_prev_note, effective_last, _age_minutes, _collapse_presence_raw, board_presence_rows,
     _presence_state, _state_suffix, board_post_rows, board_post_full, _actual_dirs_text, board_unchecked_sessions,
@@ -8839,7 +8839,7 @@ def cmd_board(args):
             citizen = (getattr(args, "citizen", None) or resolve_owner(conn) or "unknown")
             board = board_ensure(conn, scope, key)
             sk = (getattr(args, "session_key", None) or os.environ.get("FISH_SESSION_KEY") or "").strip()
-            text = fish_board.autolink_memory_code(conn, args.text, sk)
+            text = autolink_memory_code(conn, args.text, sk)
             pid = board_post(conn, board, citizen, args.kind, text, session_key=sk)
             if pid is None:
                 print("错误：动态内容为空", file=sys.stderr)
