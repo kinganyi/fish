@@ -215,6 +215,7 @@ _PRESENCE_NEW_COLS = (
     ("auto_surface", "TEXT"),
     ("auto_seen_at", "TEXT"),
     ("auto_source", "TEXT"),
+    ("session_surface", "TEXT"),   # Wave 3：会话累计面（**不进** _PRESENCE_V3_COLS）
 )
 
 _PRESENCE_V3_COLS = ("board_id", "citizen_id", "session_key", "agent_id", "status",

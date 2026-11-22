@@ -427,6 +427,11 @@ def board_block(conn, project=None, limit=5, citizen_id=None, max_tokens=None, s
                         ) if surf else ""
             actual = _actual_dirs_text(p, limit=1)
             actual_s = "" if actual == "—" else f"｜实际 {actual}"
+            # Wave 3：`session_surface` 是**会话累计**（不过期），`auto_surface` 是
+            # 30 分钟瞬时。两者相同就不必说两遍——只在"有历史"时多给一格。
+            _cum = (p.get("session_surface") or "").strip()
+            if _cum and _cum != (p.get("auto_surface") or "").strip():
+                actual_s += "｜累计 " + _cum.split(",")[0] + ("…" if "," in _cum else "")
             mark = ""
             if p["status"] == "left":
                 mark = "（已下板）"
@@ -1601,7 +1606,7 @@ def board_presence_rows(conn, board):
     raw = conn.execute(
         "SELECT {sk}, p.citizen_id, p.agent_id, p.status, p.doing, p.surface, "
         "p.last_seen_at, c.display_name, c.kind, c.host, "
-        "p.auto_surface, p.auto_seen_at, p.auto_source, c.created_at "
+        "p.auto_surface, p.auto_seen_at, p.auto_source, p.session_surface, c.created_at "
         "FROM presence p LEFT JOIN citizens c ON c.citizen_id = p.citizen_id "
         "WHERE p.board_id=? ORDER BY p.last_seen_at DESC".format(sk=sk_col),
         (board["id"],)).fetchall()
@@ -1617,7 +1622,7 @@ def board_presence_rows(conn, board):
           "host": r[9], "created_at": r[13]} for i, r in enumerate(raw)])
     for r, (sk, sk_src) in zip(raw, resolved):
         (session_col, cid, agent, st, doing, surface, last, dname, ckind, chost,
-         auto_surface, auto_seen, auto_source, _created) = r
+         auto_surface, auto_seen, auto_source, sess_surface, _created) = r
         # 实际面按会话取（三档渐进，F2）：有会话键就只认自己那个会话
         info = fish_activity.presence_auto_info(cid, sk, auto_by_session, auto_map)
         auto_dirs = list(info.get("dirs") or [])
@@ -1641,6 +1646,7 @@ def board_presence_rows(conn, board):
             "label": labels.get((cid, sk)) or fish_naming.base_label(dname, chost, cid),
             "status": status,
             "doing": doing or "", "surface": surface or "", "last_seen_at": last,
+              "session_surface": sess_surface or "",
             "auto_surface": auto_surface or "", "auto_seen_at": auto_seen or "",
             "auto_source": auto_source or "",
             "auto_dirs": auto_dirs, "action_count": action_count,

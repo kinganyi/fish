@@ -201,6 +201,8 @@ CONFIG_DEFAULTS = {
     "board.empty_sweep_days": (1, "int", None),
     # 2026-11-22（Wave 2）：发帖时若正文没写记忆编码，自动补上本会话最近那条。
     "board.post_auto_link": (True, "bool", None),
+    # 2026-11-22（Wave 3）：会话累计占用面的回看天数（`presence.session_surface`）。
+    "board.session_surface_days": (30, "int", None),
     # 2026-10-25（`EVAL-261025-13`）：重叠检测的"有效窗口"。
     # 为什么比 idle 阈值（30 分钟）宽：idle 是"渲染上标个灰"，而重叠警告是
     # "别去动这块"——**漏报一个刚走开的人，代价是撞车**；多报一个走开一小时的人，

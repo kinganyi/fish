@@ -881,7 +881,7 @@ def activity_sessions(conn, *, project, window_min=None, now=None) -> list:
 
 
 def refresh_presence_cache(conn, *, citizen_id, project, dirs, seen_at,
-                           min_interval_sec=20, session_key="") -> bool:
+                           min_interval_sec=20, session_key="", session_dirs=None) -> bool:
     """把「最近在动哪」写进今日 presence 行的 `auto_*` 三列（**节流**）。
 
     三条边界（设计 §4.2）：
@@ -916,10 +916,22 @@ def refresh_presence_cache(conn, *, citizen_id, project, dirs, seen_at,
     if auto_seen and min_interval_sec and _age_sec(auto_seen, seen_at) < float(min_interval_sec):
         return False
     surface = ",".join([d for d in (dirs or [])][:3])
-    conn.execute(
-        "UPDATE presence SET auto_surface=?, auto_seen_at=?, auto_source='activity' "
-        "WHERE board_id=? AND citizen_id=?" + (" AND session_key=?" if with_session else ""),
-        tuple([surface, seen_at, board_id, citizen_id] + ([sk] if with_session else [])))
+    # Wave 3：`session_surface` = **会话累计**（不随时间窗过期），与 `auto_surface`
+    # （30 分钟瞬时）并存。前者回答"这个人在这块做过什么"，后者回答"此刻谁在这块"。
+    # 混成一个字段会让重叠检测把"先后做过"误判成"同时在做"。
+    cum = ",".join([d for d in (session_dirs or [])][:5]) if session_dirs is not None else None
+    if cum is None:
+        conn.execute(
+            "UPDATE presence SET auto_surface=?, auto_seen_at=?, auto_source='activity' "
+            "WHERE board_id=? AND citizen_id=?" + (" AND session_key=?" if with_session else ""),
+            tuple([surface, seen_at, board_id, citizen_id] + ([sk] if with_session else [])))
+    else:
+        conn.execute(
+            "UPDATE presence SET auto_surface=?, auto_seen_at=?, auto_source='activity', "
+            "session_surface=? "
+            "WHERE board_id=? AND citizen_id=?" + (" AND session_key=?" if with_session else ""),
+            tuple([surface, seen_at, cum, board_id, citizen_id]
+                  + ([sk] if with_session else [])))
     conn.commit()
     return True
 
@@ -1831,9 +1843,17 @@ def handle_post_tool_use(conn, *, host, payload, now=None, data_dir=None,
         info = auto_surfaces(conn, window_min=int(get_cfg(conn, "activity.aggregate_window_min")),
                              now=seen_at)
         dirs = [d["dir"] for d in (info.get(citizen_id) or {}).get("dirs") or []]
+        # Wave 3：**会话累计面**（窗口 = `board.session_surface_days`，缺省 30 天）。
+        # 与上面 30 分钟的瞬时面回答两个不同问题："此刻谁在这块" vs "这个人在这块做过什么"。
+        _cum = auto_surfaces_by_session(
+            conn, window_min=int(get_cfg(conn, "board.session_surface_days") or 30) * 1440,
+            now=seen_at)
+        session_dirs = [d["dir"] for d in
+                        ((_cum.get((citizen_id, session_key)) or {}).get("dirs") or [])]
         result["presence_cache"] = refresh_presence_cache(
             conn, citizen_id=citizen_id, project=project, dirs=dirs,
-            seen_at=seen_at, min_interval_sec=min_presence)
+            seen_at=seen_at, min_interval_sec=min_presence,
+            session_key=session_key, session_dirs=session_dirs)
     except sqlite3.Error as exc:
         result["presence_cache"] = False
         result["presence_error"] = type(exc).__name__
