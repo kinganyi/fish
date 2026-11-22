@@ -575,23 +575,44 @@ def _surface_overlap_hit(a, b):
 
 
 def _unnamed_hint(conn, citizen_id):
-    """当前会话缺可读名时给一行**可执行**提示（人话 + 具体调用）。
+    """当前会话缺可读名时给一段**可执行**提示（人话 + 具体调用 + 为什么值得做）。
 
-    为什么只对本会话：看板上 44 个历史公民大多没名字，逐行提示等于刷屏；
-    而"我"这一行是唯一现在就能改的（`rename_citizen`）。
+    ## 2026-11-22：这条提示此前**从未触发过**
+
+    判据是 `is_auto_name(name)`，而那个函数用正则 `[0-9a-z]{6,12}` 认名字，
+    生成器产出的却是 `dsh-session-88f9` 这种**尾巴带 `-`** 的形状 —— 匹配不上。
+    实测 173 个自动名 **100% 漏判**，于是这条提示一直是死代码：机制在、接线在，
+    只有判定坏了。
+
+    现在 `is_auto_name` 支持传入 `host` + `session_key` 做精确比对，这里把两个
+    上下文都递进去（`citizens` 行上本来就有，不需要额外查询）。
+
+    ## 为什么只对本会话
+
+    看板上几十个历史公民大多没名字，逐行提示等于刷屏；而"我"这一行是唯一
+    现在就能改的（`rename_citizen`）。
+
+    ## 文案为什么这么写
+
+    用户 2026-11-22 要求：起名提示要**简单诚恳地讲清它的意义与价值，让 AI 有收获感**。
+    所以除了"怎么做"，还写了"改了对你有什么好处"——认不出你是谁，要协调你的
+    人就得先翻会话；有名字之后成本从"翻"变成"看一眼"。
     """
     if not citizen_id:
         return ""
-    row = conn.execute("SELECT display_name, host FROM citizens WHERE citizen_id=?",
-                       (citizen_id,)).fetchone()
+    row = conn.execute(
+        "SELECT display_name, host, host_session_key FROM citizens WHERE citizen_id=?",
+        (citizen_id,)).fetchone()
     if not row:
         return ""
-    name, host = (row[0] or "").strip(), (row[1] or "").strip()
-    if name and not fish_naming.is_auto_name(name):
+    name = (row[0] or "").strip()
+    host = (row[1] or "").strip()
+    sk = (row[2] or "").strip()
+    if name and not fish_naming.is_auto_name(name, host=host, session_key=sk):
         return ""
-    current = name or f"（未命名·{host or '未知宿主'}）"
-    return (f"你还没有可读名（当前 `{current}`）。起一次名，看板所有行都会用它："
-            "`rename_citizen(name=\"anyi-studio-主AI\")`。")
+    current = name or f"{fish_naming.UNNAMED_LABEL}·{host or '未知宿主'}"
+    return (f"你还没有可读名（当前占位 `{current}`）。\n"
+            + fish_naming.rename_guidance())
 
 
 def board_out_path(data_root, board, *, home_root=None) -> Path:

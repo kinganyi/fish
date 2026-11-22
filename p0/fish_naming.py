@@ -22,23 +22,118 @@
    **永不用 ULID/短 ID 消歧**——两个 `anyi-studio-主AI` 看着一样，说明该改名，
    而不是该把机器码塞回人眼前。
 
-自动名（`dsh-xxxx` / `codebuddy-xxxx`）是**缺名兜底**，不是可读名；本模块提供
-`is_auto_name` 让调用方能识别它（当前会话会收到一次「去起名」的可执行提示）。
+自动名是**缺名兜底**，不是可读名；本模块提供 `is_auto_name` 让调用方能识别它
+（当前会话会收到一次「去起名」的可执行提示）。
+
+## 自动名改中文，并让生成器与检测器同源（2026-11-22）
+
+**实测事故**：旧格式是 `<host>-<会话码前 12 位>`，于是生成了 `dsh-session-88f9`
+这种名字；而 `AUTO_NAME_RE` 写的是 `[0-9a-z]{6,12}`（不含 `-`），**匹配不上**。
+结果：库里 173 个由生成器造出来的名字，**`is_auto_name` 一个都没认出来（100% 漏判）**。
+连带后果是「去起名」提示**从来没触发过** —— 机制、接线都在，只有检测器是坏的。
+
+两处修法：
+
+1. **格式改成中文 + 显式前缀**：`未命名·<host>#<短码>`（如 `未命名·dsh#88f9`）。
+   它是**占位名**，就该长得像占位名 —— 一眼看出"这还不是真名字"，同时保留
+   host 与短码用于追溯。
+2. **生成器下沉到本模块**：`auto_session_display_name` 原本在 `fish.py`，与检测器
+   分居两地，正是漂移的温床。现在两个函数相邻，`is_auto_name` 可以直接调用生成器
+   做**精确比对**，不再靠字符串猜形状。
+
+`is_auto_name` 保留旧格式正则，是为了让**老库里的历史名字**仍被认出来。
 """
 from __future__ import annotations
 
 import re
 
-# `auto_session_display_name` 生成的就是这种：`<host>-<session 前 12 位>`。
-# 末尾的 `:role` 是子 agent 会话键的后缀（`dsh:xxx:reviewer`），一并认出来。
+# **旧格式**（`dsh-8a83d218` 这类纯字母数字尾巴）。只为兼容老库里的历史名字保留；
+# 新生成的自动名不再走它，见下方 `auto_session_display_name`。
 AUTO_NAME_RE = re.compile(r"^(dsh|codebuddy|workbuddy|cli)-[0-9a-z]{6,12}(:.*)?$", re.I)
 
 UNNAMED_LABEL = "未命名"
+#: 自动占位名的前缀。它同时是**判据**：`is_auto_name` 认前缀即认自动名，
+#: 不依赖任何"猜形状"的正则 —— 这样生成器与检测器永远不会再漂。
+UNNAMED_PREFIX = "未命名·"
 
 
-def is_auto_name(name) -> bool:
-    """这个名字是不是「自动兜底名」（`dsh-8a83d218` 这类），而不是人起的名。"""
-    return bool(AUTO_NAME_RE.match((name or "").strip()))
+def auto_session_display_name(host, session_key, role=None) -> str:
+    """没给别名时的**自动占位名**：`未命名·<host>#<短码>`（子 agent 带 `:<role>`）。
+
+    ## 为什么是中文 + 显式前缀（2026-11-22）
+
+    旧实现在 `fish.py`，产 `<host>-<会话码前 12 位>`（`dsh-session-88f9`）。
+    那是**英文形状的占位名**：既不像真名字，也不会被 `is_auto_name` 认出来
+    （173 个名字 100% 漏判，连带「去起名」提示从未触发）。
+
+    新格式做三件事：
+      · **中文**（用户要求：自动名不该是英文）；
+      · **显式前缀 `未命名·`**，一眼看出"这还不是名字"，也让人一眼知道该改名；
+      · **保留 host 与短码**（`dsh#88f9`），追溯仍然靠 `host_session_key` 主键。
+
+    没有会话键时退回 `未命名·<host>`；同一宿主多会话仍会重名，由 `disambiguate()`
+    加 `#2/#3` 区分（**绝不用 ULID**，那条铁律不变）。
+    """
+    short = session_short(session_key) or (host or "cli")
+    base = f"{UNNAMED_PREFIX}{short}"
+    return f"{base}:{role}" if role else base
+
+
+def is_auto_name(name, *, host=None, session_key=None) -> bool:
+    """这个名字是不是「自动占位名」，而不是人起的名字。
+
+    三层判定，**从最可靠到最宽松**：
+
+      ① **前缀**：`未命名·` 开头 → 必然是自动名（新格式，判据稳定）；
+      ② **旧格式精确比对**：给了 `host` + `session_key` 时，按旧格式的形状
+         （`<host>-<会话码前 12 位>`）算一遍去比。**新格式不需要这一层**
+         —— 前缀已经判掉了（这一段最早也写成了"新格式也比"，变异测试证明
+         它不可达，已删）；
+      ③ **旧格式正则**：兜底老库里那些形如 `dsh-8a83d218` 的历史名字
+         （它们没有对应的会话键可比，只能按形状认）。
+
+    为什么需要 ②：旧格式 `dsh-session-88f9` 的尾巴里有 `-`，旧正则
+    `[0-9a-z]{6,12}` 匹配不上。只靠正则就是那 100% 漏判。
+    """
+    text = (name or "").strip()
+    if not text:
+        return False
+    head = text.split(":", 1)[0]
+    if head.startswith(UNNAMED_PREFIX):
+        return True
+    if host and session_key:
+        # **只有旧格式需要精确比对**。新格式一条 `未命名·` 前缀就判掉了；
+        # 这里原本还写了一段"拿新格式比对"，变异测试 M2 证明它**不可达**
+        # （前缀分支先返回）——删掉，免得留一段没法被任何判据触发的死代码。
+        tail = (session_key or "").split(":", 1)[-1].split("#", 1)[0]
+        if tail and head == f"{host}-{tail[:12]}":
+            return True
+    return bool(AUTO_NAME_RE.match(text))
+
+
+def rename_guidance() -> str:
+    """「去起名」的引导文案 —— **唯一一份**。
+
+    ## 为什么要单独抽出来
+
+    它要在**两个地方**出现：看板注入包（`_unnamed_hint`）与 `session start` 回执。
+    复制两份的话，改一处忘一处就变成两个口径 —— 而这类"提示文案漂移"最难被
+    判据抓住（两处各自都对，只是说得不一样）。
+
+    ## 文案为什么这么写（用户 2026-11-22 要求）
+
+    「简单诚恳地强调这个的意义和价值，让 AI 有收获感」。所以除了"怎么做"，
+    还写了"改了对你有什么好处"：认不出你是谁，要协调你的人就得先翻会话；
+    有名字之后，找你的成本从「翻」变成「看一眼」。
+    """
+    return "\n".join([
+        "**如果你的用户没给你起名，就自己起一个**：结合你大概在做的项目，",
+        "起一个简短的、能代表你工作的**中文名**（例如 `CZHY-开发`、`漫剧-剪辑`、",
+        "`fish-主AI`）。`rename_citizen(name=\"...\")` 改一次，看板与注入包的",
+        "所有行都会用它。",
+        "**为什么值得改**：别人在看板上看到 `未命名·dsh#88f9` 时认不出你是谁，",
+        "要找你协调就得先翻会话；有了名字，找你的成本从「翻」变成「看一眼」。",
+    ])
 
 
 def base_label(display_name, host, citizen_id) -> str:
