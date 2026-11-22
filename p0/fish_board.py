@@ -333,14 +333,19 @@ def board_block(conn, project=None, limit=5, citizen_id=None, max_tokens=None, s
         stats.setdefault("truncated", 0)
         stats.setdefault("tokens", 0)
     try:
-        board = board_ensure(conn, scope, key)
+        # 读路径**只查不建**（2026-11-22 · 空看板治理 A+C）。
+        # `id=None` 的虚拟板让下面 `not pres and not posts` 的空板分支自然成立，
+        # 所以空板文案只此一份，不需要为"没有板行"再写一段。
+        board = board_ensure(conn, scope, key, create=False)
+        if board is None:
+            board = _virtual_board(scope, key)
         pres = board_presence_rows(conn, board)
         posts = board_post_rows(conn, board, limit=limit)
     except Exception:        # noqa: BLE001 —— 看板是增强项，坏了不该拖垮整个注入包
         return None
     # EVAL-261025-20：把"这次注入看到的看板"记成快照，供推送候选比较。
     # 空板也要记（last_post_id=0）——否则"空板 → 第一条签到"永远推不出来。
-    if citizen_id:
+    if citizen_id and board["id"] is not None:
         try:
             last_post = conn.execute(
                 "SELECT COALESCE(MAX(id),0) FROM board_posts WHERE board_id=?",
@@ -601,11 +606,42 @@ def board_out_path(data_root, board, *, home_root=None) -> Path:
     return home / board["path"]
 
 
-def board_ensure(conn, scope, scope_key="", period_key=None):
+def _virtual_board(scope, scope_key, period_key=None):
+    """构造一块**不落库**的看板行（读路径在没有板时用）。
+
+    为什么需要它：`create=False` 让读路径不再建板，但上层（`_render_one`、
+    `board_block` 的空板分支）仍要一个 dict 形状的板。返回"半成品 dict"和返回
+    `None` 都不行——前者会让 `id=None` 悄悄流进写库路径，后者会让每个调用方
+    各写一套空板文案。
+
+    `_render_one` 只读 `scope / scope_key / period_key / status / closed_at`，
+    **不读 `id`**；`board_presence_rows` / `board_post_rows` 按 `id` 查，
+    `id=None` 时自然返回空 —— 这正是"没有板"该有的读数。
+    """
+    pk = board_period(period_key)
+    key = scope_key or ""
+    return {"id": None, "scope": scope, "scope_key": key, "period_key": pk,
+            "path": board_relpath(scope, key, pk), "status": "open",
+            "created_at": None, "closed_at": None}
+
+
+def board_ensure(conn, scope, scope_key="", period_key=None, *, create=True):
     """取或建一块板，返回 `boards` 行（sqlite3.Row 风格的 dict）。
 
     幂等：同一 `(scope, scope_key, period_key)` 只会有一行（UNIQUE 约束保证）。
     **不渲染**——渲染是独立一步（`board_render`），因为读路径要尽量轻。
+
+    ## `create=False`：读路径**只查不建**（2026-11-22 · 空看板治理 A+C）
+
+    实测证据：库里 146 块板有 **78 块空板**（无任何 `board_posts`），而 `board_ensure`
+    有 10 个调用点，其中 **3 条是纯读路径**（`board_block` 注入渲染 / `board_show` 查板 /
+    `board_render_root` 聚合）。读一次就建一块板 —— 那 78 块里的大部分是这么来的，
+    不是"没人用"。
+
+    不堵住读路径，任何清理策略（sweep 加空判、空板不渲染）都会退化成"清了又长"。
+
+    `create=False` 且没有板时返回 `None`，调用方自行处理；**绝不返回半成品 dict**
+    ——半成品会被上层当成"板存在但 id 是 None"，然后在写库时炸在很深的地方。
     """
     if scope not in BOARD_SCOPES:
         raise ValueError(f"未知 scope：{scope!r}（可用：{', '.join(BOARD_SCOPES)}）")
@@ -620,6 +656,8 @@ def board_ensure(conn, scope, scope_key="", period_key=None):
     if row:
         return dict(zip(("id", "scope", "scope_key", "period_key", "path", "status",
                          "created_at", "closed_at"), row))
+    if not create:
+        return None
     now = now_utc()
     cur = conn.execute(
         "INSERT INTO boards (scope, scope_key, period_key, path, status, created_at) "
@@ -1855,6 +1893,12 @@ def board_render_root(conn, root, period_key=None, *, home_root=None):
     lines += ["", f"合计：{len(rows)} 块有效看板，{total_people} 人在场"
                   f"（{total_sessions} 人次）。", ""]
 
+    # 2026-11-22：这里**保留建板**（不打 `create=False`）。
+    #
+    # 我一开始把 `board_render_root` 归成"读路径"，理由是它只聚合不产生内容。
+    # 但它是**渲染器**：产物是一份写到磁盘的门面文件。`test_root_board.py::R5`
+    # 钉着"根板空状态必须明写"——今天一个项目都没开工时，根板文件仍要存在，
+    # 里面写"今天还没有任何项目开工"。所以它是**写路径**，该建就建。
     board = board_ensure(conn, "root", "", pk)
     text = "\n".join(lines)
     home = Path(home_root) if home_root else resolve_home_root(Path(root), conn=conn)
@@ -1878,26 +1922,69 @@ def board_sweep(conn, root=None, days=None):
     2. **只按日期**：`period_key < cutoff`。`period_key` 是 `YYMMDD` 定长字符串，
        字典序 == 时间序，可以直接比（这是选 `YYMMDD` 而不是 `YYYY-MM-DD` 的额外好处）
     3. **不删**：`R5-7` 的"不合并、不压缩、不删除"。归档之后照样能 `board show` 读到
+
+    ## 空板提前归档（2026-11-22 · 空看板治理 A）
+
+    实测：146 块板里 **78 块没有任何 `board_posts`**。只按 7 天日期归档等于让一块
+    从没被用过的板占 7 天——它和留 1 天对读者没有区别，但对 `boards` 表是 7 倍。
+
+    所以加第二条判据：**没有动态且超过 `board.empty_sweep_days`（默认 1）就归档**。
+    两道判据是 `OR` 关系：老板按日期走，空板按空走，各自独立。
+
+    为什么空板也要留 1 天而不是当场归档：**今天的板随时可能收到第一条动态**。
+    `empty_sweep_days=0` 会把当天刚签到的板立刻关掉，那是错的。
+
+    ## 显式 `--days` 优先级更高
+
+    `--days N` 有判据钉着"保留最近 N 天"的语义（`test_board_archive.py::C3/C4`）。
+    空板规则**只在 `days is None`（默认策略路径）时生效**——显式参数不被默认策略
+    劫持。维护台账调用的是 `board_sweep(conn, root)`，所以它走默认策略、空板规则生效。
     """
+    # **显式 `--days N` 时只按日期走，空板规则不参与**（2026-11-22 实测修正）。
+    #
+    # 为什么：`--days N` 的语义是"保留最近 N 天"，它有判据钉着
+    # （`test_board_archive.py::C3/C4`）。第一版让空板规则与它 OR，结果
+    # `--days 7` 把 3 天前的空板也归档了 —— **一个显式参数被默认策略劫持**。
+    #
+    # 分工：`--days` 是人的显式意图，字面执行；空板提前归档是**默认策略**，
+    # 只走 `board_sweep(conn, root)` 这条（维护台账用的就是它）。
+    explicit = days is not None
     days = int(days if days is not None else get_config(conn, "board.sweep_days"))
-    if days < 1:
-        return {"swept": 0, "cutoff": None, "closed": []}
+    empty_days = 0 if explicit else int(get_config(conn, "board.empty_sweep_days") or 0)
+    if days < 1 and empty_days < 1:
+        return {"swept": 0, "cutoff": None, "empty_cutoff": None,
+                "empty_swept": 0, "closed": []}
     today = datetime.datetime.now(
         datetime.timezone(datetime.timedelta(hours=8))).date()
     # **语义：`--days N` = "保留最近 N 天"**（含今天）。
     # 所以 7 天 = 10/19..10/25，**10/18 及更早归档** → cutoff 就是今天-N，用 `<=`。
     # 为什么不是 `<`：那样 10/18 会留在边界外（"保留 8 天"），
     # 而 README 级的预期是"保留 7 天"。2026-10-25 实测抓到：`--days 7` 归档 0 块。
-    cutoff = (today - datetime.timedelta(days=days)).strftime("%y%m%d")
+    # `days < 1` 时用一个永远匹配不到的值（`YYMMDD` 字典序里没有比 "000000" 更小的）
+    cutoff = ((today - datetime.timedelta(days=days)).strftime("%y%m%d")
+              if days >= 1 else "000000")
+    # 空板那条判据的截止日；`empty_days < 1` 时用 None（SQL 里 `? IS NOT NULL` 为假）
+    empty_cutoff = ((today - datetime.timedelta(days=empty_days)).strftime("%y%m%d")
+                    if empty_days >= 1 else None)
     now = now_utc()
     rows = conn.execute(
-        "SELECT id, scope, scope_key, period_key FROM boards "
-        "WHERE status='open' AND period_key <= ?", (cutoff,)).fetchall()
+        "SELECT id, scope, scope_key, period_key, "
+        "  EXISTS(SELECT 1 FROM board_posts p WHERE p.board_id = boards.id) AS has_post "
+        "FROM boards "
+        "WHERE status='open' AND ("
+        "    period_key <= ?"
+        "    OR (? IS NOT NULL AND period_key <= ?"
+        "        AND NOT EXISTS(SELECT 1 FROM board_posts p WHERE p.board_id = boards.id))"
+        ") ORDER BY period_key, id", (cutoff, empty_cutoff, empty_cutoff)).fetchall()
     closed = []
-    for bid, scope, key, pk in rows:
+    empty_swept = 0
+    for bid, scope, key, pk, has_post in rows:
         conn.execute("UPDATE boards SET status='closed', closed_at=? WHERE id=?",
                      (now, bid))
-        closed.append({"id": bid, "scope": scope, "scope_key": key, "period_key": pk})
+        closed.append({"id": bid, "scope": scope, "scope_key": key, "period_key": pk,
+                       "empty": not has_post})
+        if not has_post:
+            empty_swept += 1
     conn.commit()
     # 归档会改变"有效看板"集合 → 根板跟着刷
     # S9（第四轮 · 评审 🟡-N8）：与 `board_render` 同款——失败**不打断 sweep**（根板是聚合
@@ -1909,7 +1996,8 @@ def board_sweep(conn, root=None, days=None):
         except Exception as exc:            # noqa: BLE001 —— 见上：不阻断 sweep，但不许静默
             print(f"警告：根板刷新失败（归档已完成 {len(closed)} 块）：{_exc_text(exc)}",
                   file=sys.stderr)
-    return {"swept": len(closed), "cutoff": cutoff, "closed": closed}
+    return {"swept": len(closed), "cutoff": cutoff, "empty_cutoff": empty_cutoff,
+            "empty_swept": empty_swept, "closed": closed}
 
 
 def board_render(conn, root, board, *, home_root=None):
@@ -1930,6 +2018,17 @@ def board_render(conn, root, board, *, home_root=None):
     root = Path(root)
     home = Path(home_root) if home_root else resolve_home_root(root, conn=conn)
     posts = board_post_rows(conn, board, limit=BOARD_POSTS_PER_FILE)
+    # 2026-11-22：**设计稿里的"C 空板不产文件"已撤回**，理由写在下方。
+    #
+    # 原设想：空板渲染出来只有标题 + 空表，没有信息量，省掉一份门面文件。
+    # 实测推翻：`test_board.py::B4` 钉着一条更早的契约 ——
+    #   「渲染必须有两区：在场表 + 今日动态；**空看板要明写而不是留白**」
+    # 以及 `board_block` 的设计约束 3：「留白会让 AI 以为看板这个功能坏了」。
+    # 那两条讲的不只是注入包，**文件本身也是给人读的门面**：
+    # 文件不存在与"今天没人开工"是两件事，删掉文件就把后者变成前者。
+    #
+    # 所以 C 的真实收益（少 16 个文件）**小于**"读者分不清没开工与坏了"的代价。
+    # 空板治理只保留 A（提前归档）+ 读路径不建板（堵住源头）。
     presence_only = len(_render_one(conn, board, []).encode("utf-8"))
     # 主文件预算 = 上限 - 在场表基线 - 指针句余量
     budget = max(1024, BOARD_MAX_BYTES - presence_only - 400)
@@ -1979,8 +2078,20 @@ def board_render(conn, root, board, *, home_root=None):
 
 
 def board_show(conn, scope, scope_key="", period_key=None):
-    """读一块板（不渲染）：返回板信息 + 在场 + 动态。"""
-    board = board_ensure(conn, scope, scope_key, period_key)
+    """读一块板（不渲染）：返回板信息 + 在场 + 动态。
+
+    ## 读路径**只查不建**（2026-11-22 · 空看板治理 A+C）
+
+    旧实现走 `board_ensure` 的建板分支：`fish board show` 查一块不存在的板，
+    会**顺手把它建出来**。于是"看一眼"与"发生了一件事"在库里长得一样。
+
+    现在没有板时返回一块**不落库的虚拟板**（`_virtual_board`，`id=None`）：
+    接口形状不变（`_render_one` 只读 scope/scope_key/period_key/status/closed_at），
+    但库里不多一行。
+    """
+    board = board_ensure(conn, scope, scope_key, period_key, create=False)
+    if board is None:
+        board = _virtual_board(scope, scope_key or "", period_key)
     return {"board": board, "presence": board_presence_rows(conn, board),
             "posts": board_post_rows(conn, board, limit=20)}
 

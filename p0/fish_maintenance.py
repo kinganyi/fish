@@ -57,6 +57,7 @@ from pathlib import Path
 
 import fish_common
 import fish_kb_index
+import fish_board
 
 # ---------------------------------------------------------------- 常量（口径）
 
@@ -67,6 +68,7 @@ TASK_ORDER = (
     "links_rebuild",
     "push_log_prune",
     "citizens_archive",
+    "board_sweep",
     "fts_verify",
     "corpus_ingest",
     "corpus_retag",
@@ -93,6 +95,11 @@ TASK_SPECS = {
         "interval_hours": 24,
         "enabled": 1,
         "what": "归档 N 天不活跃的非主人公民（可逆的搬行）",
+    },
+    "board_sweep": {
+        "interval_hours": 24,
+        "enabled": 1,
+        "what": "归档过期与空看板（只改 status，不删任何东西）",
     },
     "fts_verify": {
         "interval_hours": 24,
@@ -635,11 +642,38 @@ def _task_corpus_retag(conn, root, deps, now_dt):
     return affected, detail
 
 
+def _task_board_sweep(conn, root, deps, now_dt):
+    """`board_sweep`（24h）：把**过期**与**空**看板归档（只改 status，不删任何东西）。
+
+    ## 为什么进台账（2026-11-22 · 空看板治理）
+
+    它此前只由 `daily_report` 硬调（`daily_report.py:665`），**台账里没有这一行**：
+    跑没跑、跑成没跑、失败没有，全都查不到。同一件事挂在两条链上，一条可观测、
+    一条不可观测 —— 那等于把可观测性押在"调用方记得"。
+
+    ## 两道规则都靠配置，不靠台账 `enabled`
+
+    `board.sweep_days`（缺省 7）与 `board.empty_sweep_days`（缺省 1），各自 `<1`
+    时关闭对应规则。两道都 `<1` 时 `board_sweep` 自己返回 0，这里**如实报 0 而不是
+    skip** —— "开着但今天没东西可归档"与"关着不跑"是两种不同的状态，混成一种就
+    等于把"我关了它"藏进"今天没事"里。
+    """
+    res = fish_board.board_sweep(conn, root) or {}
+    detail = {
+        "swept": _as_int(res.get("swept")),
+        "empty_swept": _as_int(res.get("empty_swept")),
+        "cutoff": res.get("cutoff"),
+        "empty_cutoff": res.get("empty_cutoff"),
+    }
+    return _as_int(res.get("swept")), detail
+
+
 _TASKS = {
     "kb_reindex": _task_kb_reindex,
     "links_rebuild": _task_links_rebuild,
     "push_log_prune": _task_push_log_prune,
     "citizens_archive": _task_citizens_archive,
+    "board_sweep": _task_board_sweep,
     "fts_verify": _task_fts_verify,
     "corpus_ingest": _task_corpus_ingest,
     "corpus_retag": _task_corpus_retag,

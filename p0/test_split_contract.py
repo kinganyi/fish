@@ -167,7 +167,10 @@ FISH_COMMON_LINES_MIN = 550
 # 正是这次"归档后 rebuild 改写归属"缺陷的根因所在。
 # 2026-11-19：950 → 960。加 `corpus.citizen_isolation` 配置键（默认 False）。
 # 那个键是用户澄清「持票人不做默认限制」的落地位置——收窄改成可选。
-FISH_COMMON_LINES_MAX = 960
+# 2026-11-22：960 → 970。加 `board.empty_sweep_days`（空看板提前归档，缺省 1）。
+# 这是**配置键表**的正常增长：所有 `board.*` 键都在这张表里，把新键放别处
+# 就等于制造第二处配置面。注释已压到 1 行，只占 2 行（注释 + 键）。
+FISH_COMMON_LINES_MAX = 970
 # 2026-11-11 新模块 · `rebuild_projection`（404 行 + 说明）：fish.py 里最长也最危险的
 # 函数，外部审查 🔴9 就出在它身上。给它自己的窗口，防它再长成第二个巨石。
 FISH_REBUILD_LINES_MIN = 380

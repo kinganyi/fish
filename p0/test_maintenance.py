@@ -188,7 +188,8 @@ class M1IntervalTest(_Base):
         fm.set_task_enabled(self.conn, "corpus_retag", True)
         first = self.run_tasks()
         self.assertEqual(first["errors"], 0, first)
-        self.assertEqual((first["ran"], first["skipped"]), (7, 0), first)
+        n_all = len(fm.TASK_ORDER)
+        self.assertEqual((first["ran"], first["skipped"]), (n_all, 0), first)
         for task in first["tasks"]:
             self.assertEqual(task["status"], "ok", task)
 
@@ -198,7 +199,7 @@ class M1IntervalTest(_Base):
         # 1 小时后：最长的间隔是 6h，所以七个任务全部在间隔内
         second = self.run_tasks(now="2026-10-27T13:00:00Z")
         self.assertEqual((second["ran"], second["skipped"], second["errors"]),
-                         (0, 7, 0), second)
+                         (0, n_all, 0), second)
         for task in second["tasks"]:
             self.assertEqual(task["status"], "skipped", task)
             self.assertEqual(task["reason"], fm.REASON_INTERVAL, task)
@@ -209,7 +210,7 @@ class M1IntervalTest(_Base):
 
         # force 越过间隔闸门（关闭的任务仍然不跑，那条在 LedgerControlTest）
         forced = self.run_tasks(now="2026-10-27T13:00:00Z", force=True)
-        self.assertEqual((forced["ran"], forced["skipped"]), (7, 0), forced)
+        self.assertEqual((forced["ran"], forced["skipped"]), (n_all, 0), forced)
         self.assertEqual(forced["errors"], 0, forced)
 
 
@@ -243,11 +244,33 @@ class M2IsolationTest(_Base):
 
 # ============================================================ M3 台账
 class M3LedgerTest(_Base):
-    def test_M3_seven_rows_seeded_idempotently(self):
+    def test_task_count_is_pinned(self):
+        """维护任务总数**显式钉死**在这里 —— 全仓唯一一处。
+
+        其余判据一律从 `fm.TASK_ORDER` 派生；只有这里写死数字。
+
+        为什么留这一处：加/删维护任务是**有代价的决定** —— 台账多一行、日报多一步、
+        每个库多一次读写机会。所以它必须被人主动改一次并写下理由，
+        不能靠"跟着 TASK_ORDER 自动变"悄悄漂过去。
+
+        2026-11-22：7 → 8。新增 `board_sweep`（空看板治理 A）。此前它只由
+        `daily_report` 硬调、台账里没有这一行 —— 跑没跑、成没成都查不到。
+        """
+        self.assertEqual(len(fm.TASK_ORDER), 8,
+                         "维护任务数变了：改这个数字的同时要说明加/删了什么、为什么")
+        self.assertEqual(len(fm.TASK_ORDER), len(set(fm.TASK_ORDER)),
+                         "TASK_ORDER 里有重复任务名")
+        self.assertEqual(set(fm.TASK_ORDER), set(fm.TASK_SPECS),
+                         "TASK_ORDER 与 TASK_SPECS 必须一一对应")
+        self.assertEqual(set(fm.TASK_ORDER), set(fm._TASKS),
+                         "TASK_ORDER 与 _TASKS 必须一一对应")
+
+    def test_M3_all_rows_seeded_idempotently(self):
+        # 数量不写死：`TASK_ORDER` 是唯一源。显式钉子在 `test_task_count_is_pinned`。
         first = fm.ensure_maintenance_tables(self.conn)
-        self.assertEqual(first["tasks"], 7)
+        self.assertEqual(first["tasks"], len(fm.TASK_ORDER))
         self.assertTrue(first["created"], "首次必须真的建表")
-        self.assertEqual(first["seeded"], 7)
+        self.assertEqual(first["seeded"], len(fm.TASK_ORDER))
         second = fm.ensure_maintenance_tables(self.conn)
         self.assertFalse(second["created"], "第二次不该再建表")
         self.assertEqual(second["seeded"], 0, "seed 必须 INSERT OR IGNORE")
@@ -264,8 +287,9 @@ class M3LedgerTest(_Base):
 
     def test_M3_readings_are_readable_after_run(self):
         status = fm.maintenance_status(self.conn)
-        self.assertEqual(status["count"], 7)
-        self.assertEqual(len(status["tasks"]), 7)
+        # 数量不写死：`TASK_ORDER` 是唯一源。显式钉子在 `test_task_count_is_pinned`。
+        self.assertEqual(status["count"], len(fm.TASK_ORDER))
+        self.assertEqual(len(status["tasks"]), len(fm.TASK_ORDER))
         self.assertTrue(all(task["due"] for task in status["tasks"]
                             if task["enabled"]), "从未运行 = 到期")
 
