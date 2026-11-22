@@ -61,3 +61,7 @@ p0/_run_*
 # 一次性调试/修复产物（`_pwshfix-pytest.txt` 这类）
 /_pwshfix-*.txt
 /_*.log
+
+# 文档目录由 p0/tools/doc_index.py 生成，登记的是不随库发布的根目录编号文档——
+# 放进公开仓就是一份指向不存在文件的清单。只在本地生成。
+docs-catalog.json
