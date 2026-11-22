@@ -216,6 +216,28 @@ class BoardHygieneTest(unittest.TestCase):
         self.assertIn("empty_cutoff", detail)
         self.assertIn("empty_swept", detail)
 
+    def test_H6_board_sweep_is_run_by_daily_pipeline(self):
+        """日报的维护管道必须真的跑到 `board_sweep`，并把 `last_run_at` 写进台账。
+
+        2026-11-23（复查 BUG-4）：`board_sweep` 已进台账，但日报仍直接调
+        `fish.board_sweep()`，而维护管道的 `only=` 不含它 —— 台账 `last_run_at`
+        永远是 None（跑没跑查不到）。修法：唯一 owner = 维护管道。
+
+        变异：把 `daily_report.MAINTENANCE_DAILY_ONLY` 里的 `board_sweep` 删掉
+        → `last_run_at` 仍为 None，本条变红。
+        """
+        import daily_report
+        self.assertIn("board_sweep", daily_report.MAINTENANCE_DAILY_ONLY,
+                      "日报维护管道的 only 名单里没有 board_sweep")
+        fish_maintenance.run_maintenance(
+            self.conn, self.root,
+            only=list(daily_report.MAINTENANCE_DAILY_ONLY), force=True)
+        row = self.conn.execute(
+            "SELECT last_run_at, last_status FROM maintenance_task "
+            "WHERE task_name='board_sweep'").fetchone()
+        self.assertIsNotNone(row[0], "日报管道没跑 board_sweep：last_run_at 仍是 None")
+        self.assertEqual(row[1], "ok")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

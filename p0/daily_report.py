@@ -454,7 +454,10 @@ def corpus_ingest_step(root=None, *, enabled=None, reason=None):
                 days=fish_corpus.DEFAULT_WINDOW_DAYS,
                 project_of=lambda cwd: fish.resolve_project_by_cwd(conn, cwd),
                 citizen_of=lambda key: fish.fish_activity.resolve_citizen(conn, key),
-                candidates_of=lambda cwd: fish.list_workspace_candidates(conn, cwd))
+                candidates_of=lambda cwd: fish.list_workspace_candidates(conn, cwd),
+                # 2026-11-23（复查 BUG-6）：帧上限的配置键必须从这里注入，否则
+                # `corpus.max_frame_bytes` 只在 CLI 生效、日报永远用 64 MiB 缺省。
+                config_of=lambda key: fish.get_config(conn, key))
         finally:
             conn.close()
         if res.get("busy"):
@@ -491,9 +494,14 @@ def corpus_ingest_step(root=None, *, enabled=None, reason=None):
 # （`corpus_ingest_step`，带 CLI/env/配置三档闸门）。若这里再跑一次：
 #   ① 配置开启时会在同一天**采两遍**（分钟级动作，第二遍还会抢写锁）；
 #   ② `--no-corpus` 会被维护任务绕过（那是用户明确说"这次别采"）。
-# 其余六个任务归维护管道：间隔由台账判，不会与既有步骤重复。
+# 其余任务归维护管道：间隔由台账判，不会与既有步骤重复。
+#
+# 2026-11-23（复查 BUG-4）：`board_sweep` 也收进这里。此前日报在 `main()` 里
+# **直接调** `fish.board_sweep()`，而它又已注册成维护任务——同一动作两个 owner：
+# 维护管道的 `only=` 不含它，所以台账 `last_run_at` 永远是 None（跑没跑查不到）。
+# 现在唯一 owner = 维护管道；日报不再直接调它。
 MAINTENANCE_DAILY_ONLY = ("kb_reindex", "links_rebuild", "push_log_prune",
-                          "fts_verify", "corpus_retag")
+                          "board_sweep", "fts_verify", "corpus_retag")
 # 安全审计 🟡-11：`citizens_archive` **不在此列**——日报已有唯一 owner
 # （`archive_citizens_step`，读同一个配置键、调同一个函数）。放进维护管道会让
 # 同一晚搬行动作跑两遍（第二遍空转却把台账 last_affected 写成 0，误导排查）。
@@ -653,22 +661,10 @@ def main(argv=None):
     except Exception as e:                 # noqa: BLE001 — 派生数据，不许拖垮主流程
         push_line = f"推送收口失败：{type(e).__name__}: {e}"
 
-    # 看板归档（2026-10-25 · 用户要求 C）：把 N 天前的 open 板置 closed。
-    # 为什么挂在每日任务：它天然就是"每天该干一次"的事，而这里已经有调度；
-    # 再不归档的话 `boards` 里的 open 板会日复一日累积（看板按日切、没有别的东西会关它）。
+    # 看板归档（2026-10-25 · 用户要求 C；2026-11-23 收口）：已并入维护管道——
+    # `board_sweep` 是台账里的任务，由 `maintenance_step()` 执行并写 `last_run_at`。
+    # 这里不再直接调用：**一个动作只能有一个 owner**；两边都调会让台账永远不记录运行时刻。
     board_line = ""
-    try:
-        sys.path.insert(0, str(HERE))
-        import fish as fishlib             # noqa: PLC0415 —— 延迟导入：日报不该依赖 fish 的加载期副作用
-        conn = fishlib.connect(DATA)
-        try:
-            sw = fishlib.board_sweep(conn, DATA)
-        finally:
-            conn.close()
-        board_line = (f"看板归档：{sw['swept']} 块（截止 {sw['cutoff']}）"
-                      if sw.get("cutoff") else "看板归档：跳过（board.sweep_days < 1）")
-    except Exception as e:                 # noqa: BLE001 — 派生数据，不许拖垮主流程
-        board_line = f"看板归档失败：{type(e).__name__}: {e}"
 
     # 动作流清理（2026-10-26 · T02）：保留期默认 14 天，与撞车审计同一口径。
     # 按发生顺序：先清旧的 → 再备份（备份里是"已经是正确形状"的库）。
