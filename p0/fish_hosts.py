@@ -142,8 +142,11 @@ PUSH_ENTRY_MARKERS = ("maybe_push(", "select_push_candidates(", "append_push_log
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 一、spec 的数据结构（20 个字段按「怎么被验证」组织，不是按好看）
+# 一、spec 的数据结构（字段按「怎么被验证」组织，不是按好看）
 # ══════════════════════════════════════════════════════════════════════════
+# 字段分三组：**事实**（id/display/protocol/路径/事件/方言/采集器/身份/版本）、
+# **安装面**（hooks_install / hook_interpreter / hooks_plan / mcp_entry，设计 106 W3/W5）、
+# **派生**（alias_keys / hooks_configs / mcp_configs，不另存）。
 @dataclass(frozen=True)
 class ConfigProbe:
     """一个**配置落点**：这份文件在哪、什么格式、fish 在里面怎么定位。
@@ -192,6 +195,30 @@ class VersionProbe:
 
 
 @dataclass(frozen=True)
+class HookPlan:
+    """一条 hook 的**渲染计划**（纯数据，不含函数；设计 106 §1）。
+
+    为什么是数据而不是「渲染函数」：命令拼接、引号、正斜杠、matcher 配方都是
+    `install_hooks` 的**实现**（设计 §1 最后两行：「一个字都不许搬走」），搬进 spec
+    等于让数据持有实现。所以这里只描述「哪个事件、跑哪个脚本、带什么参数、超时多少、
+    要不要 matcher」——`matcher_kind` 是**配方名**，真实串仍在安装器里（`MATCHER_RECIPES`）。
+
+    `matcher_kind` 的取值：
+      · `""`               —— 该事件组**不带** matcher（缺键本身是契约：dsh 的 PostToolUse 就没有）；
+      · `"write_tools"`    —— 写类工具的字面备选（两宿主共用同一串，见 `PRETOOL_MATCHER`）；
+      · `"activity_tools"` —— 采集面更宽的串（WorkBuddy 的 PostToolUse 专用）。
+
+    ⚠️ 组内键序（`matcher` 在前、`hooks` 在后）决定 JSON 字节，渲染器必须照此拼装。
+    """
+
+    event: str
+    script: str
+    args: str = ""
+    timeout: int = 3
+    matcher_kind: str = ""
+
+
+@dataclass(frozen=True)
 class HostSpec:
     """宿主是什么、能干什么。**新增宿主 = 加一个 spec 字面量**（不改渲染/探测代码）。"""
 
@@ -210,6 +237,19 @@ class HostSpec:
     version_probes: tuple[VersionProbe, ...] = ()
     notes: tuple[str, ...] = ()
     pseudo: bool = False                        # 词表保留值（cli / self），不是安装目标
+
+    # ── 安装面（一期**只读**：安装器读这些字段渲染，注册表不替任何人写盘）─────────
+    #: **本工具是否负责装这台宿主的 hooks**。与 `hooks_supported`（宿主**能不能**挂）是两件事：
+    #: `zcode` 是前真后假（它能挂，fish 不装），混成一个字段就会重演 A2 那类假否定。
+    hooks_install: bool = False
+    #: 解释器取值方式。`literal:python` = 配置里写字面量 `python`（依赖宿主 PATH）；
+    #: `sys.executable` = 写当前解释器绝对路径（WorkBuddy 侧缺省这样跑）。
+    #: ⚠️ 这是**现状的刻意差异**，不是待统一的瑕疵：统一会让 `--check` 字节漂移（docs/106 §4 W3 细节 1）。
+    hook_interpreter: str = "sys.executable"
+    #: hooks 渲染计划（一个事件可以有多组，顺序即写出顺序）。
+    hooks_plan: tuple[HookPlan, ...] = ()
+    #: MCP 条目**模板**（只有 WorkBuddy 有；`{python}`/`{server}`/`{root}` 由 `install_mcp` 现场填）。
+    mcp_entry: Mapping[str, Any] | None = None
 
     # ── 派生（都从上面的字段算，不另存）──────────────────────────────
     @property
@@ -253,6 +293,20 @@ HOSTS: tuple[HostSpec, ...] = (
             "kind": "literal",
             "note": "纯字面备选（Write|write|…）；DSH 工具名是小写，两种写法都要写",
         },
+        # 渲染计划：**安装器只读它**，不再写死两条 if（设计 106 W3）。
+        # 刻意差异 1：DSH 侧解释器写字面量 `python`（宿主 PATH 里的那个）；
+        # 刻意差异 2：PostToolUse **没有** matcher（缺键本身是契约，见 HookPlan 文档）。
+        hooks_install=True,
+        hook_interpreter="literal:python",
+        hooks_plan=(
+            HookPlan(event="SessionStart", script="fish_dsh_hook.py", timeout=25),
+            HookPlan(event="UserPromptSubmit", script="fish_prompt_hook.py",
+                     args="--host dsh", timeout=10),
+            HookPlan(event="PreToolUse", script="fish_pretool_hook.py",
+                     args="--host dsh", timeout=3, matcher_kind="write_tools"),
+            HookPlan(event="PostToolUse", script="fish_push_hook.py",
+                     args="--host dsh --collect-activity", timeout=3),
+        ),
         collector=("fish_dsh_hook.py", "fish_prompt_hook.py",
                    "fish_pretool_hook.py", "fish_push_hook.py"),
         identity={
@@ -294,6 +348,28 @@ HOSTS: tuple[HostSpec, ...] = (
         matcher_dialect={
             "kind": "literal",
             "note": "同 Claude Code 方言；工具名首字母大写（Write），大小写两种写法都在 matcher 里",
+        },
+        # 渲染计划：解释器用 `sys.executable`（**与 DSH 侧的刻意差异**，见 HookPlan 文档）；
+        # PostToolUse 走**更宽**的采集面 matcher（Read/Bash/Glob/…，不只是写类）。
+        hooks_install=True,
+        hook_interpreter="sys.executable",
+        hooks_plan=(
+            HookPlan(event="SessionStart", script="fish_session_hook.py", timeout=15),
+            HookPlan(event="UserPromptSubmit", script="fish_prompt_hook.py",
+                     args="--host workbuddy", timeout=10),
+            HookPlan(event="PreToolUse", script="fish_pretool_hook.py",
+                     args="--host workbuddy", timeout=3, matcher_kind="write_tools"),
+            HookPlan(event="PostToolUse", script="fish_posttool_hook.py",
+                     args="--host workbuddy", timeout=3, matcher_kind="activity_tools"),
+        ),
+        # MCP 条目模板（W5 消费；占位符由 install_mcp 现场填，spec 不记本机绝对路径）。
+        mcp_entry={
+            "type": "stdio",
+            "command": "{python}",
+            "args": ["{server}", "--root", "{root}"],
+            "env": {"PYTHONIOENCODING": "utf-8"},
+            "description": "大肥鱼生命系统：记忆编码 / 身份 / 邻近回忆",
+            "timeout": 30000,
         },
         # 实际装的 4 个采集器：SessionStart→session、UserPromptSubmit→prompt、
         # PreToolUse→pretool、PostToolUse→**posttool**（它的 `maybe_push()` 就是 WorkBuddy

@@ -86,14 +86,54 @@ import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 
-# 宿主配置位置（可用环境变量覆盖，测试/演练必用 `--file`）。
-DSH_HOME = Path(os.environ.get("DSH_HOME") or r"C:\Users\<用户名>\.dsh")
-WORKBUDDY_HOME = Path(os.environ.get("WORKBUDDY_HOME") or r"C:\Users\<用户名>\.workbuddy")
-TARGETS = {
-    "dsh": lambda: DSH_HOME / "hooks.json",
-    "workbuddy": lambda: WORKBUDDY_HOME / "settings.json",
-}
+import fish_hosts  # noqa: E402  宿主注册表：id/事件/渲染计划/配置落点都从这里来
+
+#: 安装目标**由注册表派生**（设计 106 W3）：本工具负责哪些宿主 = `hooks_install=True` 的那几台。
+#: 只有 `dsh`/`workbuddy` 为真——`zcode` 是 `hooks_supported=True` 但 fish 不装，两件事不许混。
+INSTALL_SPECS = tuple(spec for spec in fish_hosts.spec_all() if spec.hooks_install)
+INSTALL_HOSTS = tuple(spec.id for spec in INSTALL_SPECS)
+if not INSTALL_SPECS:
+    raise RuntimeError("注册表里没有任何 hooks_install=True 的宿主：安装器无从下手")
+
+#: hooks 事件顺序**由注册表派生**（`diff_hooks`/`validate_hooks` 的输出顺序由它决定，
+#: 顺序错一个字节就会改 `--check` 文案）。所有安装宿主必须**同序**，否则 import 期硬失败。
+REQUIRED_EVENTS = tuple(INSTALL_SPECS[0].events)
+if not REQUIRED_EVENTS:
+    raise RuntimeError(f"{INSTALL_SPECS[0].id}: events 为空，安装器不知道该装哪几个事件")
+_ORDER_MISMATCH = [spec.id for spec in INSTALL_SPECS
+                   if tuple(spec.events) != REQUIRED_EVENTS]
+if _ORDER_MISMATCH:
+    raise RuntimeError(
+        f"安装宿主的 events 顺序不一致：{_ORDER_MISMATCH} 与 "
+        f"{INSTALL_SPECS[0].id}={REQUIRED_EVENTS} 不同；REQUIRED_EVENTS 只有一份，"
+        "顺序不同会让 --check 文案漂移")
+
+
+def _hooks_probe(spec):
+    """该宿主的 hooks 配置落点（spec 里 `role="hooks"` 的第一条）。"""
+    probe = next(iter(spec.hooks_configs), None)
+    if probe is None:
+        raise ValueError(
+            f"{spec.id}: spec 没有声明 hooks 配置落点（config_paths 里 role='hooks' 的项）")
+    return probe
+
+
+def _target_for(spec) -> Path:
+    """spec → 配置文件路径（**live 解析**：环境变量每次现读，不缓存）。"""
+    probe = _hooks_probe(spec)
+    home, reason = fish_hosts.resolve_home(spec)
+    path, why = fish_hosts.resolve_path(probe.path_template, home)
+    if path is None:
+        raise ValueError(f"{spec.id}: hooks 配置路径解析不出来：{why}（家目录：{reason}）")
+    return Path(path)
+
+
+#: 兼容名（`install_hooks.TARGETS`）：值是**惰性解析**，与旧实现同形。
+#: 键 = import 时快照的安装宿主；解析走 live spec（见 `_target()`）。
+TARGETS = {spec.id: (lambda s=spec: _target_for(s)) for spec in INSTALL_SPECS}
 
 # hooks 是"启动读一次"的：备份名带日期，便于 `--restore latest` 与人工排查。
 BACKUP_SUFFIX = ".bak-20261026-hooks"
@@ -155,34 +195,69 @@ def _hook(script: str, args: str, timeout: int, folder=None, python: str = "pyth
     return {"type": "command", "command": cmd, "timeout": int(timeout)}
 
 
+#: matcher **配方表**（渲染器的实现，**故意留在本文件**）：注册表只写 `matcher_kind`
+#: 这个名字，真实串在这里。设计 106 §1 最后两行：「matcher 配方、命令拼接、引号、
+#: 正斜杠」一个字都不许搬进 spec——搬进去等于让数据持有实现。
+MATCHER_RECIPES = {
+    "write_tools": PRETOOL_MATCHER,        # 写类工具的字面备选（两宿主共用同一串）
+    "activity_tools": WB_POSTTOOL_MATCHER,  # 采集面更宽（WorkBuddy 的 PostToolUse 专用）
+}
+
+
+def _interpreter(spec, python=None) -> str:
+    """解释器取值：显式传入优先，否则按 spec 的 `hook_interpreter` 语义解析。
+
+    两种模式是**现状的刻意差异**（设计 106 §4 W3 细节 1），不是待统一的瑕疵：
+      · `literal:python`      → 配置里写字面量 `python`（DSH 侧，依赖宿主 PATH）；
+      · `sys.executable`      → 写当前解释器绝对路径（WorkBuddy 侧）。
+    统一成任何一种都会让 `--check` 输出字节漂移（并把「哪台宿主用哪个解释器」
+    这条已装事实抹掉）。
+    """
+    if python is not None:
+        return str(python)
+    mode = (spec.hook_interpreter or "").strip()
+    if mode == "literal:python":
+        return "python"
+    if mode == "sys.executable":
+        return sys.executable
+    raise ValueError(
+        f"{spec.id}: 未知 hook_interpreter 模式 {mode!r}（可用：literal:python | sys.executable）")
+
+
 def desired_hooks(host: str, *, folder=None, python: str = None) -> dict:
-    """**唯一一份**目标配置（DSH / WorkBuddy 的差异全部收敛在这里）。"""
-    host = (host or "").strip().lower()
-    py = python if python is not None else ("python" if host == "dsh" else sys.executable)
-    if host == "dsh":
-        return {
-            "SessionStart": [{"hooks": [_hook("fish_dsh_hook.py", "", 25, folder, py)]}],
-            "UserPromptSubmit": [{"hooks": [
-                _hook("fish_prompt_hook.py", "--host dsh", 10, folder, py)]}],
-            "PreToolUse": [{"matcher": DSH_PRETOOL_MATCHER,
-                            "hooks": [_hook("fish_pretool_hook.py", "--host dsh", 3,
-                                            folder, py)]}],
-            "PostToolUse": [{"hooks": [
-                _hook("fish_push_hook.py", "--host dsh --collect-activity", 3, folder, py)]}],
-        }
-    if host == "workbuddy":
-        return {
-            "SessionStart": [{"hooks": [_hook("fish_session_hook.py", "", 15, folder, py)]}],
-            "UserPromptSubmit": [{"hooks": [
-                _hook("fish_prompt_hook.py", "--host workbuddy", 10, folder, py)]}],
-            "PreToolUse": [{"matcher": WB_PRETOOL_MATCHER,
-                            "hooks": [_hook("fish_pretool_hook.py", "--host workbuddy", 3,
-                                            folder, py)]}],
-            "PostToolUse": [{"matcher": WB_POSTTOOL_MATCHER,
-                             "hooks": [_hook("fish_posttool_hook.py", "--host workbuddy", 3,
-                                             folder, py)]}],
-        }
-    raise ValueError(f"未知宿主 {host!r}（可用：{', '.join(TARGETS)}）")
+    """**唯一一份**目标配置（差异全部收敛在注册表的 `hooks_plan` 里）。
+
+    ⚠️ 这个函数名是**锁定的可 patch 点**：`cmd_check` 必须**经模块全局名**调用它。
+    `test_surface_naming.py:432/452` 用 `mock.patch.object(ih, "desired_hooks")` 构造
+    变异判据（"括号不平衡的锚定串" / "前导空格 matcher"），直调
+    `fish_hosts.render_hooks(...)` 会让 `patch.object` 失效 → 那两条变异永远红/永远绿，
+    判据就失去判别力（设计 106 §7 风险 1，W3 第一红线）。
+    """
+    key = (host or "").strip().lower()
+    try:
+        spec = fish_hosts.spec_of(key)
+    except KeyError:
+        spec = None
+    if spec is None or not spec.hooks_plan:
+        raise ValueError(f"未知宿主 {key!r}（可用：{', '.join(TARGETS)}）")
+    py = _interpreter(spec, python)
+    rendered: dict = {}
+    for plan in spec.hooks_plan:
+        entry = _hook(plan.script, plan.args, plan.timeout, folder, py)
+        if plan.matcher_kind:
+            try:
+                matcher = MATCHER_RECIPES[plan.matcher_kind]
+            except KeyError:
+                raise ValueError(
+                    f"{spec.id}/{plan.event}: 未知 matcher 配方 {plan.matcher_kind!r}"
+                    f"（可用：{', '.join(MATCHER_RECIPES)}）") from None
+            # 组内键序是契约：`matcher` 在前、`hooks` 在后（决定 JSON 字节）。
+            group = {"matcher": matcher, "hooks": [entry]}
+        else:
+            # 缺 matcher 键本身就是契约（dsh 的 PostToolUse 没有它）。
+            group = {"hooks": [entry]}
+        rendered.setdefault(plan.event, []).append(group)
+    return rendered
 
 
 # ------------------------------------------------------------------ 校验
@@ -588,9 +663,37 @@ def restore_host(path: Path, which: str = "latest") -> dict:
 
 
 def _target(host: str, file=None) -> Path:
+    """宿主的配置文件路径：显式 `--file` 优先（测试/演练），否则走 **live spec**。
+
+    为什么不是 `TARGETS[host]()`：`TARGETS` 的键是 import 时快照，而注册表可以在运行期
+    扩容（设置页的「重新探测」/ 测试里的 ghost spec）。解析跟着 live spec 走，
+    扩容后不必重载本模块也能拿到正确落点。
+    """
     if file:
         return Path(file)
-    return TARGETS[host]()
+    return _target_for(fish_hosts.spec_of(host))
+
+
+def _refuse_default_home(hosts, file, allow_default_home) -> str | None:
+    """写类动作的**家目录护栏**（设计 106 §7 D2）→ 拒绝时返回文案，放行返回 `None`。
+
+    为什么只拦写不拦读：`--check` 读缺省路径最多是「判不到」（且 D1 已把占位符假红修好），
+    而 `--apply`/`--restore` 在环境变量未设置时会**真的写进** `~/.dsh` / `~/.workbuddy`——
+    那是一份没人预期的配置。17 条锁定判据全部走 `--file`，所以这条护栏不改变任何
+    既有成功路径；它只拦住「以为自己在改测试副本、其实改了真配置」这类事故。
+    """
+    if file or allow_default_home:
+        return None
+    for host in hosts:
+        spec = fish_hosts.spec_of(host)
+        home, reason = fish_hosts.resolve_home(spec)
+        if home and reason == "缺省路径":
+            env = spec.home_env or "（该宿主没有家目录环境变量）"
+            return (f"[{host}] 拒绝写入：家目录来自 spec 缺省路径 {home}，环境变量 {env} 未设置。\n"
+                    "  写类动作只允许写**显式指定**的家目录（docs/106 D2）：占位符兜底路径写进去，"
+                    "就是一份没人预期的配置。\n"
+                    f"  确认要写这里请加 `--allow-default-home`，或先设置 {env}。")
+    return None
 
 
 def _utf8_stdout() -> None:
@@ -648,7 +751,12 @@ def cmd_check(hosts, file=None, folder=None, force=False) -> int:
     return 0
 
 
-def cmd_apply(hosts, file=None, folder=None, force=False) -> int:
+def cmd_apply(hosts, file=None, folder=None, force=False, allow_default_home=False) -> int:
+    _utf8_stdout()
+    refusal = _refuse_default_home(hosts, file, allow_default_home)
+    if refusal:
+        print(refusal)
+        return 2
     bad = 0
     for host in hosts:
         path = _target(host, file)
@@ -674,7 +782,7 @@ def cmd_apply(hosts, file=None, folder=None, force=False) -> int:
     return 1 if bad else 0
 
 
-def cmd_restore(hosts, which, file=None) -> int:
+def cmd_restore(hosts, which, file=None, allow_default_home=False) -> int:
     """按备份字节还原，**还原后立刻校验目标文件**（N2：latest 可能是坏版本）。
 
     `latest` 只是"最近一次备份"，可能早于某次修复、甚至就是那次坏配置本身。
@@ -682,6 +790,10 @@ def cmd_restore(hosts, which, file=None) -> int:
     整份拒绝"，并让退出码非 0——回滚不该静默地把系统退回到不工作状态。
     """
     _utf8_stdout()
+    refusal = _refuse_default_home(hosts, file, allow_default_home)
+    if refusal:
+        print(refusal)
+        return 2
     bad = 0
     for host in hosts:
         path = _target(host, file)
@@ -727,20 +839,24 @@ def main(argv=None) -> int:
     mode.add_argument("--restore", nargs="?", const="latest", default=None,
                       metavar="WHICH",
                       help="按备份字节还原（缺省 latest；还原后会校验，坏版本非 0）")
-    ap.add_argument("--host", default="all", choices=["all", "dsh", "workbuddy"],
-                    help="只处理某个宿主（缺省 all）")
+    ap.add_argument("--host", default="all", choices=["all", *INSTALL_HOSTS],
+                    help="只处理某个宿主（缺省 all；取值来自注册表 hooks_install=True 的那几台）")
     ap.add_argument("--file", default=None, help="显式指定配置文件（测试/演练用）")
     ap.add_argument("--force", action="store_true",
                     help="整层替换 hooks（会删除其它事件；缺省为合并保留）")
+    ap.add_argument("--allow-default-home", action="store_true", dest="allow_default_home",
+                    help="允许写类动作使用 spec 的缺省家目录（环境变量未设置时的护栏，见 docs/106 D2）")
     args = ap.parse_args(argv)
-    hosts = ["dsh", "workbuddy"] if args.host == "all" else [args.host]
+    hosts = list(INSTALL_HOSTS) if args.host == "all" else [args.host]
     if args.file and len(hosts) > 1:
         ap.error("--file 只能配一个宿主（配 --host dsh|workbuddy）")
     if args.check:
         return cmd_check(hosts, args.file, force=args.force)
     if args.apply:
-        return cmd_apply(hosts, args.file, force=args.force)
-    return cmd_restore(hosts, args.restore, args.file)
+        return cmd_apply(hosts, args.file, force=args.force,
+                         allow_default_home=args.allow_default_home)
+    return cmd_restore(hosts, args.restore, args.file,
+                       allow_default_home=args.allow_default_home)
 
 
 if __name__ == "__main__":
