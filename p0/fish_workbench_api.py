@@ -14,6 +14,9 @@ fish 工作台首屏要一条**真实**的五源合流时间线：工具动作�
     GET /api/stream   中间流水：五源合流（单键 sk 排序 + 折叠），带游标
     GET /api/stats    右栏页签一：在跑/最近来过、公民、工具、热推、热搜、未闭合档期
     GET /api/entry    右栏页签二：单条详情 + 公民档案 + 该公民最近动作/事件
+    GET /api/hosts    设置页：宿主接入层投影（装没装 / 接没接 / 接的哪条通道）
+    GET /api/hosts/<id>           单个宿主详情（每次现探）
+    POST /api/hosts/<id>/refresh  重探一次（**不写盘**：唯一的写语义，且没有副作用）
 
 ## 三条硬纪律（与 fish_ui.py 同构，不另立一套）
 
@@ -71,12 +74,15 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 import fish_naming  # noqa: E402  人类面取名唯一实现
+import fish_hosts   # noqa: E402  宿主接入层（只读探测：装没装/接没接/接的哪条通道）
 import fish_ui      # noqa: E402  只读连接纪律 + 会话短标识兜底
 
 SCHEMA = "fish-workbench/1"
 #: 此读口实现的端点清单（`/api/meta` 的 `capabilities`）——**已实现**，不是"计划"。
 #: 口径：页签名叫「现场」，数据契约名沿用 `workbench`（改名要连带改测试，契约锚点不动）。
-API_CAPABILITIES = ("entry", "facets", "health", "meta", "stats", "stream")
+#: `hosts` = 设置页的宿主投影（`GET /api/hosts`、`GET /api/hosts/<id>`、
+#: `POST /api/hosts/<id>/refresh`）；它**只读**，唯一的 POST 也不写盘（重探一次）。
+API_CAPABILITIES = ("entry", "facets", "health", "hosts", "meta", "stats", "stream")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8790
 
@@ -1933,6 +1939,70 @@ def api_meta(db_path: str) -> dict:
     }
 
 
+# ── 宿主接入层（设置页的读口）：**每次现探，不落库、不缓存、不写盘** ──────────
+def api_hosts(db_path: str) -> dict:
+    """`GET /api/hosts`：只列**探测到安装痕迹**的宿主，按注册表顺序。
+
+    三条口径写死在这里：
+      1. **不缓存**：探测结果是「当下」，缓存会变成「看起来装了、其实早卸了」；
+      2. **只读**：`fish_hosts` 里没有一处写文件；这个端点也不碰库（只读连接查最后活跃）；
+      3. **列表口径 = installed**：装了但没接 fish 的宿主也要出现（空心点那档），
+         否则用户永远看不到「这台机器上还有谁没接」。
+    """
+    started = time.perf_counter()
+    now = now_dt()
+    items = fish_hosts.installed_statuses(db_path=db_path)
+    consistency = fish_hosts.consistency()
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+    with_seen = sum(1 for item in items if item["lastSeenAt"])
+    sources = [
+        {"source": "hosts.files", "ok": True, "rows": len(items), "error": None,
+         "ms": elapsed_ms},
+        {
+            "source": "hosts.db",
+            "ok": os.path.isfile(db_path),
+            "rows": with_seen,
+            "error": None if os.path.isfile(db_path) else f"库不存在：{db_path}",
+            "ms": elapsed_ms,
+        },
+    ]
+    return envelope(
+        {"items": items, "generatedAt": iso(now), "consistency": consistency},
+        as_of=iso(now),
+        availability={"state": "ok" if items else "empty",
+                      "detail": None if items else "本机没有探测到任何已安装的宿主"},
+        sources=sources,
+    )
+
+
+def api_host(db_path: str, host_id: str) -> dict | None:
+    """`GET /api/hosts/<id>`（也用于 `POST .../refresh`）：单个宿主的详情，**每次现探**。
+
+    注意：**refresh 与 GET 详情是同一条实现**——本读口本来就不缓存探测结果，所以
+    「刷新」不需要另一条代码路径（写两条只会让两条慢慢漂开）。动作面显式的意义在
+    HTTP 层：刷新是 `POST`，它明确表示「允许重探」，而 GET 只是读。
+    """
+    started = time.perf_counter()
+    now = now_dt()
+    if host_id not in fish_hosts.REGISTRY:
+        return None
+    item = fish_hosts.detect(host_id, db_path=db_path)
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+    return envelope(
+        item,
+        as_of=iso(now),
+        availability={"state": "ok", "detail": None},
+        sources=[
+            {"source": "hosts.files", "ok": True, "rows": len(item["configs"]),
+             "error": None, "ms": elapsed_ms},
+            {"source": "hosts.db", "ok": os.path.isfile(db_path),
+             "rows": len(item["lastSeenSources"]),
+             "error": None if os.path.isfile(db_path) else f"库不存在：{db_path}",
+             "ms": elapsed_ms},
+        ],
+    )
+
+
 def warm_up(db_path: str) -> None:
     """启动后后台预热：把 stats（含 `import fish` 的固定成本）与 facets 先算一遍。
 
@@ -1987,6 +2057,8 @@ CONTENT_TYPES = {
 }
 
 _ORIGIN_RE = re.compile(r"^http://(127\.0\.0\.1|localhost)(:\d+)?$")
+#: 唯一的写语义路径（**不写盘**：重探一次宿主，返回同一份结构）。GET 详情与它共用实现。
+REFRESH_PATH_RE = re.compile(r"^/api/hosts/([a-z][a-z0-9-]{1,31})/refresh$")
 
 
 # ── HTTP 层 ─────────────────────────────────────────────────────────────
@@ -2060,20 +2132,86 @@ class Handler(BaseHTTPRequestHandler):
         if origin:
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Max-Age", "600")
         self.end_headers()
 
     def _reject_non_get(self):  # noqa: N802
+        """除 `POST /api/hosts/<id>/refresh` 外**一律拒写**（PUT/PATCH/DELETE 仍只有这条出路）。"""
         self._send_error(405, "method_not_allowed",
-                         "这个读口只有 GET（一期只读，没有任何写入端点）",
-                         "改用 GET")
+                         "这个读口只读：GET 读，唯一的写语义是 POST /api/hosts/<id>/refresh"
+                         "（重探一次，**不写盘**）",
+                         "改用 GET；要重新探测宿主就 POST /api/hosts/<id>/refresh")
 
-    do_POST = _reject_non_get      # noqa: N815
     do_PUT = _reject_non_get       # noqa: N815
     do_PATCH = _reject_non_get     # noqa: N815
     do_DELETE = _reject_non_get    # noqa: N815
+
+    def do_POST(self):  # noqa: N802
+        """**唯一的 POST**：`POST /api/hosts/<id>/refresh`（重探一次，**不写盘**）。
+
+        为什么留一个 POST：设置页的「刷新」是一个**允许发生的动作**，用 GET 表达会让人以为
+        刷几次都一样；用 POST 把「这次是新证据」写进 HTTP 语义里。它没有副作用：不写宿主配置、
+        不写库、不 spawn 宿主——只重读一次文件与库，返回同一份结构。
+        """
+        started = time.perf_counter()
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/") or "/"
+        status = 200
+        try:
+            allowed, origin = self._origin_allowed()
+            if not allowed:
+                status = 403
+                self._send_error(403, "origin_rejected",
+                                 "只接受来自 http://127.0.0.1 或 http://localhost 的请求",
+                                 "从本机页面或 curl 访问；Origin: null 会被拒绝")
+                return
+            match = REFRESH_PATH_RE.fullmatch(path)
+            if not match:
+                status = 405
+                self._reject_non_get()
+                return
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            if length > 65536:
+                status = 413
+                self._send_error(413, "payload_too_large", "刷新不需要请求体",
+                                 "别带 body：刷新只是重探一次")
+                return
+            if length:
+                self.rfile.read(length)   # 读完，避免 keep-alive 下串包（语义上忽略）
+            host_id = match.group(1)
+            if host_id not in fish_hosts.REGISTRY:
+                status = 404
+                self._send_error(404, "unknown_host", f"未登记的宿主 id：{host_id}",
+                                 f"可用：{', '.join(fish_hosts.REGISTRY)}")
+                return
+            if not self.semaphore.acquire(blocking=False):
+                status = 503
+                self._send_error(503, "busy", "并发连接已满（上限 8）", "等一秒再重试")
+                return
+            try:
+                payload = api_host(self.db_path, host_id)
+            finally:
+                self.semaphore.release()
+            self._send_json(200, payload, allow_origin=origin)
+        except BrokenPipeError:
+            status = 499
+        except Exception as exc:  # noqa: BLE001  读口出错要说出来，不静默
+            status = 500
+            log("request_error", path=path, method="POST",
+                error=f"{type(exc).__name__}: {exc}")
+            try:
+                self._send_error(500, "internal_error", f"{type(exc).__name__}: {exc}",
+                                 "看服务端 stderr 的那行 JSON 日志；这是读口的缺陷")
+            except OSError:
+                pass
+        finally:
+            log("request", path=path, method="POST", status=status,
+                ms=round((time.perf_counter() - started) * 1000, 2))
 
     def do_GET(self):  # noqa: N802
         started = time.perf_counter()
@@ -2154,6 +2292,28 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, api_meta(self.db_path), allow_origin=origin)
             return 200
 
+        # ── 宿主接入层（设置页）：列表 / 详情；重探走 POST ──────────────
+        if path == "/api/hosts":
+            self._send_json(200, api_hosts(self.db_path), allow_origin=origin)
+            return 200
+
+        host_match = re.fullmatch(r"/api/hosts/([a-z][a-z0-9-]{1,31})", path)
+        if host_match:
+            host_id = host_match.group(1)
+            if host_id not in fish_hosts.REGISTRY:
+                self._send_error(404, "unknown_host", f"未登记的宿主 id：{host_id}",
+                                 f"可用：{', '.join(fish_hosts.REGISTRY)}")
+                return 404
+            self._send_json(200, api_host(self.db_path, host_id), allow_origin=origin)
+            return 200
+
+        if REFRESH_PATH_RE.fullmatch(path):
+            # 刷新是 POST：GET 上不提供（否则「重探」与「读」会被混成一个动作）。
+            self._send_error(405, "method_not_allowed",
+                             "重新探测要用 POST（GET 只读，不该有「重探一次」的语义）",
+                             f"POST {path}")
+            return 405
+
         if path == "/api/facets":
             try:
                 win, _ = parse_window((query.get("win") or ["24h"])[0], now)
@@ -2227,7 +2387,8 @@ class Handler(BaseHTTPRequestHandler):
             return 200
 
         self._send_error(404, "not_found", f"没有这个端点：{path}",
-                         "可用：/api/facets /api/stream /api/stats /api/entry /api/meta /api/health")
+                         "可用：/api/facets /api/stream /api/stats /api/entry /api/meta "
+                         "/api/hosts /api/hosts/<id> /api/health")
         return 404
 
     # ── 静态 ────────────────────────────────────────────────────

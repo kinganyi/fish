@@ -74,3 +74,6 @@ ui/dist/
 ui/.vite/
 # 旧截图（已被新构建取代，留档在本地即可；当前 5 张作为证据入库）
 ui/screenshots/_legacy-predist/
+
+# 2026-11-24：一键启动器的运行期留痕（PID/端口/启动时间，每次起停都会变）
+tools/.scene-pids.json

@@ -68,6 +68,18 @@ export class ApiError extends Error {
 
 export type Query = Record<string, string | number | boolean | null | undefined>
 
+/**
+ * 错误 → 一句话（三段式的前两段：出了什么 + 为什么）。
+ *
+ * 放在 client 里是因为它读的是 `ApiError`/`NetworkError` 的字段（同一份来源）；
+ * 视图不自己拼错误文案，免得两处写法慢慢漂开（「连不上」与「读失败」必须分得清）。
+ */
+export function describeError(error: unknown): string {
+  if (error instanceof ApiError) return `${error.code}：${error.hint}`
+  if (error instanceof NetworkError) return `连不上读口（${error.message}）`
+  return (error as Error)?.message || '未知错误'
+}
+
 function buildUrl(path: string, params?: Query): string {
   const url = new URL(path, window.location.origin)
   if (params) {
@@ -84,6 +96,17 @@ export async function getJson<T>(path: string, params?: Query, signal?: AbortSig
 }
 
 /**
+ * 唯一的 POST 语义：`POST /api/hosts/<id>/refresh`（**重探一次，不写盘**）。
+ *
+ * 为什么单独一个函数而不是给 `getJson` 加 `method` 参数：这个读口只允许两个动作——
+ * 读（GET）与「重探宿主」（POST）。把 method 铺开成通用参数，下一个人就会顺手加一个
+ * 「写配置」的 POST——那正是本期明确不做的事（见 `ui/README.md` 与 `fish_hosts.py` 文件头）。
+ */
+export async function postJson<T>(path: string, signal?: AbortSignal): Promise<Envelope<T>> {
+  return (await requestPayload(path, undefined, signal, 'POST')) as Envelope<T>
+}
+
+/**
  * 非信封端点（`/api/meta`）：同样的错误判别，但载荷**原样**返回。
  *
  * 为什么不让 meta 也套信封：它是读口自述（schema 名/能力/库路径/进程号），
@@ -93,11 +116,16 @@ export async function requestJson<T>(path: string, params?: Query, signal?: Abor
   return (await requestPayload(path, params, signal)) as T
 }
 
-async function requestPayload(path: string, params?: Query, signal?: AbortSignal): Promise<unknown> {
+async function requestPayload(
+  path: string,
+  params?: Query,
+  signal?: AbortSignal,
+  method: 'GET' | 'POST' = 'GET',
+): Promise<unknown> {
   let response: Response
   try {
     response = await fetch(buildUrl(path, params), {
-      method: 'GET',
+      method,
       headers: { Accept: 'application/json' },
       signal,
       // 只读快照面：不缓存，避免 2 秒轮询读到上一轮

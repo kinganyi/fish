@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""重拍 5 张验收截图，并**顺手把「不横向溢出」变成读数**（四栏后的版式判据）。
+"""重拍 6 张验收截图，并**顺手把「不横向溢出」变成读数**（四栏后的版式判据）。
 
 ## 为什么截图要脚本化
 
@@ -13,8 +13,9 @@
 每张图都取同一组版面读数，**逐张打出来**（截图只能人眼看，读数才能机检）：
 
     scrollWidth / clientWidth   —— 横向溢出的唯一判据（`scrollWidth > clientWidth` = 溢出）
-    gridTemplateColumns         —— 四栏实际宽度（`52px 200px … 320px`）
-    navTabs                     —— 窄条里的页签数（现在必须 = 1）
+    gridTemplateColumns         —— 栏宽（现场是 `52px 200px … 320px`；设置是 `52px …`）
+    navTabs                     —— 窄条里的页签数（现在必须 = 2：现场 + 设置）
+    settingsHosts               —— 设置页左栏的宿主行数（`[data-host]`；其它页为 0）
 
 ## 用法
 
@@ -54,6 +55,8 @@ PROBE = {
     "navTabs": "document.querySelectorAll('nav[aria-label=\"顶级页签\"] [role=\"tab\"]').length",
     "columns": "getComputedStyle(document.querySelector('[data-page]').closest('.grid')).gridTemplateColumns",
     "columnsWidths": "Array.from(document.querySelectorAll('[data-page]').length ? document.querySelector('[data-page]').closest('.grid').children : []).map(function(n){return Math.round(n.getBoundingClientRect().width)}).join(',')",
+    "settingsHosts": "document.querySelectorAll('[data-host]').length",
+    "settingsDetail": "document.querySelectorAll('main[aria-label=\"设置\"] section[aria-label=\"宿主详情\"]')[0] ? document.querySelectorAll('main[aria-label=\"设置\"] section[aria-label=\"宿主详情\"]')[0].innerText.length : 0",
 }
 
 
@@ -156,6 +159,8 @@ def main() -> int:
         ("05-ledger-deeplink",
          f"{static}/?api={api}#/w?scope=project:CZHY&win=24h&sel={target['key']}&tab=ledger",
          1440, 900),
+        # 设置页：**查询串深链**（`?page=settings`），与 `?api=` 共存（用户验收口径）
+        ("06-settings", f"{static}/?api={api}&page=settings", 1440, 900),
     ]
 
     old = [name for name in os.listdir(SHOT_DIR) if name.endswith(".png")]
@@ -178,17 +183,20 @@ def main() -> int:
             continue
         results.append(out)
         flag = "OVERFLOW" if out["overflow"] else "ok"
+        extra = (f"  宿主行={out['settingsHosts']}  详情字符={out['settingsDetail']}"
+                 if out.get("settingsHosts") else "")
         print(f"SHOT  {out['file']}  {out['viewport']}  "
               f"scrollWidth={out['scrollWidth']} clientWidth={out['clientWidth']} [{flag}]  "
               f"栏宽={out['columnsWidths']}  窄条页签={out['navTabs']}  "
-              f"文本 {out['textChars']} 字")
+              f"文本 {out['textChars']} 字{extra}")
         if out["overflow"]:
             fail += 1
 
     print("\n# 汇总（逐张读数）")
     print(json.dumps({"shots": [{k: r[k] for k in
                                  ("file", "viewport", "scrollWidth", "clientWidth",
-                                  "overflow", "columns", "columnsWidths", "navTabs")}
+                                  "overflow", "columns", "columnsWidths", "navTabs",
+                                  "settingsHosts", "settingsDetail")}
                                 for r in results],
                       "entryKeyFor05": target["key"]}, ensure_ascii=False, indent=1))
     print(f"# 横向溢出张数 {sum(1 for r in results if r['overflow'])} / {len(results)}"

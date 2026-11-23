@@ -1,7 +1,8 @@
-import { useEffect } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { apiBaseInfo } from './api/client'
 import { codes } from './codes'
-import { readRoute, writeRoute } from './router'
+import { DEFAULT_PAGE, type PageId } from './pages'
+import { readPage, readRoute, writePage, writeRoute } from './router'
 import { useWorkbench } from './store/workbench'
 import { Workbench } from './views/workbench/Workbench'
 
@@ -191,8 +192,20 @@ function Unreachable({ onRetry }: { onRetry: () => void }) {
 export default function App() {
   const boot = useWorkbench((state) => state.boot)
   const retry = useWorkbench((state) => state.retry)
+  // 顶级页（现场 / 设置）：深链 `?page=settings`，刷新后仍停在这一屏（用户验收口径）。
+  const [page, setPage] = useState<PageId>(() => readPage())
+  const pickPage = useCallback((id: PageId) => {
+    setPage(id)
+    writePage(id)
+  }, [])
   useDeepLink()
   useKeyboard()
+
+  useEffect(() => {
+    const onHash = () => setPage(readPage())
+    window.addEventListener('hashchange', onHash)
+    return () => window.removeEventListener('hashchange', onHash)
+  }, [])
 
   if (boot === 'unreachable') {
     return <Unreachable onRetry={() => void retry()} />
@@ -207,7 +220,7 @@ export default function App() {
   return (
     <>
       <Polling />
-      <Workbench />
+      <Workbench page={page ?? DEFAULT_PAGE} onPick={pickPage} />
     </>
   )
 }

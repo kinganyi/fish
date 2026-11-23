@@ -1,5 +1,5 @@
-import { getJson, requestJson } from './client'
-import type { EntryData, FacetsData, MetaData, StatsData, StreamData, Win } from './types'
+import { getJson, postJson, requestJson } from './client'
+import type { EntryData, FacetsData, HostStatus, HostsData, MetaData, StatsData, StreamData, Win } from './types'
 
 /**
  * 四个端点的薄封装（参数名与读口契约一致，`97 §C`）。
@@ -45,4 +45,24 @@ export function fetchEntry(id: string, signal?: AbortSignal) {
 /** `/api/meta`：读口自述（无 `data` 信封，字段直接是顶层）。 */
 export function fetchMeta(signal?: AbortSignal) {
   return requestJson<MetaData>('/api/meta', undefined, signal)
+}
+
+/**
+ * 设置页的宿主投影（宿主接入层一期：**只读**）。
+ *
+ * 三个端点都是**现探**（读口不缓存探测结果）：
+ *   · 列表只含「探测到安装痕迹」的宿主；
+ *   · 详情与刷新返回同一份结构——刷新用 POST，因为它是**允许发生的动作**，
+ *     不是「再读一次」。刷新不写盘（判据见 `p0/tools/verify_hosts.py` ⑤）。
+ */
+export function fetchHosts(signal?: AbortSignal) {
+  return getJson<HostsData>('/api/hosts', undefined, signal)
+}
+
+export function fetchHost(id: string, signal?: AbortSignal) {
+  return getJson<HostStatus>(`/api/hosts/${encodeURIComponent(id)}`, undefined, signal)
+}
+
+export function refreshHost(id: string, signal?: AbortSignal) {
+  return postJson<HostStatus>(`/api/hosts/${encodeURIComponent(id)}/refresh`, signal)
 }

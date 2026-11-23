@@ -12,7 +12,7 @@
     V2  「缺」在中栏/右栏显式表态，且**不出现"重试"**（R-08）
     V3  `_count_sql` 与 `_branch_selects` 共用同一份作用域谓词（R-16，"改一处即全变"）
     V4  按下态：源码 `active:` 命中 > 0 且**真的进了构建产物**（L1）
-    V5  窄条页签数量 == 1（现在只有「现场」），且清单驱动（四栏）
+    V5  窄条页签数量 == 2（现场 + 设置；设置**贴底**）、名字对、选中态唯一，且清单驱动
 
 ## 变异自证（判据必须能红）
 
@@ -399,7 +399,10 @@ def v4_mut(ui_dir: str = UI_DIR) -> tuple[bool, str]:
     return hits < 6, json.dumps({"与判据同口径喂坏输入（codes.json）": hits}, ensure_ascii=False)
 
 
-# ── V5：窄条页签数量 == 1（四栏）──────────────────────────────────────────
+# ── V5：窄条页签 == 2（现场 + 设置，设置贴底）─────────────────────────────
+# 用户 2026-11-23 新增「设置」为第二个顶级页签，并明确它在窄条**最下面**（与「现场」
+# 同属顶级页签，但分组不同）。所以这条判据从「只有 1 个」升级成「2 个 + 顺序 + 贴底」——
+# 升级的是判据，不是放宽：数量、名字、顺序、贴底、选中唯一，五个条件少一个就红。
 NARROW_PROBE = {
     **TEXT_PROBE,
     "navTabs": "document.querySelectorAll('nav[aria-label=\"顶级页签\"] [role=\"tab\"]').length",
@@ -409,20 +412,34 @@ NARROW_PROBE = {
     "navLabels": "Array.from(document.querySelectorAll('nav[aria-label=\"顶级页签\"] [role=\"tab\"]')).map(function(n){var s=n.querySelectorAll('span');return (s.length?s[s.length-1].innerText:n.innerText).trim()}).join('|')",
     "allTabs": "document.querySelectorAll('[role=\"tab\"]').length",
     "selected": "document.querySelectorAll('nav[aria-label=\"顶级页签\"] [role=\"tab\"][aria-selected=\"true\"]').length",
+    "firstPage": "(document.querySelector('nav[aria-label=\"顶级页签\"] [role=\"tab\"]')||{getAttribute:function(){return null}}).getAttribute('data-page')",
+    "lastPage": "(() => { var t = document.querySelectorAll('nav[aria-label=\"顶级页签\"] [role=\"tab\"]'); return t.length ? t[t.length-1].getAttribute('data-page') : null })()",
+    # 「贴底」的唯一判据：最后一个页签的下边界 == 窄条的下边界（±1px 取整误差）
+    "lastBottom": "(() => { var t = document.querySelectorAll('nav[aria-label=\"顶级页签\"] [role=\"tab\"]'); return t.length ? Math.round(t[t.length-1].getBoundingClientRect().bottom) : null })()",
+    "navBottom": "Math.round(document.querySelector('nav[aria-label=\"顶级页签\"]').getBoundingClientRect().bottom)",
     "columns": "getComputedStyle(document.querySelector('[data-page]').closest('.grid')).gridTemplateColumns",
 }
 
 
 def narrow_ok(probe: dict) -> tuple[bool, str]:
-    """判据本身：窄条里**只有 1 个**页签、名字是「现场」、且有选中态。"""
+    """判据本身：窄条里**恰好 2 个**页签（现场在前、设置在最后且贴底）、选中态唯一。"""
     nav_tabs = probe.get("navTabs")
     page_nodes = probe.get("pageNodes")
     labels = (probe.get("navLabels") or "").strip("|")
     selected = probe.get("selected")
-    ok = (nav_tabs == 1 and page_nodes == 1 and labels == "现场" and selected == 1
+    first_page = probe.get("firstPage")
+    last_page = probe.get("lastPage")
+    last_bottom = probe.get("lastBottom")
+    nav_bottom = probe.get("navBottom")
+    bottom_ok = (isinstance(last_bottom, int) and isinstance(nav_bottom, int)
+                 and abs(last_bottom - nav_bottom) <= 1)
+    ok = (nav_tabs == 2 and page_nodes == 2 and labels == "现场|设置" and selected == 1
+          and first_page == "scene" and last_page == "settings" and bottom_ok
           and "工作台" not in labels)
     return ok, json.dumps({"navTabs": nav_tabs, "pageNodes": page_nodes, "labels": labels,
-                           "selected": selected, "columns": probe.get("columns")},
+                           "selected": selected, "firstPage": first_page,
+                           "lastPage": last_page, "贴底": bottom_ok,
+                           "columns": probe.get("columns")},
                           ensure_ascii=False)
 
 
@@ -438,7 +455,7 @@ def v5(api: str, static: str) -> tuple[bool, bool, str]:
 
 
 def v5_mut(api: str, static: str) -> tuple[bool, str]:
-    """变异：把同一段断言喂给「右栏那两个也数进来」（`allTabs`）→ 必须红。
+    """变异：把同一段断言喂给「页面上所有页签」（`allTabs`，含右栏那两个）→ 必须红。
 
     这也顺手证明判据的作用域是**窄条**，不是"页面上所有页签"。
     """
@@ -549,7 +566,7 @@ def main() -> int:
         ("V2 缺≠错", lambda: v2(api, static), lambda: v2_mut(api, static)),
         ("V3 谓词单源", lambda: v3(args.db), lambda: v3_mut(args.db)),
         ("V4 按下态", lambda: v4(), lambda: v4_mut()),
-        ("V5 窄条页签=1", lambda: v5(api, static), lambda: v5_mut(api, static)),
+        ("V5 窄条页签=2", lambda: v5(api, static), lambda: v5_mut(api, static)),
         ("V6 窗口空≠库空", lambda: v6(api, static, args.db),
          lambda: v6_mut(api, static, args.db)),
     ]

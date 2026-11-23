@@ -1,6 +1,6 @@
-import { useState } from 'react'
 import { NavRail } from '../../components/NavRail'
-import { DEFAULT_PAGE, type PageId } from '../../pages'
+import type { PageId } from '../../pages'
+import { Settings } from '../settings/Settings'
 import { Panel } from './Panel'
 import { Rail } from './Rail'
 import { Stream } from './Stream'
@@ -25,22 +25,33 @@ import { Stream } from './Stream'
  * `p0/tools/shoot_workbench.py`（每条读数里带 `scrollWidth == clientWidth`）。
  *
  * 窄条不是装饰：它是**产品一级导航**（97 §A6-1 曾把它列进删除项，该裁决已被用户作废）。
+ *
+ * **设置页**是第二个面（用户 2026-11-23 新增）：它不属于现场那套四栏——
+ * 宿主接入回答的是「这套东西装没装、能不能用」（时间尺度天到月），塞进 320px 的判断面
+ * 会把「此刻谁在动哪块」和「哪个宿主没接 fish」混成一屏。所以它就是 `52px + 1fr` 两栏，
+ * 页面内部的「左列表 / 右详情」由 `Settings` 自己排。
  */
-export function Workbench() {
-  const [page, setPage] = useState<PageId>(DEFAULT_PAGE)
+export function Workbench({ page, onPick }: { page: PageId; onPick: (id: PageId) => void }) {
+  if (page === 'settings') {
+    return (
+      <div
+        className="grid h-full min-w-[1280px] grid-rows-1 bg-n1"
+        style={{ gridTemplateColumns: '52px minmax(0, 1fr)' }}
+      >
+        <NavRail current={page} onPick={onPick} />
+        <Settings />
+      </div>
+    )
+  }
   return (
     <div
       className="grid h-full min-w-[1280px] grid-rows-1 bg-n1"
       style={{ gridTemplateColumns: '52px 200px minmax(0, 1fr) 320px' }}
     >
-      <NavRail current={page} onPick={setPage} />
-      {page === 'scene' ? (
-        <>
-          <Rail />
-          <Stream />
-          <Panel />
-        </>
-      ) : null}
+      <NavRail current={page} onPick={onPick} />
+      <Rail />
+      <Stream />
+      <Panel />
     </div>
   )
 }

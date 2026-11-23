@@ -311,3 +311,104 @@ export interface EntryData {
   }
   related: { project: string | null; board: { id: number; label: string } | null; code: string | null }
 }
+
+/**
+ * 宿主接入层（`/api/hosts`，`p0/fish_hosts.py` 的投影）。
+ *
+ * 三态在这里**必须分开**（96 §七）：`yes` 已接 / `no` 未接 / `unverified` 判不到。
+ * 「有配置文件」与「fish 接上了」是两件事：`configState` 说的是前者，`fishPresence` 说的是后者。
+ * `none` 是**没找到**（不是判不到）；读不出内容才是 `unreadable`。
+ */
+export type HostCapState = 'yes' | 'no' | 'unverified'
+export type FishPresence = 'both' | 'hooks' | 'mcp' | 'none'
+export type HostConfigState = 'ready' | 'missing' | 'unreadable'
+
+export interface HostCapability {
+  state: HostCapState
+  /** 后端给的中文标签（已接 / 未接 / 未验证）——前端不自己造词。 */
+  label: string
+  evidence: string
+}
+
+export interface HostConfigInfo {
+  role: 'hooks' | 'mcp'
+  label: string
+  path: string
+  format: 'json' | 'toml' | 'yaml'
+  locator: string
+  exists: boolean
+  size: number | null
+  mtime: string | null
+  parsed: boolean
+  parseError: string | null
+  parseSoft: boolean
+  fishHit: boolean
+  detail: string
+  scripts: string[]
+  missingScripts: string[]
+  /** 解析时容忍过的宿主自定义标签（如 `!!js`）：值原样保留、未求值。 */
+  toleratedTags: string[]
+}
+
+export interface HostEvidence {
+  id: string
+  label: string
+  /** `null` = 判不到（证据不足），**不是**失败。 */
+  ok: boolean | null
+  detail: string
+}
+
+export interface HostLastSeenSource {
+  source: string
+  at: string
+  rows: number
+}
+
+export interface HostStatus {
+  id: string
+  display: string
+  /** 会话键前缀（机器证据词表）；空串 = 这台宿主不产生 fish 会话键。 */
+  protocol: string
+  protocolNote: string | null
+  aliases: string[]
+  pseudo: boolean
+  installed: boolean
+  home: string | null
+  homeExists: boolean
+  configPath: string | null
+  configExists: boolean
+  configFormat: string | null
+  configState: HostConfigState
+  configReason: string | null
+  fishPresence: FishPresence
+  hooksSupported: boolean
+  events: string[]
+  matcherDialect: { kind: string; note: string } | null
+  collector: string[]
+  capabilities: Record<string, HostCapability>
+  configs: HostConfigInfo[]
+  evidence: HostEvidence[]
+  version: string | null
+  /** `version` 的来源类别（`asar` / `json` / `text`；`electron` = 只读到 Electron 版本）。 */
+  versionKind: string | null
+  versionSource: string | null
+  versionNote: string | null
+  /** Electron 运行时版本：**不是**应用版本，只作为「判不到应用版本」时的说明。 */
+  electronVersion: string | null
+  electronSource: string | null
+  lastSeenAt: string | null
+  lastSeenSources: HostLastSeenSource[]
+  /** `null` = 判不到（库里没记录），不是「在跑」。 */
+  stalled: boolean | null
+  stalledNote: string | null
+  allowedActions: string[]
+  blockedActions: string[]
+  blockedReasons: Record<string, string>
+  notes: string[]
+}
+
+export interface HostsData {
+  items: HostStatus[]
+  generatedAt: string
+  consistency: { ok: boolean; warnings: string[]; checked: Record<string, unknown> }
+}
