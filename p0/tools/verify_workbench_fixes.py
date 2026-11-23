@@ -10,10 +10,32 @@ QA Round 1 的 6 条（见 `docs/100-QA-工作台首屏-20261123.md`）修完没
 
     R1 深翻页：limit=40/50/500 各翻到空页，rawSum == 本刀条数、无重复、游标单调、最旧时间 == MIN(ts)
     R2 性能：/api/stream 等价调用 5 次，报 min / median / max；24h limit=500 中位必须 <150 ms
-    R3 推送折叠：项目视图首屏 push 占比 ≤50%；变异（FISH_WB_FOLD_PUSH=0）必须回升且出现连续同 code
+    R3 推送折叠：**构造数据验折叠规则**（同 code 连续折 1 条 / 时间闸 / 只认连续同 code），变异 FOLD_MIN=11 必须全红（不是绝对比率，见下）
     R4 项目过滤记忆事件：项目视图 memory 类 >0 且项目对得上；变异（FISH_WB_EVENT_PROJECT=payload）必须 0
     R5 只读证据：每次开连接都留下 readonly_proven（含真实异常类型与消息）；变异（连接改可写）必须拒绝启动
     R6 D2 回归：FISH_WB_FOLD_MIN=9999 时 fold.groups 必须回到 0（工具+推送两种折叠一起关）
+
+## R3 为什么不再写「首屏 ≤50%」（2026-11-24 修 KI-2）
+
+「同 code 连续推送折叠 ×N」是 96/97 的**结构性**要求；「首屏 push 占比 ≤50%」这个数字
+只出现在 `docs/100` F-4 的回归建议里（原文："例如 ≤10% 或『同 code 连续出现 ≤1 行』"），
+**不是**规格硬要求。实测同一条代码：`docs/104`（05:58）读到 `0.525` 判红，本轮 22:06
+读到 `0.375` 判绿——红绿跟着库长跑，不跟着代码跑，说明折叠没退化、是**阈值锚错了**。
+所以 R3 改成用**构造数据**直接验折叠规则（确定性，不依赖库快照）：
+
+    ① 同 code 连续 10 条、间隔 3s → 必须折 1 条、覆盖 10 条；
+    ② 同 code 但间隔 400s > FOLD_PUSH_SEC(300s) → 不许折（时间闸）；
+    ③ A/B 交替 → 不许折（只认**连续同 code**）；
+    ④ 变异 FOLD_MIN=11 → ①②③ 必须全红（判据有判别力）。
+
+真实 24h 首屏的 `pushShare` / `foldPushGroups` 仍然打印，但只作**读数**（不判红），
+供跨轮对账——判据不锚易漂数字。
+
+## 登记了几条（声称必须可复算）
+
+本脚本**登记 15 条**（不带 `--api`）；带 `--api` 时额外 4 条 R7（五端点 200 / POST 405 /
+异源 403 / 静态源放行 ACAO），合计 **19 条**。末尾汇总行按**实跑**条数打印，并与登记的
+条数对账：对不上直接判红（`docs/104` KI-2 就是"声称 18/18、实际只登记 14 条"）。
 
 ## 用法
 
@@ -41,7 +63,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _P0 = os.path.dirname(_HERE)
@@ -50,6 +72,11 @@ if _P0 not in sys.path:
 
 DEFAULT_DB = r"I:\app\fish-data\data\index.sqlite"
 PROJECT = "大肥鱼生命系统"
+
+#: **登记了几条判据**。末尾会把实跑条数与它逐条对账——声称的条数必须可复算
+#: （docs/104 KI-2：旧版本头写着 18，实际只登记 14 条，`--api` 才补齐 R7 的 4 条）。
+REGISTERED_CHECKS = 15
+REGISTERED_API_CHECKS = 4      # --api 时额外跑的 R7 四组
 
 _RESULTS: list[tuple[str, bool, str]] = []
 
@@ -183,12 +210,52 @@ def _push_summary(items: list[dict]) -> dict:
             longest = max(longest, run)
         else:
             run, prev = 0, None
+    push_groups = [it for it in items
+                   if it.get("fold") and it["meta"].get("kind") == "push"]
     return {"returned": len(items), "push": push,
             "pushShare": round(push / max(1, len(items)), 4),
             "longestConsecutiveSameCodeUnfolded": longest,
             "foldGroups": sum(1 for it in items if it.get("fold")),
-            "foldPushGroups": sum(1 for it in items
-                                  if it.get("fold") and it["meta"].get("kind") == "push")}
+            "foldPushGroups": len(push_groups),
+            # 折叠组覆盖的原始行数：每组必须 ≥ FOLD_MIN 条才算真折叠（不是把相邻两条并一条）
+            "foldPushCovered": sum(int(it["fold"]["count"]) for it in push_groups)}
+
+
+def _push_stub(code: str, offset_sec: int, pk: int, actor: str = "某人") -> dict:
+    """构造一条推送 stub（形状与 `fish_workbench_api._stub_item` 一致，折叠只认这几列）。"""
+    ts = _FIXTURE_BASE + timedelta(seconds=offset_sec)
+    stamp = ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+    rk = 2
+    return {"key": f"push:{pk}", "src": "push", "cls": "push", "rk": rk, "ts": stamp,
+            "sk": f"{stamp}|{9 - rk}|{pk:012d}",
+            "actor": {"name": actor, "sessionTag": "", "disambig": ""},
+            "project": PROJECT, "text": "", "tool": None, "path": None,
+            "meta": {"kind": "push", "code": code}}
+
+
+#: 构造数据的固定基准时刻（不取 now：判据不该随墙钟变）。
+_FIXTURE_BASE = datetime(2026, 11, 23, 10, 0, 0, tzinfo=timezone.utc)
+
+
+def _fold_fixture(A) -> dict:
+    """三组**构造数据**直接验折叠规则 → `{组名: {groups, covered, displayed}}`。
+
+    为什么不拿真库的比率当判据：24h 首屏构成随库增长漂移，同一条代码能判红也能判绿
+    （docs/104 KI-2 的 `0.525` vs 本轮的 `0.375`）。折叠规则本身是确定性的，就该用确定性
+    输入来验。
+    """
+    cases = {
+        "dense": [_push_stub("SAME", i * 3, 1000 + i) for i in range(10)],
+        "sparse": [_push_stub("SAME", i * 400, 2000 + i) for i in range(10)],
+        "alternating": [_push_stub("A" if i % 2 == 0 else "B", i * 3, 3000 + i)
+                        for i in range(10)],
+    }
+    out = {}
+    for name, items in cases.items():
+        displayed, stats = A.fold_items(items)
+        out[name] = {"groups": stats["groups"], "covered": stats["covered"],
+                     "displayed": len(displayed)}
+    return out
 
 
 def _child(env_extra: dict, mode: str, db: str) -> dict:
@@ -216,9 +283,13 @@ def main() -> int:
 
     import fish_workbench_api as A
 
+    expected = REGISTERED_CHECKS + (REGISTERED_API_CHECKS if args.api else 0)
     print(f"# 判定时刻 {iso_now()} · 库 {args.db} · "
           f"fold={{sec:{A.FOLD_SEC},min:{A.FOLD_MIN},push:{A.FOLD_PUSH}/{A.FOLD_PUSH_SEC}s}} · "
           f"cursorPushdown={A.CURSOR_PUSHDOWN} · eventProject={A.EVENT_PROJECT_MODE}")
+    print(f"# 登记判据 {REGISTERED_CHECKS} 条"
+          + (f" + --api 的 {REGISTERED_API_CHECKS} 条 R7 = {expected} 条" if args.api
+             else f"（本次不带 --api，实跑应为 {expected} 条）"))
     try:
         mtime = datetime.fromtimestamp(os.path.getmtime(args.db), timezone.utc)
         print(f"# 库 mtime {mtime.strftime('%Y-%m-%dT%H:%M:%SZ')} · size {os.path.getsize(args.db)}")
@@ -259,20 +330,45 @@ def main() -> int:
                                  "runs": [round(t, 1) for t in times]}, ensure_ascii=False)
             check(f"R2 性能 limit={limit} 中位 <150ms", med < 150.0, detail)
 
-        # ── R3 推送折叠 ──────────────────────────────────────────
-        base = A.collect_stream(conn, scope_kind="project", project=PROJECT, board_id=None,
+        # ── R3 推送折叠（结构判据；不锚会漂的比率）───────────────
+        #
+        # KI-2 的结论：**不是折叠退化，是阈值锚错了。**
+        #   · 96/97 的要求是结构性的——「同 code 连续推送折叠 ×N」；
+        #   · 「首屏 ≤50%」只出自 docs/100 F-4 的回归建议（原文 "例如 ≤10% 或『同 code
+        #     连续出现 ≤1 行』"），**不是**规格硬要求；
+        #   · 同一条代码：docs/104（05:58）读到 `0.525` 判红，本轮 22:06 读到 `0.375`
+        #     判绿——红绿跟着库长跑，不跟着代码跑。
+        # 所以 R3 改成**构造数据直接验折叠规则**（确定性、不依赖库快照），真实首屏的
+        # pushShare / 折叠组只作**读数**打印（不判红），供跨轮对账。
+        r3 = _fold_fixture(A)
+        check("R3 折叠规则：同 code 连续 10 条（3s 间隔）→ 折 1 条、覆盖 10",
+              r3["dense"]["groups"] == 1 and r3["dense"]["covered"] == 10
+              and r3["dense"]["displayed"] == 1,
+              json.dumps(r3["dense"], ensure_ascii=False))
+        check(f"R3 折叠时间闸：同 code 但间隔 400s > {A.FOLD_PUSH_SEC}s → 不折（10 条原样）",
+              r3["sparse"]["groups"] == 0 and r3["sparse"]["displayed"] == 10,
+              json.dumps(r3["sparse"], ensure_ascii=False))
+        check("R3 折叠只认连续同 code：A/B 交替 → 不折（10 条原样）",
+              r3["alternating"]["groups"] == 0 and r3["alternating"]["displayed"] == 10,
+              json.dumps(r3["alternating"], ensure_ascii=False))
+        original_min = A.FOLD_MIN
+        try:
+            A.FOLD_MIN = 11                      # 门槛抬到 11 → 10 条不该再折
+            mutated = _fold_fixture(A)["dense"]
+        finally:
+            A.FOLD_MIN = original_min
+        check("R3 变异（FOLD_MIN=11）→ 折叠判据必须红",
+              mutated["groups"] == 0 and mutated["displayed"] == 10,
+              f"基线 {r3['dense']} → 变异后 {mutated}（必须 0 组 / 10 条）")
+
+        # 读数（**不判红**）：真实 24h 项目视图首屏 + 关折叠对照，只用于跨轮对账。
+        live = A.collect_stream(conn, scope_kind="project", project=PROJECT, board_id=None,
                                 win="24h", since=since, limit=40, num_cursor=None,
                                 direction="older")
-        base_sum = _push_summary(base["data"]["items"])
-        check("R3 项目视图首屏 push 占比 ≤50%", base_sum["pushShare"] <= 0.5,
-              json.dumps(base_sum, ensure_ascii=False))
-        check("R3 首屏有推送折叠组", base_sum["foldPushGroups"] > 0,
-              f"foldPushGroups={base_sum['foldPushGroups']}")
+        live_sum = _push_summary(live["data"]["items"])
         off = _child({"FISH_WB_FOLD_PUSH": "0"}, "pushfold", args.db)
-        check("R3 变异（关推送折叠）占比回升且出现连续同 code",
-              off["pushShare"] > base_sum["pushShare"]
-              and off["longestConsecutiveSameCodeUnfolded"] >= 3,
-              json.dumps(off, ensure_ascii=False))
+        print(f"# R3 读数（不判红，仅对账）：首屏 {json.dumps(live_sum, ensure_ascii=False)}"
+              f" · 关折叠对照 {json.dumps(off, ensure_ascii=False)}")
 
         # ── R4 项目过滤记忆事件 ──────────────────────────────────
         mem = _child({}, "memory", args.db)
@@ -372,8 +468,13 @@ def main() -> int:
               f"ACAO={acao}")
 
     passed = sum(1 for _, ok, _ in _RESULTS if ok)
-    print(f"\n# 汇总 {passed}/{len(_RESULTS)} PASS")
-    return 0 if passed == len(_RESULTS) else 1
+    total = len(_RESULTS)
+    print(f"\n# 汇总 {passed}/{total} PASS（登记 {expected} 条，实跑 {total} 条）")
+    if total != expected:
+        print(f"# 条数与登记不符：登记 {expected} 条、实跑 {total} 条 → 判红"
+              "（声称的条数必须可复算）")
+        return 1
+    return 0 if passed == total else 1
 
 
 if __name__ == "__main__":

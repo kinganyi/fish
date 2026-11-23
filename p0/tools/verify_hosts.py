@@ -2,20 +2,23 @@
 # -*- coding: utf-8 -*-
 """宿主接入层一期的机检 —— p0/tools/verify_hosts.py
 
-## 判什么（七组，每组都能失败）
+## 判什么（九组，每组都能失败）
 
 | # | 判据 | 怎么让它红（变异） |
 |---|---|---|
 | ① | `GET /api/hosts` 至少返回本机真实装了的 dsh/workbuddy/zcode/codex，且**与本进程现探的结果逐条对拍** | 把某 spec 的 `config_paths` 指到不存在的路径、家目录也去掉 → `installed=false`，列表里就少一个 |
-| ② | 每项的 `configPath` **真存在**；为 null 时必须给原因且 `fishPresence=none`（**不许「判不到」被报成「没有」**） | 把 `configPath` 换成不存在的路径 → 判据红 |
+| ② | 每项的 `configPath` **真存在**；为 null 时必须给原因（`missing` 或 `path_unresolved`）且 `fishPresence=none`（**不许「判不到」被报成「没有」**） | 把 `configPath` 换成不存在的路径 → 判据红 |
 | ③ | `fishPresence` 与**逐字 grep 配置文本**的结论一致（不复用 `fish_hosts` 的结构解析：这是独立证据） | 把某项的 `fishPresence` 改成 `mcp`（真值是 both）→ 判据红 |
 | ④ | `protocol` **取自** `fish_naming.SESSION_HOSTS`：非空值必须能被 `split_session_key()` 当成合法前缀（调应用自己的函数，不自建解析器） | 把某项 protocol 写成 `codex`（不在词表里）→ 判据红 |
 | ⑤ | `POST /api/hosts/<id>/refresh` 返回 200，且**探测前后所有宿主配置文件逐字节不变**（sha256 + mtime 纳秒 + 字节数 + 目录清单） | 把比较函数的 before 里 mtime 改 1 ns → 判据红 |
 | ⑥ | 一致性 warning **不阻断**：词表缺失时只产 warning，`/api/hosts` 仍出全量 | 从注册表里摘掉一个 `SESSION_HOSTS` 值 → warning 出现；不阻断由同一个断言保证 |
 | ⑦ | `version` 必须是 **asar 里应用清单**的版本（**独立实现**重新读一遍对拍）；Electron 的 `version` 文件只许出现在 `electronVersion`，**任何宿主的 `version` 都不许等于它** | 把 `version` 换成 Electron 版本（DSH `44.7.0`）→ 判据红 |
+| ⑧ | `push` 能力必须由**已装采集器脚本的源码**推出（独立正则读源码，与端点逐条对拍）；WorkBuddy 的 `fish_posttool_hook.py` 必须判「已接」；同一份脚本挂在两个宿主上结论必须一致 | 把 command 指向 `fish_session_hook.py`（无推送入口）→ push 必须从 `yes` 翻成 `no` |
+| ⑨ | 占位符家目录（`<用户名>` / 未展开的 `%VAR%` / `$VAR`）→ `configState=path_unresolved` + `configPath=null` + 原因点名占位符（**不许** `abspath` 拼出 `I:\hooks.json` 这种编的路径） | 把判定函数喂给旧行为的读数（`missing` + `I:\hooks.json`）→ 必须判红 |
 
 `fishPresence` 的三态在这里是四档：`both/hooks/mcp/none`——**`none` 是「没找到」，
-不是「判不到」**；判不到（如配置读不出）由 `configState=unreadable` 单独表达。
+不是「判不到」**；判不到（如配置读不出）由 `configState=unreadable` 单独表达，
+路径没解析出来则是 `configState=path_unresolved`（⑨）。
 
 ⑦ 为什么另写一份 asar 读取：判据要的是**独立证据**。若这里改调
 `fish_hosts.asar_package_version`，「偏移算法错了」时两边会一起错，判据就只剩自说自话。
@@ -36,6 +39,7 @@ import os
 import re
 import struct
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 
@@ -113,7 +117,9 @@ def _config_path_ok(items: list[dict]) -> tuple[bool, str]:
                 problems.append(f"{host_id}: configPath 不存在 {path}")
         else:
             reason = item.get("configReason") or ""
-            if item.get("configState") != "missing" or not reason.strip():
+            # `missing` = 真不存在；`path_unresolved` = 路径没解析出来（判不到）。
+            # 两态都允许 configPath=null，但都必须给原因——「判不到」不许说成「没有」。
+            if item.get("configState") not in ("missing", "path_unresolved") or not reason.strip():
                 problems.append(f"{host_id}: 没有 configPath 却没给原因（判不到被报成了没有）")
             if item.get("fishPresence") != "none":
                 problems.append(f"{host_id}: 没有 configPath 但 fishPresence="
@@ -492,6 +498,159 @@ def check_versions(api: str) -> None:
                "没有任何可独立复算的版本，变异无法构造")
 
 
+# ── ⑧ 推送通道：看已装采集器的**源码**，不看文件名（A2）───────────────────
+#: 独立判据（**不复用** `fish_hosts.PUSH_ENTRY_MARKERS`）：源码里出现这些调用即算有推送。
+_PUSH_CALL = re.compile(r"(?:maybe_push|select_push_candidates|append_push_log)\s*\(")
+
+
+def _script_pushes_independently(path: str) -> bool | None:
+    """独立读脚本源码 → 有没有推送入口；读不出返回 `None`（判不到，不许折成 False）。"""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    return bool(_PUSH_CALL.search(text))
+
+
+def _push_state_from_text(item: dict) -> str:
+    """从端点的 `configs[].scripts` 独立推出 push 状态（`yes/no/unverified`）。"""
+    scripts = [script for config in (item.get("configs") or [])
+               if config.get("role") == "hooks" for script in (config.get("scripts") or [])]
+    if not scripts:
+        return "no"
+    verdicts = [_script_pushes_independently(path) for path in scripts]
+    if any(verdict is True for verdict in verdicts):
+        return "yes"
+    return "unverified" if any(verdict is None for verdict in verdicts) else "no"
+
+
+def check_push_channel(api: str, db: str) -> None:
+    """⑧ 推送能力必须由**已装采集器脚本的源码**推出来（WorkBuddy 不许被误判未接）。"""
+    from dataclasses import replace  # noqa: PLC0415  只在变异处用
+
+    status, payload = http_json(f"{api}/api/hosts")
+    items = ((payload.get("data") or {}).get("items")) or []
+    rows = []
+    for item in items:
+        expected = _push_state_from_text(item)
+        cap = ((item.get("capabilities") or {}).get("push") or {})
+        rows.append({"id": item.get("id"), "api": cap.get("state"), "grep": expected,
+                     "match": cap.get("state") == expected,
+                     "scripts": [os.path.basename(p) for config in (item.get("configs") or [])
+                                 if config.get("role") == "hooks"
+                                 for p in (config.get("scripts") or [])]})
+    bad = [row for row in rows if not row["match"]]
+    # 本进程现探与端点逐条对拍（读口可能跑着旧代码）
+    local = {item["id"]: item for item in fish_hosts.detect_all(db_path=db)}
+    drift = [row["id"] for row in rows
+             if row["api"] != ((local.get(row["id"], {}).get("capabilities") or {})
+                               .get("push") or {}).get("state")]
+    workbuddy = next((item for item in items if item.get("id") == "workbuddy"), None)
+    wb_cap = ((workbuddy or {}).get("capabilities") or {}).get("push") or {}
+    wb_ok = (wb_cap.get("state") == "yes"
+             and "fish_posttool_hook.py" in (wb_cap.get("evidence") or ""))
+    ok = status == 200 and bool(items) and not bad and wb_ok
+    detail = (f"HTTP {status} · 逐项 {json.dumps(rows, ensure_ascii=False)}"
+              + (f" · 与现探不一致 {drift}（读口可能是旧代码，重启后重跑）" if drift else ""))
+    record("⑧ push 能力由已装采集器源码推出（WorkBuddy=已接）", ok, detail)
+
+    # ⑧-a 跨宿主一致：同一份脚本挂在两个 id 上，结论必须一模一样
+    workbuddy_spec = fish_hosts.REGISTRY["workbuddy"]
+    settings = os.path.expanduser("~/.workbuddy/settings.json")
+    if not os.path.isfile(settings):
+        record("⑧-a 同一脚本跨宿主结论一致", False, f"本机没有 {settings}，变异无法构造")
+    else:
+        probe = fish_hosts.ConfigProbe(
+            role="hooks", label="settings.json", path_template=settings, format="json",
+            locator=("hooks",), locator_text="hooks.<Event>")
+        home = os.path.dirname(settings)
+        base = dict(home_env=None, home_default=home, config_paths=(probe,),
+                    version_probes=())
+        spec_a = replace(workbuddy_spec, id="probe-a", display="A", **base)
+        spec_b = replace(workbuddy_spec, id="probe-b", display="B", **base)
+        cap_a = fish_hosts.detect(spec_a)["capabilities"]["push"]
+        cap_b = fish_hosts.detect(spec_b)["capabilities"]["push"]
+        same = cap_a == cap_b and cap_a["state"] == "yes"
+        record("⑧-a 同一脚本跨宿主结论一致", same,
+               f"A={cap_a['state']}/{cap_a['evidence']} · B={cap_b['state']} · 两份 spec 完全相同={cap_a == cap_b}")
+
+        # ⑧-变异：把 command 指向**没有推送入口**的采集器 → 必须从 yes 翻成 no
+        nopush = os.path.join(_P0, "fish_session_hook.py")
+        tmp = os.path.join(tempfile.gettempdir(), "fish-hosts-verify-nopush.json")
+        payload_mut = {"hooks": {"PostToolUse": [{"hooks": [{
+            "type": "command", "command": f'python "{nopush}" --host workbuddy'}]}]}}
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(payload_mut, handle, ensure_ascii=False)
+            mutant_probe = replace(probe, path_template=tmp)
+            mutant = replace(spec_a, config_paths=(mutant_probe,))
+            cap_mut = fish_hosts.detect(mutant)["capabilities"]["push"]
+            caught = cap_a["state"] == "yes" and cap_mut["state"] == "no"
+            record("⑧-变异 采集器没有推送入口 → push 必须判未接", caught,
+                   f"对照组 {cap_a['state']} · 变异组 {cap_mut['state']}（{cap_mut['evidence']}）")
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
+# ── ⑨ 占位符家目录：必须是 path_unresolved，不许"编出路径"（A3）────────────
+def _unresolved_violations(report: dict, token: str) -> list[str]:
+    """A3 的判定函数：三条同时成立才算对。
+
+      ① `configState == "path_unresolved"`（判不到，不是 missing）；
+      ② `configPath is None`（**不许** `abspath`/`join` 拼出一个看似存在的路径）；
+      ③ `configReason` 点名没解析的占位符/变量。
+
+    这是一个纯函数：同一份判据喂给"编出来的路径"必须红（下面 ⑨-变异就这么做）。
+    """
+    problems: list[str] = []
+    if report.get("configState") != "path_unresolved":
+        problems.append(f"configState={report.get('configState')!r}（应为 'path_unresolved'）")
+    if report.get("configPath") is not None:
+        problems.append(f"configPath={report.get('configPath')!r}（应为 None——不许拼路径）")
+    if token not in (report.get("configReason") or ""):
+        problems.append(f"configReason 没点名占位符 {token!r}：{report.get('configReason')!r}")
+    return problems
+
+
+def check_path_unresolved(db: str) -> None:
+    """⑨ 占位符路径未解析 → `path_unresolved` + `configPath=null` + 原因点名占位符。"""
+    from dataclasses import replace  # noqa: PLC0415
+
+    spec = fish_hosts.REGISTRY["dsh"]
+    baseline = fish_hosts.detect(spec)
+    baseline_ok = bool(baseline.get("configPath")) and os.path.isfile(baseline["configPath"])
+
+    cases = (
+        ("<用户名>", r"C:\Users\<用户名>\.dsh"),
+        ("%__NO_SUCH_VAR__%", "%__NO_SUCH_VAR__%/.dsh"),
+        ("$NOSUCHDIR", "$NOSUCHDIR/.dsh"),
+    )
+    rows = []
+    for token, home in cases:
+        mutant = replace(spec, home_env=None, home_default=home)
+        report = fish_hosts.detect(mutant)
+        rows.append({"token": token, "configState": report.get("configState"),
+                     "configPath": report.get("configPath"),
+                     "reason": report.get("configReason"),
+                     "violations": _unresolved_violations(report, token)})
+    problems = [f"{row['token']}: {row['violations']}" for row in rows if row["violations"]]
+    record("⑨ 占位符家目录 → path_unresolved 且不编路径", baseline_ok and not problems,
+           f"正对照 configPath={baseline.get('configPath')} · 逐例 "
+           f"{json.dumps([{k: row[k] for k in ('token', 'configState', 'configPath')} for row in rows], ensure_ascii=False)}"
+           + (f" · 问题：{problems}" if problems else ""))
+
+    # ⑨-变异：同一个判定函数喂「编出来的路径」（旧行为：missing + I:\hooks.json）→ 必须红
+    fake = {"configState": "missing", "configPath": r"I:\hooks.json",
+            "configReason": "配置不存在：I:\hooks.json"}
+    fake_problems = _unresolved_violations(fake, "<用户名>")
+    record("⑨-变异 编出来的路径必须被判红", bool(fake_problems),
+           f"变异输入 configPath={fake['configPath']!r} → {fake_problems or '未被抓到（判据失效）'}")
+
+
 # ── ①-变异：spec 指向不存在的路径 → installed=false ─────────────────────────
 def check_spec_mutation(db: str) -> None:
     from dataclasses import replace  # noqa: PLC0415  只在这里用
@@ -537,6 +696,8 @@ def main(argv: list[str] | None = None) -> int:
     check_refresh(api, args.verbose)
     check_consistency(api, db)
     check_versions(api)
+    check_push_channel(api, db)
+    check_path_unresolved(db)
     check_spec_mutation(db)
 
     passed = sum(1 for _cid, ok, _detail in RESULTS if ok)

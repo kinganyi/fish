@@ -321,7 +321,13 @@ export interface EntryData {
  */
 export type HostCapState = 'yes' | 'no' | 'unverified'
 export type FishPresence = 'both' | 'hooks' | 'mcp' | 'none'
-export type HostConfigState = 'ready' | 'missing' | 'unreadable'
+/**
+ * 配置落点的四档：`ready` 可读 / `missing` 不存在 / `unreadable` 读不出 /
+ * `path_unresolved` **路径没解析出来**（如家目录含 `<用户名>`、`%VAR%` 没展开）。
+ * 最后一档是「判不到」，**不是**「不存在」：此时 `configPath` 为 `null`，
+ * `configReason` 会写清哪个占位符没解析。
+ */
+export type HostConfigState = 'ready' | 'missing' | 'unreadable' | 'path_unresolved'
 
 export interface HostCapability {
   state: HostCapState
@@ -333,7 +339,8 @@ export interface HostCapability {
 export interface HostConfigInfo {
   role: 'hooks' | 'mcp'
   label: string
-  path: string
+  /** `null` = 路径没解析出来（占位符未展开）——**不是**「文件不存在」。 */
+  path: string | null
   format: 'json' | 'toml' | 'yaml'
   locator: string
   exists: boolean
@@ -348,6 +355,8 @@ export interface HostConfigInfo {
   missingScripts: string[]
   /** 解析时容忍过的宿主自定义标签（如 `!!js`）：值原样保留、未求值。 */
   toleratedTags: string[]
+  /** 路径没解析出来时的原因（此时 `path` 为 `null`）：判不到 ≠ 不存在。 */
+  pathUnresolved: string | null
 }
 
 export interface HostEvidence {

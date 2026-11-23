@@ -122,14 +122,25 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 }
 
 function ConfigLine({ config }: { config: HostConfigInfo }) {
+  // `pathUnresolved` = 路径根本没解析出来（家目录含占位符 / 环境变量没展开）：
+  // 那是**判不到**，不许写成「不存在」（docs/105 A3）。
+  const status = config.pathUnresolved
+    ? '路径未解析'
+    : config.exists
+      ? config.fishHit
+        ? 'fish 命中'
+        : '无 fish'
+      : '不存在'
   return (
     <li className="py-0.5">
       <span className="text-meta text-n6">
-        {config.role === 'hooks' ? 'hooks 配置' : 'MCP 配置'} · {config.label} ·{' '}
-        {config.exists ? (config.fishHit ? 'fish 命中' : '无 fish') : '不存在'}
+        {config.role === 'hooks' ? 'hooks 配置' : 'MCP 配置'} · {config.label} · {status}
       </span>
-      <span className="block truncate font-mono text-meta text-n7" title={config.path}>
-        {config.path}
+      <span
+        className="block truncate font-mono text-meta text-n7"
+        title={config.path ?? config.pathUnresolved ?? undefined}
+      >
+        {config.path ?? '（路径未解析）'}
       </span>
       {config.detail ? (
         <span className="block truncate text-meta text-n6" title={config.detail}>

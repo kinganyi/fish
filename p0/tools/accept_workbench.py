@@ -45,7 +45,6 @@ import argparse
 import base64
 import json
 import os
-import random
 import re
 import shutil
 import socket
@@ -444,27 +443,89 @@ def a03(ctx) -> tuple[bool, str]:
     return ok, detail
 
 
+class _MutationSkip(RuntimeError):
+    """变异**没有作用对象**——不是判据失败，也不是通过：必须显式 SKIP 并给原因。"""
+
+
+def _same_second_groups(items: list[dict]) -> int:
+    """页内「同秒并列」的组数（>0 才说明"打散同秒"有作用对象）。"""
+    counts: dict[str, int] = {}
+    for item in items:
+        key = item.get("ts") or ""
+        if key:
+            counts[key] = counts.get(key, 0) + 1
+    return sum(1 for value in counts.values() if value > 1)
+
+
+def _rotate_same_second(rows: list, rotation: int) -> list:
+    """把**同一秒的并列行**在排序键上打散，返回排序的输入行（KI-1 的修法）。
+
+    排序键是 `sk = "<ts>|<9-rk>|<pk 12 位>"`，`collect_stream` 在 `_fetch_batch` **之后**
+    `accumulated.sort(key=lambda row: row["sk"], reverse=True)`。所以"打散"必须改
+    **排序的输入行**；改投影层（`_stub_item` 的 sk）永远改不了顺序——那正是 A-3 变异
+    恒绿的根因（排序在投影之前）。
+
+    具体做法：同一 `ts` 的组内把**第三段（pk，唯一决定并列顺序的分量）**按 `rotation`
+    轮转，于是"同秒谁先谁后"随运行变化。用轮转而不是 `random`：第 1/2/3 次运行给出
+    确定性不同的三个顺序，判据**稳定必红**；纯随机在 4 个并列组时约有 1/192 的概率
+    三次撞成同一顺序而假绿。
+    """
+    out = [dict(row) for row in rows]
+    groups: dict[str, list[int]] = {}
+    for index, row in enumerate(out):
+        key = row.get("ts") or ""
+        if key:
+            groups.setdefault(key, []).append(index)
+    for _key, indexes in groups.items():
+        if len(indexes) < 2:
+            continue
+        pks = [int(out[index]["pk"]) for index in indexes]
+        shift = rotation % len(pks)
+        rotated = pks[shift:] + pks[:shift]
+        for position, (index, fake) in enumerate(zip(indexes, rotated)):
+            row = out[index]
+            # `*1000 + position` 让组内次序唯一（跨源 pk 可能相等），排序才可比较。
+            row["sk"] = f"{row['ts']}|{9 - int(row['rk'])}|{fake * 1000 + position:012d}"
+    return out
+
+
 def a03_mut(ctx) -> tuple[bool, str]:
-    """变异：把同毫秒的 tiebreak 打成随机 → 3 次顺序必须不再一致。"""
+    """变异：在**排序输入**上打散同秒并列 → 3 次顺序必须不再一致。
+
+    旧变异打在投影层（`_stub_item` 的 `sk`）：排序发生在 `accumulated` 上，而投影在
+    排序**之后**才跑，所以改投影永远不会改变顺序 → 变异恒绿、判据没有判别力
+    （QA/评审在 docs/104 KI-1 的定位）。现在把打散注入 `_fetch_batch` 的返回行，
+    让 `collect_stream` 自己的 `sort(key=sk)` 去吃这份被打散的行。
+    """
     A = ctx["A"]
-    original = A._stub_item
+    original = A._fetch_batch
+    state = {"rotation": 1}
+    ties = {"groups": 0}
 
-    def scrambled(row, labels):
-        item = original(row, labels)
-        if item.get("sk"):
-            item["sk"] = f"{item['ts']}|{item['sk'].split('|')[1]}|{random.randint(0, 999999):012d}"
-        return item
+    def scrambled(conn, **kwargs):
+        rows = original(conn, **kwargs)
+        return _rotate_same_second(rows, state["rotation"])
 
-    A._stub_item = scrambled
+    A._fetch_batch = scrambled
     try:
         runs = []
-        for _ in range(3):
-            out = _stream(ctx, limit=40)
-            runs.append([item["key"] for item in out["data"]["items"]])
-        ok = runs[0] == runs[1] == runs[2]
+        for index in range(3):
+            state["rotation"] = index + 1
+            items = _stream(ctx, limit=40)["data"]["items"]
+            runs.append([item["key"] for item in items])
+            ties["groups"] = max(ties["groups"], _same_second_groups(items))
     finally:
-        A._stub_item = original
-    return ok, json.dumps({"identicalUnderMutation": ok}, ensure_ascii=False)
+        A._fetch_batch = original
+    if ties["groups"] == 0:
+        raise _MutationSkip(
+            "首屏 40 条里没有同秒并列（排序键 ts 全不同）→ 打散没有作用对象，"
+            "这条判据在本次数据上不能自证；按纪律显式 SKIP，不算通过")
+    ok = runs[0] == runs[1] == runs[2]
+    return ok, json.dumps({"identicalUnderMutation": ok,
+                           "sameSecondGroups": ties["groups"],
+                           "first6PerRun": [run[:6] for run in runs],
+                           "note": "变异方向：同秒并列被打散 → 3 次顺序必须不同"},
+                          ensure_ascii=False)
 
 
 # ── A-4 ─────────────────────────────────────────────────────────────────
@@ -1100,6 +1161,7 @@ def main() -> int:
             ctx["conn"].close()
 
     mutation_fail = 0
+    mutation_skip = 0
     passed = skipped = failed = 0
     try:
         for cid, check, mutate in CHECKS:
@@ -1111,6 +1173,10 @@ def main() -> int:
                 # --mutate：直接把这条判据的**变异运行**结果当正式读数（应为红）
                 try:
                     ok, detail = mutate(ctx)
+                except _MutationSkip as exc:
+                    record(cid, "SKIP", f"变异没有作用对象：{exc}")
+                    skipped += 1
+                    continue
                 except Exception as exc:  # noqa: BLE001
                     record(cid, "SKIP", f"变异跑不起来：{type(exc).__name__}: {exc}")
                     skipped += 1
@@ -1139,6 +1205,13 @@ def main() -> int:
             if mutate is not None:
                 try:
                     mutated_ok, mutated_detail = mutate(ctx)
+                except _MutationSkip as exc:
+                    # 变异没有作用对象（如数据里没有同秒并列）：显式 SKIP 并给原因。
+                    # **不算通过**——「没自证」与「自证成立」是两件事，混起来就是假绿。
+                    record(cid, "MUTATION-SKIP",
+                           f"变异无作用对象，本次未自证（不是通过）：{exc}")
+                    mutation_skip += 1
+                    continue
                 except Exception as exc:  # noqa: BLE001
                     record(cid, "MUTATION-SKIP", f"变异跑不起来：{type(exc).__name__}: {exc}")
                     mutation_fail += 1
@@ -1154,7 +1227,7 @@ def main() -> int:
 
     total = passed + failed + skipped
     print(f"\n# 汇总 {passed}/{total} PASS · {failed} FAIL · {skipped} SKIP · "
-          f"变异自证失败 {mutation_fail} 条")
+          f"变异自证失败 {mutation_fail} 条 · 变异自证 SKIP {mutation_skip} 条（未自证，不算通过）")
     return 0 if (failed == 0 and skipped == 0 and mutation_fail == 0) else 1
 
 

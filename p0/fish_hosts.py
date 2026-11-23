@@ -291,8 +291,11 @@ HOSTS: tuple[HostSpec, ...] = (
             "kind": "literal",
             "note": "同 Claude Code 方言；工具名首字母大写（Write），大小写两种写法都在 matcher 里",
         },
+        # 实际装的 4 个采集器：SessionStart→session、UserPromptSubmit→prompt、
+        # PreToolUse→pretool、PostToolUse→**posttool**（它的 `maybe_push()` 就是 WorkBuddy
+        # 的推送通道；从前这里写成 fish_push_hook.py，与现场不符，见 docs/105 A2）。
         collector=("fish_session_hook.py", "fish_prompt_hook.py",
-                   "fish_pretool_hook.py", "fish_push_hook.py"),
+                   "fish_pretool_hook.py", "fish_posttool_hook.py"),
         identity={
             "channel": "hook", "state": "yes",
             "evidence": "SessionStart → fish_session_hook.py（按 payload 的 session_id 查已有公民，不签发 token）",
@@ -538,7 +541,15 @@ def spec_all() -> tuple[HostSpec, ...]:
 # ══════════════════════════════════════════════════════════════════════════
 # 三、路径解析与文件读取（只读）
 # ══════════════════════════════════════════════════════════════════════════
-_PLACEHOLDER = re.compile(r"<[^<>]*[^\x00-\x7f][^<>]*>|<\s*用户名\s*>|<\s*user(name)?\s*>")
+#: 未解析占位符的形状（三件事都算「这个路径不是真的」）：
+#:   `<用户名>` 这类**人写占位**、环境变量没展开留下的 `%VAR%`、以及 `$VAR` / `${VAR}`。
+_UNRESOLVED = re.compile(r"%[^%\s]+%|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|<[^<>]*>")
+
+
+def _unresolved_token(text: str) -> str | None:
+    """路径里还没解析掉的占位符 → 原文（没有就 `None`）。"""
+    match = _UNRESOLVED.search(text or "")
+    return match.group(0) if match else None
 
 
 def resolve_home(spec: HostSpec) -> tuple[str | None, str]:
@@ -546,24 +557,48 @@ def resolve_home(spec: HostSpec) -> tuple[str | None, str]:
     if spec.home_env:
         raw = (os.environ.get(spec.home_env) or "").strip()
         if raw:
-            return os.path.abspath(os.path.expanduser(raw)), f"env {spec.home_env}"
+            expanded = os.path.expandvars(os.path.expanduser(raw))
+            token = _unresolved_token(expanded)
+            if token:
+                return None, (f"环境变量 {spec.home_env} 的值含未解析占位符 {token}（{raw!r}）")
+            return os.path.abspath(expanded), f"env {spec.home_env}"
     if not spec.home_default:
         return None, "spec 没有声明家目录"
-    if _PLACEHOLDER.search(spec.home_default):
-        return None, (f"缺省路径含未解析占位符 {spec.home_default!r}"
-                      f"（{spec.home_env or '无环境变量'} 未设置）")
-    return os.path.abspath(os.path.expanduser(spec.home_default)), "缺省路径"
+    token = _unresolved_token(spec.home_default)
+    if token:
+        return None, (f"缺省路径含未解析占位符 {token}（{spec.home_default!r}；"
+                      f"{spec.home_env or '无环境变量'} 未设置）")
+    expanded = os.path.expandvars(os.path.expanduser(spec.home_default))
+    token = _unresolved_token(expanded)
+    if token:
+        return None, f"缺省路径里有环境变量没展开：{token}（{spec.home_default!r}）"
+    return os.path.abspath(expanded), "缺省路径"
 
 
-def resolve_path(template: str, home: str | None) -> str:
-    """把 `{home}` / `{install}` / `%ENV%` 展开成绝对路径（不检查存在性）。
+def resolve_path(template: str, home: str | None) -> tuple[str | None, str | None]:
+    """把 `{home}` / `{install}` / `%ENV%` 展开成绝对路径 → `(path, None)` 或 `(None, 原因)`。
+
+    **判不到就返回 `None`，绝不拼一个"看起来存在"的路径**：`{home}` 为空串时
+    `os.path.abspath("")` 会得到**当前工作盘的根**（实测得到 `I:\\hooks.json`，`I:` 来自
+    cwd），那是编出来的路径。docs/105 A3 的判据原文就是：「占位符路径未解析时不许是
+    `missing`」——判不到与不存在是两件事。
 
     `{install}` 用 `realpath(home)` 的上一级：本机 `.dsh` 是指向 `I:\\app\\DSH-Home\\home`
     的 junction，所以**必须**先 realpath 再取上一级——直接 `..` 会得到 `C:\\Users\\15596`。
     """
+    if home is None:
+        if "{home}" in template:
+            return None, f"路径模板 {template!r} 要家目录，但家目录没解析出来"
+        if "{install}" in template:
+            return None, f"路径模板 {template!r} 要安装根，但家目录没解析出来"
     install = os.path.dirname(os.path.realpath(home)) if home else ""
     text = template.format(home=home or "", install=install)
-    return os.path.abspath(os.path.normpath(os.path.expandvars(text)))
+    expanded = os.path.expandvars(text)
+    token = _unresolved_token(expanded)
+    if token:
+        return None, (f"路径模板 {template!r} 里的 {token} 没解析"
+                      "（环境变量未设置，或占位符没填）")
+    return os.path.abspath(os.path.normpath(expanded)), None
 
 
 def _read_text(path: str) -> str | None:
@@ -572,6 +607,64 @@ def _read_text(path: str) -> str | None:
             return handle.read()
     except OSError:
         return None
+
+
+# ── 「推送通道」是读脚本源码判的，不是看文件名（A2）─────────────────────────
+#: 脚本路径 → `(True|False|None, 依据)`。键含 size + mtime_ns：脚本被改过就重读。
+_PUSH_SCRIPT_CACHE: dict[tuple[str, int, int], tuple[bool | None, str]] = {}
+
+
+def script_push_channel(path: str) -> tuple[bool | None, str]:
+    """一个采集器脚本**是否真的会推送** → `(True|False|None, 依据)`。
+
+    判据是脚本**源码里的推送入口**（`PUSH_ENTRY_MARKERS`），不是文件名：
+      · `fish_push_hook.py` 命中 `select_push_candidates(` / `append_push_log(`；
+      · `fish_posttool_hook.py` 命中 `maybe_push(`（WorkBuddy 的实际推送通道）。
+
+    三态（三态分明）：`True` 有入口 / `False` 读得到但一个入口都没有 / `None` **判不到**
+    （脚本不在盘上、读不出内容）。判不到不许折成 `False`——那会把"没查"说成"没有"。
+    """
+    real = os.path.realpath(path)
+    try:
+        stat = os.stat(real)
+    except OSError:
+        return None, f"{os.path.basename(path)} 不在盘上，判不到它是否承担推送"
+    key = (real, stat.st_size, stat.st_mtime_ns)
+    cached = _PUSH_SCRIPT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    text = _read_text(real)
+    if text is None:
+        result: tuple[bool | None, str] = (
+            None, f"{os.path.basename(path)} 读不出内容，判不到它是否承担推送")
+    else:
+        marker = next((item for item in PUSH_ENTRY_MARKERS if item in text), None)
+        result = ((True, f"{os.path.basename(path)} 源码里有推送入口 {marker.rstrip('(')}()")
+                  if marker else
+                  (False, f"{os.path.basename(path)} 源码里没有推送入口"))
+    _PUSH_SCRIPT_CACHE[key] = result
+    return result
+
+
+def push_channel(scripts: Iterable[str]) -> tuple[str, str]:
+    """已装 hooks 采集器脚本 → `(state, evidence)`，state ∈ `yes/no/unverified`。
+
+    **按脚本判，不按宿主动手写**：dsh 装 `fish_push_hook.py`、WorkBuddy 装
+    `fish_posttool_hook.py`，两者都真推送；同一份脚本挂在两台宿主上时结论必然一致
+    （判据只读脚本源码，不读宿主 id——这就是 A2 要的"共用脚本两者结论一致"）。
+    """
+    paths = [item for item in dict.fromkeys(scripts or []) if item]
+    if not paths:
+        return "no", "hooks 里没有指向 fish 的采集器脚本"
+    verdicts = [(path, *script_push_channel(path)) for path in paths]
+    hits = [evidence for _path, carries, evidence in verdicts if carries is True]
+    if hits:
+        return "yes", "；".join(hits)
+    unknown = [evidence for _path, carries, evidence in verdicts if carries is None]
+    if unknown:
+        return "unverified", "；".join(unknown)
+    names = "、".join(os.path.basename(path) for path in paths)
+    return "no", f"已装的 {len(paths)} 个采集器（{names}）里都没有推送入口"
 
 
 # ── §三·B asar：应用版本的真来源（Electron 的 `version` 文件不是）────────────
@@ -865,15 +958,20 @@ def script_paths(commands: Iterable[str]) -> list[str]:
 # 四、单个配置落点的探测（纯读）
 # ══════════════════════════════════════════════════════════════════════════
 def inspect_config(probe: ConfigProbe, home: str | None) -> dict:
-    """一份配置文件的现场读数（存在/可解析/fish 命中/脚本存在）。"""
-    path = resolve_path(probe.path_template, home)
+    """一份配置文件的现场读数（存在/可解析/fish 命中/脚本存在）。
+
+    `path` 可能为 `None`（占位符没解析）：那时 `unresolved` 有值、`exists=False`，而且
+    **不会**拼出一个看似存在的路径。判不到 ≠ 不存在，调用方要按 `unresolved` 分流。
+    """
+    path, unresolved = resolve_path(probe.path_template, home)
     info: dict[str, Any] = {
         "role": probe.role,
         "label": probe.label,
         "path": path,
+        "unresolved": unresolved,
         "format": probe.format,
         "locator": probe.locator_text or ".".join(probe.locator),
-        "exists": os.path.isfile(path),
+        "exists": bool(path and os.path.isfile(path)),
         "size": None,
         "mtime": None,
         "parsed": None,
@@ -886,7 +984,7 @@ def inspect_config(probe: ConfigProbe, home: str | None) -> dict:
         "toleratedTags": [],
     }
     if not info["exists"]:
-        info["detail"] = "文件不存在"
+        info["detail"] = f"路径未解析：{unresolved}" if unresolved else "文件不存在"
         return info
     try:
         stat = os.stat(path)
@@ -980,7 +1078,9 @@ def _electron_version(spec: HostSpec, home: str | None) -> tuple[str | None, str
     for probe in _ordered_probes(spec):
         if probe.kind != "electron":
             continue
-        path = resolve_path(probe.path_template, home)
+        path, _unresolved = resolve_path(probe.path_template, home)
+        if path is None:
+            continue
         text = _read_text(path)
         value = text.strip().splitlines()[0].strip() if (text and text.strip()) else ""
         if value:
@@ -1004,7 +1104,11 @@ def read_version(spec: HostSpec, home: str | None) -> VersionReading:
     for probe in _ordered_probes(spec):
         if probe.kind == "electron":
             continue                     # 已单独读过，且它永远不会进 `version`
-        path = resolve_path(probe.path_template, home)
+        path, unresolved = resolve_path(probe.path_template, home)
+        if path is None:
+            # 占位符没解析 = **判不到**，不是「文件不存在」：不许拿拼出来的路径充数。
+            problems.append(f"版本来源 {probe.path_template!r} 未解析：{unresolved}")
+            continue
         if probe.kind == "asar":
             if not os.path.isfile(path):
                 problems.append(f"{path} 不存在")
@@ -1174,8 +1278,13 @@ def detect(target: str | HostSpec, *, db_path: str | None = None,
            now: datetime | None = None) -> dict:
     """探一个宿主 → `HostStatus`（plain dict，可直接 JSON）。
 
-    `target` 收 `str` 也收 `HostSpec`：收 spec 是给**变异自证**用的测试缝——把
-    `config_paths` 指向不存在的路径，`installed` 必须变 false，否则判据没有判别力。
+    `target` 收 `str` 也收 `HostSpec`（收 spec 是给**变异自证**用的测试缝）。
+
+    `installed` 的语义是「这台机器上装了这个宿主的**任一痕迹**」：
+    `家目录存在 or 任一配置存在 or 读得到应用版本 or 读得到 Electron 的 version 文件`。
+    所以变异自证必须**四项一起抹掉**才翻得过去——只改 `config_paths` 不会变
+    （docs/104 §4 V1 实测：这句话原先写成"只改 config_paths 即 false"，与行为不符，
+    2026-11-24 按实测改正；`installed=装了这个宿主`这个语义本身是对的）。
 
     传 `db_path` 才查「最后活跃」；不传则 `lastSeenAt=null` 并明说「未提供库路径」——
     **判不到不是 0**，更不是「没在用」。批量探测请用 `detect_all()`（它只开一次连接、
@@ -1209,11 +1318,22 @@ def detect(target: str | HostSpec, *, db_path: str | None = None,
     })
 
     existing = [info for info in configs if info["exists"]]
-    primary = existing[0] if existing else (configs[0] if configs else None)
+    # 判不到（占位符没解析）优先于「不存在」：查都没查成，不许声称"没有"。
+    unresolved_configs = [info for info in configs if info.get("unresolved")]
+    primary = (existing[0] if existing
+               else unresolved_configs[0] if unresolved_configs
+               else configs[0] if configs else None)
     config_path = primary["path"] if (primary and primary["exists"]) else None
     if primary is None:
         config_state = "missing"
         config_reason = "该宿主没有声明任何配置落点（不是安装目标）"
+    elif primary.get("unresolved"):
+        # docs/105 A3：占位符路径未解析必须是 `path_unresolved`，不许是 `missing`；
+        # `configPath` 同时为 null——**不许**拿 `os.path.join`/`abspath` 拼一个编出来的路径。
+        config_state = "path_unresolved"
+        # 把「哪个变量/占位符没解析」写进原因：光说"没解析出来"等于没说。
+        config_reason = (f"{home_reason}；{primary['label']} 的路径因此判不到"
+                         if home is None else primary["unresolved"])
     elif not primary["exists"]:
         config_state = "missing"
         config_reason = f"配置不存在：{primary['path']}"
@@ -1231,14 +1351,17 @@ def detect(target: str | HostSpec, *, db_path: str | None = None,
                      else "mcp" if mcp_hit_configs
                      else "none")
 
-    hooks_commands = [cmd for info in configs if info["role"] == "hooks"
-                      for cmd in (hook_commands(_parse_config(info)) if info["exists"] else [])]
-    push_hit = any(PUSH_HOOK_SCRIPT in cmd for cmd in hooks_commands)
+    # 推送通道看**已装的采集器脚本源码**（不看文件名、也不看 spec 怎么声明）：
+    # dsh 的 `fish_push_hook.py` 与 WorkBuddy 的 `fish_posttool_hook.py` 都真推送。
+    hook_scripts = [script for info in configs if info["role"] == "hooks"
+                    for script in (info.get("scripts") or [])]
+    push_state, push_evidence = push_channel(hook_scripts)
 
     installed = bool(home_exists or existing or version or reading.electron_source)
 
     capabilities = _capabilities(spec, hooks_hit=bool(hooks_hit_configs),
-                                 mcp_hit=bool(mcp_hit_configs), push_hit=push_hit,
+                                 mcp_hit=bool(mcp_hit_configs),
+                                 push=(push_state, push_evidence),
                                  config_exists=bool(existing))
 
     evidence.append({
@@ -1326,15 +1449,6 @@ def detect(target: str | HostSpec, *, db_path: str | None = None,
     }
 
 
-def _parse_config(info: dict) -> Any:
-    """把 `inspect_config` 读过的文件再解析一次（只在算 push 通道时用，量很小）。"""
-    text = _read_text(info["path"]) if info["exists"] else None
-    if text is None:
-        return None
-    doc, _error, _soft = _parse_document(text, info["format"])
-    return doc
-
-
 def _public_config(info: dict) -> dict:
     """给响应用的配置读数（不含脚本绝对路径全集之外的内部字段）。"""
     return {
@@ -1355,12 +1469,22 @@ def _public_config(info: dict) -> dict:
         "missingScripts": info["missingScripts"],
         # 解析时容忍过的宿主自定义标签（如 `!!js`）：值原样保留、未求值，只用于说明。
         "toleratedTags": list(info.get("toleratedTags") or []),
+        # 路径没解析出来时的原因（`path` 同时为 null）——判不到与不存在分开说。
+        "pathUnresolved": info.get("unresolved"),
     }
 
 
 def _config_evidence(info: dict) -> list[dict]:
     """一份配置 → 逐条证据（存在 / 可解析 / fish 命中 / 脚本存在）。"""
     label = f"{info['label']}"
+    if info.get("unresolved"):
+        # 判不到：别写成"不存在"，也别把编出来的路径写进证据。
+        return [{
+            "id": f"config:{info['role']}:{label}",
+            "label": f"{label} 路径可解析",
+            "ok": None,
+            "detail": f"判不到：{info['unresolved']}",
+        }]
     items = [{
         "id": f"config:{info['role']}:{label}",
         "label": f"{label} 存在",
@@ -1409,11 +1533,14 @@ def _protocol_note(spec: HostSpec) -> str | None:
 
 
 def _capabilities(spec: HostSpec, *, hooks_hit: bool, mcp_hit: bool,
-                  push_hit: bool, config_exists: bool) -> dict:
+                  push: tuple[str, str], config_exists: bool) -> dict:
     """能力矩阵（hooks / MCP / events / identity / push）。
 
     纪律：`state=="yes"` 必须给得出 `evidence`（**不许无证据声称支持**）；
     判不到的写 `unverified`（渲染成「未验证」），不许折成「未接」。
+
+    `push` 传的是**已上线脚本的推送通道结论** `(state, evidence)`（由
+    `push_channel()` 从采集器脚本源码算出来），不是"配置里有没有叫 push 的脚本"。
     """
     hooks_evidence = (
         f"hooks 配置里 {len(spec.events)} 个事件、command 指向 fish 脚本（见 evidence 逐条）"
@@ -1429,6 +1556,7 @@ def _capabilities(spec: HostSpec, *, hooks_hit: bool, mcp_hit: bool,
         identity_state = "yes" if hooks_hit else ("unverified" if not config_exists else "no")
     else:
         identity_state = identity.get("state", "unverified")
+    push_state, push_evidence = push
     return {
         "hooks": _cap("yes" if hooks_hit else "no", hooks_evidence),
         "mcp": _cap("yes" if mcp_hit else "no", mcp_evidence),
@@ -1436,9 +1564,7 @@ def _capabilities(spec: HostSpec, *, hooks_hit: bool, mcp_hit: bool,
                        "事件流来自 hook：hooks 不在就没有事件上报" if not hooks_hit
                        else f"{len(spec.events)} 个 hook 事件 → 事件流"),
         "identity": _cap(identity_state, identity.get("evidence", "")),
-        "push": _cap("yes" if push_hit else "no",
-                     f"PostToolUse → {PUSH_HOOK_SCRIPT}（推送通道）" if push_hit
-                     else "没有装推送采集器（fish_push_hook.py）"),
+        "push": _cap(push_state, push_evidence),
     }
 
 
@@ -1565,7 +1691,9 @@ def config_fingerprints() -> dict[str, dict]:
     for spec in HOSTS:
         home, _reason = resolve_home(spec)
         for probe in spec.config_paths:
-            path = resolve_path(probe.path_template, home)
+            path, _unresolved = resolve_path(probe.path_template, home)
+            if path is None:
+                continue                  # 路径没解析出来就没有指纹可拍（判不到，不编）
             item = _fingerprint(path)
             if item:
                 out[path] = item
