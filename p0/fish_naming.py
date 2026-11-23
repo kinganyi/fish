@@ -47,6 +47,8 @@ from __future__ import annotations
 
 import re
 
+import fish_hosts_vocab
+
 # **旧格式**（`dsh-8a83d218` 这类纯字母数字尾巴）。只为兼容老库里的历史名字保留；
 # 新生成的自动名不再走它，见下方 `auto_session_display_name`。
 AUTO_NAME_RE = re.compile(r"^(dsh|codebuddy|workbuddy|cli)-[0-9a-z]{6,12}(:.*)?$", re.I)
@@ -213,7 +215,14 @@ def disambiguate(rows) -> dict:
 # 已知宿主前缀白名单：只有这些前缀才算「合法会话键」。
 # 与 `fish_activity.HOST_KEY_PREFIX` / 迁移回填表达式 `_PRESENCE_SESSION_BACKFILL`
 # 是同一份口径（判据 S15 钉住回填，判据 S19 钉住渲染）。
-SESSION_HOSTS = ("dsh", "codebuddy", "workbuddy", "cli", "self")
+#
+# **词表下沉（设计 106 W1）**：字面量搬去叶子 `fish_hosts_vocab`，这里只留名字派生。
+# 名字与顺序**逐字保留**——`tools/verify_hosts.py:240` 用
+# `fish_hosts.PROTOCOLS == tuple(fish_naming.SESSION_HOSTS)` 做 tuple 相等断言，
+# 顺序错一位（哪怕集合相同）就会红。派生而不是「从注册表推导」是刻意的：
+# 词表是「对外世界已有事实的登记」，注册表少一条 spec 时它不该跟着少
+# （否则 `consistency()` 再也发现不了「库里出现了一个没人认识的宿主」）。
+SESSION_HOSTS = fish_hosts_vocab.PROTOCOL_VOCABULARY
 
 SESSION_SHORT_WIDTH = 4          # 缺省宽度（设计 D4：4 位）
 SESSION_SHORT_MAX = 8            # 同公民内撞车时逐级加长的上限（**永不回落 ULID**）

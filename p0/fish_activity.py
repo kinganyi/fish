@@ -52,11 +52,18 @@ import re
 import sqlite3
 from pathlib import Path
 
+import fish_hosts_vocab
 import fish_naming
 import fish_surface
 
 # ── 宿主语汇（会话键前缀与现有 `fish_session_hook`/`mcp_server` 同口径）─────────
-HOST_KEY_PREFIX = {"dsh": "dsh", "workbuddy": "codebuddy", "codebuddy": "codebuddy"}
+# **词表下沉（设计 106 W1）**：字面量搬去叶子 `fish_hosts_vocab`，这里只派生。
+# 形状 = 词表全集映射到自身（`cli→cli`、`self→self`）再叠加唯一的非恒等映射
+# （`workbuddy→codebuddy`）。派生后 3 键变 5 键，但新增两键是**恒等映射**，而
+# `make_session_key` 的兜底本来就是「取原值」——所以对任何输入行为恒等
+# （判据：7 个 host id + 2 个未登记值逐个比 `make_session_key` 与现状逐字相同）。
+HOST_KEY_PREFIX = {prefix: prefix for prefix in fish_hosts_vocab.PROTOCOL_VOCABULARY}
+HOST_KEY_PREFIX.update(fish_hosts_vocab.PREFIX_OVERRIDES)
 
 # ── 动作词表：本批只落 write / exec ──────────────────────────────────────────
 # read/other 保留在词表里只是**文档**（设计 §4.1）：读不改变任何东西，
