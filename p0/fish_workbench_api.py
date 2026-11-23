@@ -690,6 +690,22 @@ def host_from_session(session_key: str | None) -> str:
     return key.split(":", 1)[0].strip().lower()
 
 
+def host_label_for_protocol(protocol: str | None) -> str:
+    """会话键前缀 → **人类面宿主标签**（并列，不猜；设计 106 §6）。
+
+    ⚠️ 不许改成 `host_label(protocol)`——这是设计里点名的坑：`host_label("codebuddy")`
+    返回 `"CodeBuddy"`（`_ALIAS_OWNER` 命中的是 id 本身），而 `codebuddy:` 前缀下的
+    26,200 行其实属于 **WorkBuddy**。`hosts_for_protocol` 的口径是「反查不唯一时不猜」，
+    所以这里**并列**显示 `"WorkBuddy/CodeBuddy"`；用 host_label 会把 WorkBuddy 的会话
+    显示成 CodeBuddy —— 一个看起来很像真的假归属。
+    """
+    key = (protocol or "").strip().lower()
+    if not key:
+        return ""
+    return "/".join(fish_hosts.REGISTRY[host].display
+                    for host in fish_hosts.hosts_for_protocol(key))
+
+
 def actor_of(row, labels: dict) -> dict:
     cid = (row["citizen_id"] or "") if row["citizen_id"] else ""
     session_key = row["session_key"] or ""
@@ -1685,12 +1701,20 @@ def collect_entry(conn: sqlite3.Connection, key: str) -> dict | None:
         "citizenId": citizen_id or None,
         "sessionTag": entry["actor"]["sessionTag"],
         "host": entry["actor"]["host"],
+        # 人类面标签（**只增键**，W6）：前缀 → 并列显示；`codebuddy` 前缀是
+        # `"WorkBuddy/CodeBuddy"`（不猜——见 `host_label_for_protocol` 的坑）。
+        "hostLabel": host_label_for_protocol(entry["actor"]["host"]),
         # 宿主取会话键前缀的可见说明（前端在详情里以 hover ⓘ 展示，正文不占位）
         "hostBasis": "按会话键前缀判定",
         "citizen": ({
             "displayName": citizen["display_name"],
             "kind": citizen["kind"], "role": citizen["role"],
             "host": (citizen["host"] or "").strip().lower() or None,
+            # 自报面的**机器归一键**（W6，只增键）：alias → 规范 id；认不出的原样小写；
+            # `unknown`/`n/a` 等哨兵 → ""。旧键 `host` 是原始自报值，一个字节不动。
+            "hostCanonical": fish_hosts.canonical_host(citizen["host"]),
+            # 自报面的**人类面标签**（W6，只增键）：保留原始写法；认不出 → "未登记宿主 <原值>"。
+            "hostLabel": fish_hosts.host_label(citizen["host"]),
             "status": citizen["status"], "createdAt": citizen["created_at"],
             "lastSeenAt": citizen["last_seen_at"],
         } if citizen else None),
