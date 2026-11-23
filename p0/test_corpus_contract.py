@@ -70,17 +70,21 @@ CORPUS_FILES = (
 )
 
 # 每个模块**允许**依赖的本项目模块（设计 §2 的"允许依赖"列）。
+# 2026-11-24（docs/106 W4）：新增叶子 `fish_hosts_vocab` —— 语料层的「可采宿主白名单」
+# 改为从它派生（不再在 fish_corpus 里重打 ("dsh","workbuddy")）。叶子是**纯数据模块**
+# （零 fish import、无函数），进语料层不引入任何反向依赖或第三方依赖，故在此登记。
 ALLOWED_INTERNAL = {
     "fish_corpus.py": {"fish_corpus_dsh", "fish_corpus_wb", "fish_corpus_store",
                        "fish_corpus_tag", "fish_corpus_rank", "fish_corpus_gov",
-                       "fish_corpus_redact", "fish_common"},
+                       "fish_corpus_redact", "fish_common", "fish_hosts_vocab"},
     "fish_corpus_store.py": {"fish_common"},
     "fish_corpus_redact.py": set(),
     # 打标层要多一份 `redact`：`cwd`/`workspace`/`project_note` 是**可回显列**
     # （`stats.unmapped_cwds` 会把它们回给 AI），写入前必须走同一份规则表
     # （2026-10-27 复审 安全新🟠）。两个适配器本来就允许 import redact。
+    # 2026-11-24（docs/106 W4）：`fish_hosts_vocab` —— 合法宿主的判据改为白名单派生。
     "fish_corpus_tag.py": {"fish_corpus_store", "fish_corpus_redact", "fish_surface",
-                           "fish_activity"},
+                           "fish_activity", "fish_hosts_vocab"},
     "fish_corpus_dsh.py": {"fish_corpus_store", "fish_corpus_redact", "fish_corpus_tag"},
     "fish_corpus_wb.py": {"fish_corpus_store", "fish_corpus_redact", "fish_corpus_tag"},
     # 排序只依赖"切词单源"（D08/D09），不认识库结构（设计 §2：rank → store/common，

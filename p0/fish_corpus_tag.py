@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 
 import fish_activity
+import fish_hosts_vocab
 import fish_corpus_redact as redact_mod
 import fish_surface
 import fish_corpus_store as store
@@ -159,7 +160,9 @@ class Tagger:
         if not session_id:
             raise TagError("会话头没有 session_id/id（无法定位一段对话）")
         host = (host or "").strip().lower()
-        if host not in ("dsh", "workbuddy"):
+        # 合法宿主 = 语料层**有适配器**的那几台（白名单在叶子词表里，W4）。
+        # 不在这里重打一遍 ("dsh","workbuddy")：那是第二份真相，加一台宿主就会漂。
+        if host not in fish_hosts_vocab.CORPUS_ADAPTER_HOSTS:
             raise TagError("未知宿主：%r" % host)
 
         extra = dict(header.get("extra") or {})

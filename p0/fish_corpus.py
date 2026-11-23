@@ -46,14 +46,30 @@ import fish_corpus_redact as redact_mod
 import fish_corpus_store as store
 import fish_corpus_tag as tag_mod
 import fish_corpus_wb as wb_adapter
+import fish_hosts_vocab
 
 # 适配器注册表（C-P2-1：第三/四宿主只在这里加一行，门面不动）
-ADAPTERS = {
+# **W4 词表下沉（设计 106）**：可采宿主白名单来自叶子 `fish_hosts_vocab.CORPUS_ADAPTER_HOSTS`，
+# 实现类表逐项**对拍**——两个方向都要硬失败，否则就是静默少一行：
+#   · 白名单多写一条而没实现 → 导入即报错（不是"这个宿主采不到"，而是"配置写错了"）；
+#   · 实现了却没进白名单 → 同样报错（少一行 = 某个宿主的语料静默停止采集）。
+# 为什么本模块**不** import `fish_hosts`：语料层已经拖着 zstd/解析链，注册表只用于核对；
+# 「白名单 vs 实现表」这条真实关系就在这一处判。
+_IMPLS = {
     dsh_adapter.HOST: dsh_adapter.DshAdapter,
     wb_adapter.HOST: wb_adapter.WbAdapter,
 }
+_CORPUS_HOSTS = tuple(fish_hosts_vocab.CORPUS_ADAPTER_HOSTS)
+_MISSING_IMPL = [host for host in _CORPUS_HOSTS if host not in _IMPLS]
+_UNLISTED_IMPL = sorted(set(_IMPLS) - set(_CORPUS_HOSTS))
+if _MISSING_IMPL or _UNLISTED_IMPL:
+    raise RuntimeError(
+        "语料适配器与白名单不一致（fish_hosts_vocab.CORPUS_ADAPTER_HOSTS）："
+        f"白名单里没有实现的={_MISSING_IMPL}；实现了但没登记的={_UNLISTED_IMPL}"
+        "（两向都硬失败：少一行等于某个宿主的语料静默停采）")
+ADAPTERS = {host: _IMPLS[host] for host in _CORPUS_HOSTS}
 HOSTS = tuple(ADAPTERS)
-DEFAULT_HOSTS = (dsh_adapter.HOST, wb_adapter.HOST)
+DEFAULT_HOSTS = HOSTS
 
 # 门牌/库层错误在门面处再导出：调用方（CLI / MCP）只该认识一个模块，
 # 不该为了 catch 一个门牌错误而 import 实现层。
