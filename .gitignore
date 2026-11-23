@@ -65,3 +65,12 @@ p0/_run_*
 # 文档目录由 p0/tools/doc_index.py 生成，登记的是不随库发布的根目录编号文档——
 # 放进公开仓就是一份指向不存在文件的清单。只在本地生成。
 docs-catalog.json
+
+# 2026-11-24：工作台前端（Node 工程）——依赖与构建产物不入库
+# 为什么必须写：`ui/` 是新目录，仓库原本没有 Node 工程；不写这三行，
+# 一次 `git add ui/` 会把 node_modules（数万文件）与 dist 产物一起塞进仓库。
+ui/node_modules/
+ui/dist/
+ui/.vite/
+# 旧截图（已被新构建取代，留档在本地即可；当前 5 张作为证据入库）
+ui/screenshots/_legacy-predist/

@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+/*
+ * 设计令牌（97 §D6 的四类刻度）——只用这四类，不新增第五类。
+ * Tailwind 4 的 @theme 会把每个键同时变成 CSS 变量与工具类：
+ *   --spacing-4  → p-4 / gap-4 / h-4
+ *   --text-meta  → text-meta
+ *   --font-weight-head → font-head
+ *   --color-n6   → text-n6 / bg-n6 / border-n6
+ * 所以组件里不写裸像素、不写字面 hex，改刻度只改这里一处。
+ */
+@theme {
+  /* ── 间距：4 / 8 / 12 / 16 / 24 / 32 / 48（px）──────────────────── */
+  --spacing-1: 4px;
+  --spacing-2: 8px;
+  --spacing-3: 12px;
+  --spacing-4: 16px;
+  --spacing-6: 24px;
+  --spacing-8: 32px;
+  --spacing-12: 48px;
+
+  /* ── 字号：12 元信息 / 13 副行 / 14 正文与主行 / 16 区块标题 / 20 页标题 ── */
+  --text-meta: 12px;
+  --text-meta--line-height: 16px;
+  --text-sub: 13px;
+  --text-sub--line-height: 18px;
+  --text-body: 14px;
+  --text-body--line-height: 20px;
+  --text-section: 16px;
+  --text-section--line-height: 22px;
+  --text-title: 20px;
+  --text-title--line-height: 28px;
+
+  /* ── 字重：400 正文 / 500 主行姓名与数字 / 600 区块标题 ────────────── */
+  --font-weight-body: 400;
+  --font-weight-name: 500;
+  --font-weight-head: 600;
+
+  /* ── 颜色：中性 9 阶 + 强调 + 三状态 ─────────────────────────────── */
+  --color-n0: #ffffff;
+  --color-n1: #f6f7f9;
+  --color-n2: #eceef2;
+  --color-n3: #dfe3ea;
+  --color-n4: #c3c9d4;
+  --color-n5: #8b95a5;
+  --color-n6: #5c6675;
+  --color-n7: #2c333d;
+  --color-n8: #141920;
+  --color-accent: #1f5fbf;
+  --color-accent-soft: #e8f0fc;
+  --color-ok: #1a7f4b;
+  --color-warn: #9a6200;
+  --color-err: #b3261e;
+
+  /* ── 字体族：等宽只给机器标识（时间列 / 路径 / 编码 / 会话短标识 / sha）── */
+  --font-sans: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", "Consolas", "SFMono-Regular", ui-monospace, monospace;
+}
+
+/*
+ * 三栏的版式下限（96 §5.4 最硬的一条）：1280 宽下 左 200 / 右 320–400 / 中 ≥55%。
+ * 更窄时不缩栏宽、不折栏，只让中栏横向滚动。
+ */
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-n1);
+    color: var(--color-n7);
+    font-family: var(--font-sans);
+    font-size: var(--text-body);
+    line-height: var(--text-body--line-height);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* 92 §七：焦点环必须可见，不许 outline:none。 */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--color-accent-soft);
+  }
+}

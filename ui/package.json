@@ -1,0 +1,28 @@
+{
+  "name": "fish-workbench-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "fish 现场首屏（一条可运行纵切：只读五源流水 + 四栏判断面）",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "@tanstack/react-virtual": "^3.13.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zustand": "^5.0.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "tailwindcss": "^4.0.0",
+    "typescript": "~5.7.2",
+    "vite": "^6.0.0"
+  }
+}

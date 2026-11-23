@@ -1,0 +1,45 @@
+/*
+ * 组件级基础样式（设计令牌本身在 ui/tailwind.css 的 @theme 里）。
+ *
+ * 只做三件事：滚动条不抢注意力、数字对齐、reduce-motion 时关掉动效。
+ * 任何颜色/间距/字号都不要在这里写死——那是 tailwind.css 的事，改刻度只改一处。
+ */
+
+html {
+  color-scheme: light;
+}
+
+/* 卷动条：细、中性、不抢视觉重量（三栏各自滚动，粗卷动条会吃掉中栏宽度）。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-n4) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-n4);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+/* 数字列等宽对齐（时间列、计数、百分比都要不跳）。 */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 动效只表达状态（97 §D7）；用户要求减少动效时全关，不留装饰性过渡。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
