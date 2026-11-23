@@ -6,7 +6,7 @@
 
 「这台机器上装了哪些 Agent 宿主、fish 在哪几个宿主里真的接上了、接的是哪条通道」——这件事
 原来散在四个文件里各写一遍（`install_hooks.TARGETS` 两个、`install_mcp` 只认 WorkBuddy、
-`fish_naming.SESSION_HOSTS` 五个、`fish_corpus.ADAPTERS` 两个），并且有一个已知的假红：
+`fish_hosts_vocab.PROTOCOL_VOCABULARY` 五个、`fish_corpus.ADAPTERS` 两个），并且有一个已知的假红：
 WorkBuddy 的 `--check` 在 `WORKBUDDY_HOME` 未设置时指向占位符路径，报的是「缺 4 个事件」，
 而真实原因是「路径不存在」——**把「判不到」报成了「红」**。
 
@@ -34,7 +34,8 @@ WorkBuddy 的 `--check` 在 `WORKBUDDY_HOME` 未设置时指向占位符路径�
    版本来源有优先级（见 §三·B）：**asar 里的应用 `package.json` > 应用清单 > 文本文件**；
    Electron 安装器的 `version` 文件只进 `electronVersion`，**永远不进 `version`**。
 3. **不写库**：只读连接走 `fish_ui.open_readonly` + 一次 `assert_write_rejected`（真试一次写，
-   被拒才算过），然后只跑 SELECT。
+   被拒才算过），然后只跑 SELECT。`fish_ui` 是**函数内** import（设计 106 W2）：它带
+   `http.server`（124–333 ms），只在真的要连库时才付这笔钱。
 4. **不做「已写入但与目标不一致」判定**（`configState=stale`）：一期不生成目标配置，没有
    比对基准；`configState` 只有 `ready / missing / unreadable` 三档，另加 `disabledReason` 说明。
 
@@ -42,7 +43,7 @@ WorkBuddy 的 `--check` 在 `WORKBUDDY_HOME` 未设置时指向占位符路径�
 
 | 词表 | 读者 | 取值来源 | 本文件中的字段 |
 |---|---|---|---|
-| **protocol**（会话键前缀） | 工作台/看板/撞车判定 | `fish_naming.SESSION_HOSTS`（**唯一真相，这里只读它**） | `HostSpec.protocol` |
+| **protocol**（会话键前缀） | 工作台/看板/撞车判定 | `fish_hosts_vocab.PROTOCOL_VOCABULARY`（**叶子词表，唯一真相；这里只读它**） | `HostSpec.protocol` |
 | **host id**（安装目标） | 安装器 `--host`、spec 注册表 | 本文件 `HOSTS` | `HostSpec.id` |
 | **自报 host** | 公民档案 `citizens.host` | 历史写法五花八门（`ZCode`/`dsh-desktop`/`unknown`） | `canonical_host()` / `host_label()` |
 
@@ -99,13 +100,16 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-import fish_naming  # noqa: E402  会话键前缀词表的唯一真相（这里只读，不改）
-import fish_ui      # noqa: E402  只读连接纪律：open_readonly / assert_write_rejected
+import fish_hosts_vocab  # noqa: E402  宿主**词表**（叶子：零 fish import），本文件只读不重打
 
 SCHEMA = "fish-hosts/1"
 
-#: 会话键前缀词表的**唯一真相**在 `fish_naming`，本文件只引用、不重打一遍。
-PROTOCOLS: tuple[str, ...] = tuple(fish_naming.SESSION_HOSTS)
+#: 会话键前缀词表的**唯一真相**在叶子 `fish_hosts_vocab`（设计 106 W2：切断对
+#: `fish_naming` 的依赖——本文件不该为了五个字符串把 `fish_naming` 拖进来）。
+#: 为什么不由 `HOSTS` 推导：词表是「对外世界已有事实的登记」，注册表少一条 spec 时
+#: 它不该跟着少——否则 `consistency()` 再也发现不了「库里出现了一个没人认识的宿主」
+#: （设计 §1 口径一，变异实测：推导写法下 ⑥-变异 warnings=[]、ok=True）。
+PROTOCOLS: tuple[str, ...] = tuple(fish_hosts_vocab.PROTOCOL_VOCABULARY)
 
 #: 「没有会话键前缀」的显式取值。**不是** `"unknown"`：`unknown` 是自报面的假宿主，
 #: 这里表达的是「这台宿主根本不产生 fish 会话键」（如只有 MCP 通道的 Codex）。
@@ -464,8 +468,8 @@ def _register(spec: HostSpec) -> None:
         raise ValueError(f"宿主 id 重复：{spec.id!r}（注册表里每个 id 只能出现一次）")
     if spec.protocol and spec.protocol not in PROTOCOLS:
         raise ValueError(
-            f"{spec.id}: protocol={spec.protocol!r} 不在 fish_naming.SESSION_HOSTS {PROTOCOLS} 里；"
-            "新增会话键前缀要改 fish_naming（本文件不重打这份词表）")
+            f"{spec.id}: protocol={spec.protocol!r} 不在 fish_hosts_vocab.PROTOCOL_VOCABULARY"
+            f" {PROTOCOLS} 里；新增会话键前缀要改 fish_hosts_vocab（本文件不重打这份词表）")
     if not spec.display.strip():
         raise ValueError(f"{spec.id}: display 不能为空")
     REGISTRY[spec.id] = spec
@@ -1162,8 +1166,16 @@ _READONLY_PROVEN = False
 
 
 def open_readonly_db(db_path: str) -> sqlite3.Connection:
-    """只读连接。**第一次**开连接时真试一次写（被拒才算过），之后复用结论。"""
+    """只读连接。**第一次**开连接时真试一次写（被拒才算过），之后复用结论。
+
+    `fish_ui` 在这里**函数内** import（设计 106 W2）：它为了「只读连接纪律」把
+    `http.server` 与 `dataclasses` 一起拖进来（实测 124–333 ms），而本模块的探测在
+    「没有库」时根本不需要它。降为函数内 import 之后，`import fish_hosts` 只剩
+    stdlib 成本——**这个模块存在的理由就是不拖累别人**。
+    """
     global _READONLY_PROVEN
+    import fish_ui  # noqa: PLC0415  只读连接纪律：open_readonly / assert_write_rejected
+
     conn = fish_ui.open_readonly(db_path)
     if not _READONLY_PROVEN:
         fish_ui.assert_write_rejected(conn)   # 被拒绝是期望路径；能写会抛错并大声失败
@@ -1610,62 +1622,42 @@ def installed_statuses(*, db_path: str | None = None,
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 七、与另两份词表的一致性（**不改那两个文件**；不成立只报一条 warning，不阻断）
+# 七、与另两份词表的一致性（**读叶子词表**；不成立只报一条 warning，不阻断）
 # ══════════════════════════════════════════════════════════════════════════
-_ADAPTER_CACHE: tuple[str, ...] | None = None
-_ADAPTER_ERROR: str | None = None
-
-
-def corpus_adapter_hosts() -> tuple[tuple[str, ...] | None, str | None]:
-    """语料层已登记的宿主 id（延迟 import，缓存一次）。
-
-    为什么延迟：`fish_corpus` 会拖进 zstd/解析链，而 hooks 安装与探测都**不该**依赖它
-    （设计 §2.3 C 档）。这里只在「一致性自查」时读一次它的 `ADAPTERS` 键，读到就缓存。
-    """
-    global _ADAPTER_CACHE, _ADAPTER_ERROR
-    if _ADAPTER_CACHE is not None or _ADAPTER_ERROR is not None:
-        return _ADAPTER_CACHE, _ADAPTER_ERROR
-    try:
-        import fish_corpus  # noqa: PLC0415  延迟 import（见上）
-    except Exception as exc:  # noqa: BLE001  导入失败本身就是一条「判不到」
-        _ADAPTER_ERROR = f"{type(exc).__name__}: {exc}"
-        return None, _ADAPTER_ERROR
-    _ADAPTER_CACHE = tuple(str(key).strip().lower() for key in fish_corpus.ADAPTERS)
-    return _ADAPTER_CACHE, None
-
-
 def consistency() -> dict:
     """三套词表的一致性自查 → `{ok, warnings[], checked{}}`。
 
     两条断言（**只报不拦**）：
-      ① `set(SESSION_HOSTS) ⊆ set(HOSTS ids)`——会话键词表里的每个前缀都要有宿主登记，
+      ① `set(PROTOCOL_VOCABULARY) ⊆ set(HOSTS ids)`——会话键词表里的每个前缀都要有宿主登记，
          否则「库里出现了一个没人认识的宿主」；
-      ② `set(ADAPTERS) ⊆ set(HOSTS ids)`——语料层能采的宿主必须是接入层认识的目标。
+      ② `set(CORPUS_ADAPTER_HOSTS) ⊆ set(HOSTS ids)`——语料层能采的宿主必须是接入层认识的目标。
+
+    **纯函数：不 import 任何鱼模块**（设计 106 §2 / D3）。旧实现为了核对 ② 会延迟
+    `import fish_corpus`，于是「注册表自检」反过来依赖语料层（zstd/解析链）：导入失败时
+    `/api/hosts` 的 `consistency.warnings` 会多一条「判不到」。白名单是**数据**（在叶子里），
+    直接读它；「白名单 vs 实现表」的对拍放在 `fish_corpus` import 期（失配硬失败），
+    那才是它该在的地方——一条真实关系只在一处判。
     """
     warnings: list[str] = []
     ids = [spec.id for spec in HOSTS]
-    session_hosts = set(fish_naming.SESSION_HOSTS)
+    session_hosts = set(fish_hosts_vocab.PROTOCOL_VOCABULARY)
     missing = sorted(session_hosts - set(ids))
     if missing:
         warnings.append(
-            f"fish_naming.SESSION_HOSTS 有 {missing} 未在 fish_hosts.HOSTS 登记"
+            f"fish_hosts_vocab.PROTOCOL_VOCABULARY 有 {missing} 未在 fish_hosts.HOSTS 登记"
             "（会话键会出现「没人认识的宿主」）")
-    adapters, adapter_error = corpus_adapter_hosts()
-    if adapters is None:
-        warnings.append(f"判不到：fish_corpus 导入失败（{adapter_error}），无法核对 ADAPTERS ⊆ HOSTS")
-        gap: list[str] = []
-    else:
-        gap = sorted(set(adapters) - set(ids))
-        if gap:
-            warnings.append(
-                f"fish_corpus.ADAPTERS 有 {gap} 未在 fish_hosts.HOSTS 登记"
-                "（语料层能采、接入层不认识）")
+    adapters = tuple(fish_hosts_vocab.CORPUS_ADAPTER_HOSTS)
+    gap = sorted(set(adapters) - set(ids))
+    if gap:
+        warnings.append(
+            f"fish_hosts_vocab.CORPUS_ADAPTER_HOSTS 有 {gap} 未在 fish_hosts.HOSTS 登记"
+            "（语料层能采、接入层不认识）")
     return {
         "ok": not warnings,
         "warnings": warnings,
         "checked": {
             "sessionHosts": sorted(session_hosts),
-            "adapters": sorted(adapters) if adapters is not None else None,
+            "adapters": sorted(adapters),
             "hosts": ids,
         },
     }
