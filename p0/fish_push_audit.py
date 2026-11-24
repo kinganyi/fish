@@ -228,7 +228,13 @@ def _iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def now_utc() -> datetime:
+def now_utc_dt() -> datetime:
+    """当前 UTC 时刻（**返回 datetime**）。
+
+    改名理由（112 §三 C6）：`fish_common.now_utc` 返的是库里的定长 UTC **字符串**，
+    这里返的是 datetime（要算 `now - timedelta`）。同名不同义会让人以为两者可互换，
+    名字里的 `_dt` 就是那个承诺。
+    """
     return datetime.now(timezone.utc)
 
 
@@ -362,8 +368,12 @@ def check_reaction(reaction) -> str | None:
 _INT_RE = re.compile(r"[+-]?\d+")
 
 
-def _coerce(key: str, value):
-    """按 `CONFIG_DEFAULTS` 的登记类型转换；转不了就 `BadValue`。
+def _coerce_config(key: str, value):
+    """按 `CONFIG_DEFAULTS` 的登记类型转换；转不了就 `BadValue`（**写侧策略**）。
+
+    改名理由（112 §三 C8）：`fish_activity._coerce` 是**读侧**（转不了给默认值，
+    容忍脏配置），这里是**写侧**（转不了必须响亮失败）。两种都是对的，因为它们
+    处在读/写的不同位置——但同名会让人以为可以互换。名字把策略写在脸上。
 
     `bool` 必须先判：Python 里 `True` 是 `int` 的子类，`isinstance(True, int)` 为真，
     不先拦掉就会出现「JSON true 被写成 1」——配置表里留下一个 `1`，读侧 `get_config`
@@ -1007,7 +1017,7 @@ def events(db_path: str, *, limit: int = EVENTS_LIMIT_DEFAULT,
     limit = check_limit(limit)
     channel = check_channel(channel)
     reaction = check_reaction(reaction)
-    now = now_utc()
+    now = now_utc_dt()
     conn = _read_conn(db_path)
     try:
         problem = _guard_tables(conn, ("push_log",))
@@ -1064,7 +1074,7 @@ def _append_audit(db_path: str, entries: list[dict], *, actor: str,
     """追加审计行；**写失败不阻断主写**，但必须出声（`warn_derived`）。"""
     if not entries:
         return None
-    ts = _iso(now_utc())
+    ts = _iso(now_utc_dt())
     path = audit_path(db_path)
     lines = []
     for entry in entries:
@@ -1099,7 +1109,7 @@ def write_config(db_path: str, key, value, *, actor: str = ACTOR_DEFAULT) -> dic
     spec = WRITABLE_BY_KEY.get(key)
     if spec is None:
         raise BadKey(_bad_key_message(key))
-    new = _check_range(key, _coerce(key, value), spec)
+    new = _check_range(key, _coerce_config(key, value), spec)
 
     with _WRITE_LOCK:
         conn = _write_conn(db_path)
@@ -1143,7 +1153,7 @@ def apply_preset(db_path: str, preset, *, actor: str = ACTOR_DEFAULT) -> dict:
     checked: list[tuple[str, object]] = []
     for key, value in plan.items():
         spec = WRITABLE_BY_KEY[key]
-        checked.append((key, _check_range(key, _coerce(key, value), spec)))
+        checked.append((key, _check_range(key, _coerce_config(key, value), spec)))
 
     changes: list[dict] = []
     applied: list[dict] = []

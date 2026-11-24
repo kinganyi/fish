@@ -507,7 +507,7 @@ class WarnPendingTest(AskBase):
 
     # ------------------------------------------------------------ 评审 F9 / F10
     #
-    # F9：`delivered_at` 是"只递一次"的唯一凭据。旧实现把 `_write_state` 的返回值
+    # F9：`delivered_at` 是"只递一次"的唯一凭据。旧实现把 `_write_state_file` 的返回值
     #     丢了 → 盘坏了也照样递 → 下一次 PostToolUse 再递一遍（盘一直坏就一直刷）。
     # F10：同会话并行两次撞车时保留哪一条，此前没写死；现在写死"后到者覆盖，
     #      保留最新一条"，并用 `ts` 挡一层乱序（迟到的旧事件不许盖掉更新的那条）。
@@ -518,7 +518,7 @@ class WarnPendingTest(AskBase):
         self._build_snapshot()
         self._run_main(self._payload())          # 默认 warn → 落 pending
         self.assertEqual(len(self._pending_files()), 1)
-        with mock.patch.object(fish_activity, "_write_state", return_value=False):
+        with mock.patch.object(fish_activity, "_write_state_file", return_value=False):
             first = self._run_posttool(self._posttool_payload())
             second = self._run_posttool(self._posttool_payload())
         self.assertEqual(first, "", "落不了盘就不递（否则同一句会被重复递给模型）")

@@ -53,26 +53,30 @@ def hook_state_path(data_dir, hook: str) -> Path:
     return Path(data_dir) / "_audit" / ("hook-fastpath-%s.json" % safe)
 
 
-def _read_state(path: Path) -> dict:
+def _read_state_file(path: Path) -> dict:
+    """读冷却状态；缺失/坏 JSON → `{}`（并 `warn_ignored`，不静默）。"""
     try:
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8")) or {}
     except (OSError, ValueError) as exc:
-        warn_ignored('hook_fastpath.py _read_state 冷却状态', exc)
+        warn_ignored('hook_fastpath.py _read_state_file 冷却状态', exc)
     return {}
 
 
-def _write_state(path: Path, state: dict) -> None:
+def _write_state_file(path: Path, state: dict) -> None:
     """原子写冷却状态（`fish_atomic`：同目录 tmp + fsync + replace）；失败只告警。
 
     2026-11-24（112 W-A · N-6）：原来是**直接 `write_text`**。对冷却状态来说，
     写到一半被杀会让"连续超时"计数归零 → 静默 fail-open（每轮都重走慢路径）。
     `fish_atomic` 是纯叶子（零 fish import），不违反本模块的性能契约。
+
+    改名（112 W-D · C9）：旧名 `_write_state` 与 `fish_activity` 那份同名，
+    但那份返回 bool、这份只告警——名字必须各自说清策略。
     """
     try:
         fish_atomic.write_text_atomic(path, json.dumps(state, ensure_ascii=False))
     except OSError as exc:
-        warn_ignored('hook_fastpath.py _write_state 冷却状态', exc)
+        warn_ignored('hook_fastpath.py _write_state_file 冷却状态', exc)
 
 
 def enabled(data_dir, key: str, default: bool = True) -> bool:
@@ -95,7 +99,7 @@ def enabled(data_dir, key: str, default: bool = True) -> bool:
 
 def cooldown_remaining(data_dir, hook: str) -> int:
     """还剩多少秒冷却；0 = 不在冷却。"""
-    state = _read_state(hook_state_path(data_dir, hook))
+    state = _read_state_file(hook_state_path(data_dir, hook))
     try:
         until = float(state.get("cooldown_until") or 0)
     except (TypeError, ValueError):
@@ -132,7 +136,7 @@ def note_elapsed(data_dir, hook: str, started_at, *, slow_seconds=SLOW_SECONDS) 
 def record_attempt(data_dir, hook: str, status: str) -> int:
     """记一次尝试；返回**剩余冷却秒数**（>0 = 本次不要再走慢路径）。"""
     path = hook_state_path(data_dir, hook)
-    state = _read_state(path)
+    state = _read_state_file(path)
     now = time.time()
     try:
         until = float(state.get("cooldown_until") or 0)
@@ -149,8 +153,8 @@ def record_attempt(data_dir, hook: str, status: str) -> int:
     elif status == "ok":
         streak = 0
     if streak >= COOLDOWN_AFTER_TIMEOUTS:
-        _write_state(path, {"timeout_streak": 0,
-                            "cooldown_until": now + COOLDOWN_SECONDS})
+        _write_state_file(path, {"timeout_streak": 0,
+                                 "cooldown_until": now + COOLDOWN_SECONDS})
         return COOLDOWN_SECONDS
-    _write_state(path, {"timeout_streak": streak, "cooldown_until": 0})
+    _write_state_file(path, {"timeout_streak": streak, "cooldown_until": 0})
     return 0

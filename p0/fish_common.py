@@ -456,6 +456,61 @@ def local_date() -> str:
     return datetime.datetime.now().strftime("%y%m%d")
 
 
+def _parse_iso_utc(value):
+    """宽松解析：先认 `parse_utc` 的定长形态，再试 `fromisoformat`（naive 当 UTC）。
+
+    为什么需要这一层（112 W-D · C7）：两份旧 `_age_sec` 的解析口径不同——
+    `fish_activity` 那份用 `parse_utc`（只认 `...Z`），`fish_git_hook` 那份用
+    `fromisoformat`（认带偏移的各种 ISO）。下沉原语时取**超集**：
+    生产写入口径全是 `%Y-%m-%dT%H:%M:%SZ`，两者对真实数据结果相同；
+    超集只影响"原本会被判成解析失败"的非常规字符串（更宽容，不改变正常路径）。
+    """
+    if not value:
+        return None
+    try:
+        text = str(value).strip()
+    except Exception:            # noqa: BLE001 —— 连 str() 都失败的值当作解析不了
+        return None
+    if not text:
+        return None
+    parsed = parse_utc(text)
+    if parsed is not None:
+        return parsed
+    try:
+        dt = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
+def age_sec(stamp, now_text=None):
+    """`stamp` 距 `now_text`（缺省=现在）的秒数；解析不了返回 `None`。
+
+    **机制与策略分离**（112 §三 C7）：
+      · 机制（解析 + 相减）只有这一份；
+      · 策略两份且各自命名——`inf` 与 `None` 对调用方的含义完全不同：
+        `fish_activity._age_sec_or_inf`（过期判据：解析不了 = 早已过期 = 无穷大）
+        `fish_git_hook._age_sec_or_none`（节流判据：解析不了 = 未知 = 不猜，照采）。
+
+    为什么下沉到 `fish_common` 而不是继续复制：`fish_activity → fish_git_hook`
+    的导入方向是真的（反向 import 会成环），但 `fish_common` 两边都 import，
+    所以"环"从来不是"必须复制一份"的理由——那只是"没找到正确落点"。
+
+    `now_text` 给了但解析不了时**退回当前时刻**（与旧 `fish_activity` 版一致：
+    它用的是 `parse_utc(now_text) or now`；旧 `fish_git_hook` 版在这种情况下返回
+    None）。生产调用点传的都是库里的定长时间戳，所以这条差异只存在于非常规输入。
+    """
+    start = _parse_iso_utc(stamp)
+    if start is None:
+        return None
+    end = _parse_iso_utc(now_text) if now_text else None
+    if end is None:
+        end = datetime.datetime.now(datetime.timezone.utc)
+    return (end - start).total_seconds()
+
+
 # ---------------------------------------------------------------- 推送词表与采纳率
 #
 # 2026-11-24（112 W-B · A1/N-3）：这两件东西各只留一份实现。

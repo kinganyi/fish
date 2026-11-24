@@ -44,6 +44,7 @@ CLI）与两个 hook（Pre/Post）都调这里——不在任何一处再写第�
 from __future__ import annotations
 from fish_common import now_utc as utc_now, parse_utc, warn_ignored  # 时间原语与报警出口全仓只有一份实现
 from fish_common import _presence_has_session  # 列探测也只有一份（112 W-A · B5：旧"hook 不许 import"理由用错了层级）
+import fish_common  # 时间差原语（112 W-D · C7）：机制一份，策略留在本模块
 
 import datetime
 import hashlib
@@ -128,12 +129,22 @@ def _dt(text=None):
     return parse_utc(text) or datetime.datetime.now(datetime.timezone.utc)
 
 
-def _age_sec(ts, now_text=None) -> float:
-    """`ts` 距 `now_text`（缺省=现在）的秒数；解析不了返回一个很大的数。"""
-    start = parse_utc(ts)
-    if start is None:
-        return float("inf")
-    return ( _dt(now_text) - start).total_seconds()
+def _age_sec_or_inf(ts, now_text=None) -> float:
+    """`ts` 距 `now_text`（缺省=现在）的秒数；**解析不了返回无穷大**。
+
+    这是「过期判据」的策略（112 §三 C7）：算不出来就当作**早已过期**——
+    本模块三处调用（presence 缓存节流、声明面 90 分钟窗、实际面 30 分钟窗）
+    拿到的都是"最保守的过期"。
+
+    机制（解析 + 相减）只有 `fish_common.age_sec` 一份；另一份策略
+    `fish_git_hook._age_sec_or_none` 用的是"未知"（节流判据不许猜）。
+    两份策略各有正当理由，**不许合并成一个**——那会逼出一个二选一的语义。
+
+    改名理由（112 W-D · C7）：旧名 `_age_sec` 与 `fish_git_hook` 那份同名，
+    但一份返 `inf`、一份返 `None`——"同名不同义"比"两个函数"更难查。
+    """
+    age = fish_common.age_sec(ts, now_text)
+    return float("inf") if age is None else age
 
 
 def local_period_key(now_text=None) -> str:
@@ -908,7 +919,7 @@ def refresh_presence_cache(conn, *, citizen_id, project, dirs, seen_at,
     if not row:
         return False
     board_id, auto_seen = row[0], row[1]
-    if auto_seen and min_interval_sec and _age_sec(auto_seen, seen_at) < float(min_interval_sec):
+    if auto_seen and min_interval_sec and _age_sec_or_inf(auto_seen, seen_at) < float(min_interval_sec):
         return False
     surface = ",".join([d for d in (dirs or [])][:3])
     # Wave 3：`session_surface` = **会话累计**（不随时间窗过期），与 `auto_surface`
@@ -935,19 +946,24 @@ def _now_epoch() -> float:
     return datetime.datetime.now(datetime.timezone.utc).timestamp()
 
 
-def _read_state(state_path):
+def _read_state_file(state_path):
+    """读一份小状态文件；读不到/坏 JSON → `{}`（既有契约，调用方按空处理）。"""
     try:
         return json.loads(Path(state_path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
 
-def _write_state(state_path, payload):
+def _write_state_file(state_path, payload):
     """原子写一份小状态文件；失败静默返回 False。
 
     原子性走 `fish_atomic.write_text_atomic`（全仓唯一正解：同目录 tmp + fsync +
     `os.replace`）。2026-11-24（112 W-A · N-6）之前这里是手搓的 tmp+replace——
     少了 fsync，"名字换了、内容没落盘"的零长度文件就有一线机会。
+
+    改名理由（112 W-D · C9）：旧名 `_write_state` 与 `hook_fastpath` 那份同名，
+    但那份直接裸写、失败策略也不同——改名让"这份是原子的、返回 bool"写在名字与
+    文档里，而不是靠读者去比对实现。
     """
     path = Path(state_path)
     try:
@@ -1334,7 +1350,7 @@ def find_collisions(snapshot, *, target_abs, own_session_key, min_segments: int 
         unlabeled = not entry_session
         best = None
         declared_at = entry.get("declared_at") or entry.get("last_seen")
-        if _age_sec(declared_at, now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")) <= declared_window_min * 60:
+        if _age_sec_or_inf(declared_at, now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")) <= declared_window_min * 60:
             for surface in entry.get("declared_abs") or ():
                 hit = fish_surface.path_hit(surface, target_abs, min_segments=min_segments)
                 if hit and (best is None or len(hit) > len(best["surface"])):
@@ -1350,7 +1366,7 @@ def find_collisions(snapshot, *, target_abs, own_session_key, min_segments: int 
         for item in entry.get("auto") or ():
             if not isinstance(item, dict):
                 continue
-            if _age_sec(item.get("last"), now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")) > auto_window_min * 60:
+            if _age_sec_or_inf(item.get("last"), now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")) > auto_window_min * 60:
                 continue
             hit = fish_surface.path_hit(item.get("dir_abs") or "", target_abs,
                                         min_segments=min_segments)
@@ -1480,13 +1496,13 @@ def set_warn_pending(data_dir, *, session_key, reason, target_abs="", hits=None,
                   "kind": h.get("kind")} for h in (hits or [])][:5],
         "delivered_at": None,
     }
-    existing = _read_state(path)
+    existing = _read_state_file(path)
     if isinstance(existing, dict) and not existing.get("delivered_at"):
         old_ts = parse_utc(existing.get("ts"))
         new_ts = parse_utc(row["ts"])
         if old_ts is not None and new_ts is not None and old_ts > new_ts:
             return False        # 迟到的旧事件不许盖掉更新的那条（乱序保护）
-    return _write_state(path, row)
+    return _write_state_file(path, row)
 
 
 def take_warn_pending(data_dir, session_key, *, now=None):
@@ -1497,7 +1513,7 @@ def take_warn_pending(data_dir, session_key, *, now=None):
 
     ## 写盘失败时**不递**（评审 F9）
 
-    `delivered_at` 是"只递一次"的唯一凭据。旧实现把 `_write_state` 的返回值丢了：
+    `delivered_at` 是"只递一次"的唯一凭据。旧实现把 `_write_state_file` 的返回值丢了：
     标记里写不进 `delivered_at`，可这句话照样被递出去 → **下一次 PostToolUse 再递一遍**，
     盘一直坏就一直重复。现在的取舍是：**宁可这次不提醒，也不让同一句反复刷屏**——
     标记文件还在、`delivered_at` 仍为空，下一次 PostToolUse 会再试，盘恢复即恰好递一次
@@ -1506,7 +1522,7 @@ def take_warn_pending(data_dir, session_key, *, now=None):
     path = warn_pending_path(data_dir, session_key)
     if path is None:
         return None
-    payload = _read_state(path)
+    payload = _read_state_file(path)
     if not isinstance(payload, dict) or not str(payload.get("reason") or "").strip():
         return None
     if payload.get("delivered_at"):
@@ -1515,7 +1531,7 @@ def take_warn_pending(data_dir, session_key, *, now=None):
     if ts is not None and (_dt(now) - ts).total_seconds() > WARN_PENDING_MAX_AGE_SEC:
         return None
     payload["delivered_at"] = now or utc_now()
-    if not _write_state(path, payload):
+    if not _write_state_file(path, payload):
         payload["delivered_at"] = None      # 没落盘就不算已递（标记保持原样，下次再试）
         return None
     return payload
@@ -1631,7 +1647,7 @@ def heartbeat(data_dir, *, event, host, **facts) -> bool:
             else:
                 payload[str(key)] = _safe_fact(value)
         name = f"heartbeat-{str(host)}-{str(event)}.json"
-        return _write_state(folder / name, payload)
+        return _write_state_file(folder / name, payload)
     except OSError:
         return False
 
@@ -1831,7 +1847,7 @@ def handle_post_tool_use(conn, *, host, payload, now=None, data_dir=None,
 
     folder = Path(data_dir)
     state_path = folder / HEARTBEAT_RELDIR / "state.json"
-    state = _read_state(state_path)
+    state = _read_state_file(state_path)
     epoch = _now_epoch()
 
     min_presence = float(get_cfg(conn, "activity.presence_cache_min_interval_sec"))
@@ -1864,7 +1880,7 @@ def handle_post_tool_use(conn, *, host, payload, now=None, data_dir=None,
                            now=seen_at)
             result["snapshot"] = True
             state["last_snapshot_epoch"] = epoch
-            _write_state(state_path, state)
+            _write_state_file(state_path, state)
         except (sqlite3.Error, ValueError) as exc:
             result["snapshot"] = False
             result["snapshot_error"] = type(exc).__name__

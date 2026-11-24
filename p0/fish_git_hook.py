@@ -31,11 +31,12 @@
 """
 import sqlite3
 
+import fish_common
 import fish_git
 import fish_git_link
 import fish_git_store
 import fish_surface
-from fish_common import now_utc, warn_ignored
+from fish_common import warn_ignored
 
 #: 同一个 checkout 两次 L1 采样之间的最小间隔（秒）。
 #: 方案 §5.3 的节流要求：`status` 实测 P50 253ms / max 684ms，而 PostToolUse 是
@@ -44,27 +45,16 @@ from fish_common import now_utc, warn_ignored
 OBS_THROTTLE_SEC = 60
 
 
-def _age_sec(stamp, now_text=None):
+def _age_sec_or_none(stamp, now_text=None):
     """`stamp` 距 `now_text` 的秒数；解析不了返回 None（**不猜**）。
 
-    为什么不复用 `fish_activity._age_sec`：那会形成循环依赖（见模块 docstring）。
-    这里是十几行的时间差，复制一份比制造一个环形依赖划算得多。
+    112 §三 C7：旧注释说"复用 `fish_activity._age_sec` 会形成循环依赖"——
+    **理由成立**（`fish_activity → fish_git_hook` 确实存在，反向 import 会成环），
+    但结论不是"复制一份"，而是把机制下沉到 `fish_common`（两边都 import 它，无环）。
+    机制一份、策略两份：本函数用 `None`（"未知"——不知道多久以前，就不能当成
+    "刚采过"来跳过采集），`fish_activity._age_sec_or_inf` 用无穷大（过期判据）。
     """
-    from datetime import datetime, timezone
-    if not stamp:
-        return None
-    try:
-        a = stamp.replace("Z", "+00:00")
-        b = (now_text or now_utc()).replace("Z", "+00:00")
-        ta = datetime.fromisoformat(a)
-        tb = datetime.fromisoformat(b)
-        if ta.tzinfo is None:
-            ta = ta.replace(tzinfo=timezone.utc)
-        if tb.tzinfo is None:
-            tb = tb.replace(tzinfo=timezone.utc)
-        return (tb - ta).total_seconds()
-    except (ValueError, TypeError):
-        return None
+    return fish_common.age_sec(stamp, now_text)
 
 
 def obs_throttled(conn, root, *, window_sec=OBS_THROTTLE_SEC, now=None):
@@ -86,7 +76,7 @@ def obs_throttled(conn, root, *, window_sec=OBS_THROTTLE_SEC, now=None):
         return False
     if not row or not row[0]:
         return False
-    age = _age_sec(row[0], now)
+    age = _age_sec_or_none(row[0], now)
     if age is None:
         return False
     return 0 <= age < window_sec

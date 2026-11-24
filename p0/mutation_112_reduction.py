@@ -43,6 +43,7 @@ NEW_FILES = {
     "wa": "test_reduction_wa",
     "wb": "test_reduction_wb",
     "wc": "test_reduction_wc",
+    "wd": "test_reduction_wd",
 }
 
 MUTANTS = [
@@ -181,6 +182,41 @@ MUTANTS = [
             "test_reduction_wc.JunctionParityTest.test_mapping_link_query_real",
             "test_reduction_wc.JunctionParityTest"
             ".test_longest_prefix_and_component_boundary_survive_realpath",
+        ],
+        "others": [],
+    },
+    # ── W-D ──────────────────────────────────────────────────────────────
+    {
+        "id": "WD-M1",
+        "file": "fish_push_audit.py",
+        "desc": "把审计的时间原语改回 `now_utc`（同名不同义复发）",
+        "old": "def now_utc_dt() -> datetime:",
+        "new": "def now_utc() -> datetime:",
+        "must_fail": [
+            "test_reduction_wd.SameNameDifferentMeaningTest.test_now_utc_is_str_only",
+        ],
+        "others": [],
+    },
+    {
+        "id": "WD-M2",
+        "file": "fish_activity.py",
+        "desc": "把 `inf` 策略并成 `None`（两份策略被合成一种）",
+        "old": '    return float("inf") if age is None else age',
+        "new": "    return age  # 变异：策略被合并（与 git 侧同一种）",
+        "must_fail": [
+            "test_reduction_wd.AgePrimitiveStrategyTest.test_policies_stay_at_call_sites",
+        ],
+        "others": [],
+    },
+    {
+        "id": "WD-M3",
+        "file": "fish_activity.py",
+        "desc": "状态文件函数改回 `_write_state`（与 fastpath 同名不同策略）",
+        "old": "def _write_state_file(state_path, payload):",
+        "new": "def _write_state(state_path, payload):",
+        "must_fail": [
+            "test_reduction_wd.SameNameDifferentMeaningTest"
+            ".test_state_file_accessors_are_renamed",
         ],
         "others": [],
     },
