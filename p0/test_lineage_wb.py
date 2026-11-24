@@ -9,6 +9,9 @@ W3 的承诺是"把 WB 的 transcript 投影成节点，**父从哪来必须说�
 
   **A 层（可复现：临时树）** —— 四条来源优先级、冲突、孤儿、兄弟、无 transcript 成员、
       `session_id` 只取文件名。每条都配了能在源码上打靶的变异（`mutation_lineage_wb.py`）。
+  **A 层 · W3a** —— 语料侧四列（`origin`/`parent_session`/`delegation_depth`/`role`）
+      复用同一份判定：三态分明（子代理 / 顶层 main / 判不到不主张）、真 `ingest_file`
+      落库读数、以及"只带 cwd 的补标不许冲掉来源"。
   **B 层（实况：真宿主只读）** —— 2,099 份 transcript 全量投影后，逐条锚"例外为 0"：
       父 id 全落在父目录内、31/31 在 `sessions` 表、`basis='default'`=0、
       `origin='main' AND agent_id LIKE 'agent-%'`=0、成员父=lead 且成员之间不互为父。
@@ -43,6 +46,9 @@ sys.path.insert(0, str(HERE))
 
 import fish_lineage          # noqa: E402
 import fish_lineage_wb as wb  # noqa: E402
+import fish_corpus_store as store          # noqa: E402,W3a：语料侧四列的判据要真库
+import fish_corpus_tag as tag_mod          # noqa: E402
+import fish_corpus_wb as corpus_wb         # noqa: E402
 
 #: 真宿主（只读）：B 层判据的对象。换机器/无 WB 时 B 层整类 SKIP，不是"通过"
 REAL_ROOT = wb.default_root()
@@ -522,6 +528,138 @@ class WbScanOptionsTest(_WbTree):
         self.assertEqual(adapter.resolve(late)["origin"], "main")
 
 
+class WbCorpusColumnsTest(_WbTree):
+    """W3a · 113 §4.1：语料的血缘四列复用 WB 判定（W3 的边界，这一波补齐）。
+
+    W3 的承诺是"只投影、不写语料"；W3a 把**同一份**判定接到 `fish_corpus_wb` 的会话头上。
+    四条判据各打一件事：
+
+      · 三态分明：子代理 → `subagent`；顶层会话文件 → 显式 `main`；判不到 → **不主张**。
+        三者不许混成"`origin='main'` + `origin_basis='default'`"那一种（§4.2 ③ 的兜底）。
+      · 真 `ingest_file` 落库：新行 `origin_basis != 'default'`、主键仍是文件名。
+      · 补 cwd 的裸头不许把来源冲掉（实测真树 742 行就是这么丢的父/来源）。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.corpus = store.open_db(Path(self._tmp) / "corpus")
+
+    def tearDown(self):
+        try:
+            self.corpus.close()
+        finally:
+            super().tearDown()
+
+    # ------------------------------------------------------------ 造树 / 读库
+    def top_level(self, ws="ws-a", stem="aa11bb22-cc33-4dd4-8ee5-ff66aa77bb88", row=None):
+        """WB 顶层会话文件：`projects/<ws>/<sid>.jsonl`（**两层**，不在 `subagents/` 下）。"""
+        folder = self.root / "projects" / ws
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{stem}.jsonl"
+        payload = row or {"type": "session-meta", "sessionId": stem, "cwd": "/work/wb"}
+        path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+        return path
+
+    def row_of(self, session_id):
+        return self.corpus.execute(
+            "SELECT * FROM corpus_session WHERE host='workbuddy' AND session_id=?",
+            (session_id,)).fetchone()
+
+    def write_rows(self, path: Path, rows) -> Path:
+        path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+                        encoding="utf-8")
+        return path
+
+    # ------------------------------------------------------------ 判据
+    def test_w3a_header_three_shapes_are_distinct(self):
+        """子代理 / 顶层 / 挪出去：三态分明，**没有一态是 default 兜出来的 main**。"""
+        lead = "ab12ab12-ab12-4ab1-8ab1-ab12ab12ab12"
+        runtime = wb.load_runtime(self.root)
+        tagger = tag_mod.Tagger(project_of=None)
+
+        # ① 子代理路径（首行是 message，角色在 `providerData.agent` 上）
+        sub = self.transcript("ws-a", lead, "agent-aaaa", role="software-engineer")
+        header = corpus_wb._header_of(wb.read_header(sub), sub.stem, path=sub,
+                                      runtime=runtime)
+        self.assertEqual((header["origin"], header["parent_session"],
+                          header["delegation_depth"], header["role"]),
+                         ("subagent", lead, 1, "software-engineer"))
+        self.assertEqual(header["session_id"], HEADER_SESSION_ID,
+                         "头部 sessionId 优先这条来源没动（调用方才按文件名覆盖）")
+        self.assertEqual(header["extra"]["lineage_basis"], "path")
+        # 落库口径：subagent → basis 是 header（**不是** tagger 的 default 兜底）
+        self.assertEqual(tagger.tag_session(header, "workbuddy")["origin_basis"], "header")
+
+        # ② 顶层会话文件 → 显式 main（形态证据，basis 落 header）
+        top = self.top_level()
+        root_header = corpus_wb._header_of(wb.read_header(top), top.stem, path=top,
+                                           runtime=runtime)
+        self.assertEqual((root_header["origin"], root_header["parent_session"],
+                          root_header["delegation_depth"]), ("main", None, 0))
+        self.assertEqual(root_header["extra"]["lineage_basis"], corpus_wb.BASIS_ROOT_PATH)
+        self.assertEqual(tagger.tag_session(root_header, "workbuddy")["origin_basis"], "header")
+
+        # ③ 挪出 `subagents/` 的 agent-*：判不到 → **不主张**（origin=None），证据进 extra
+        stray = self.transcript("ws-a", lead, "agent-ssss", in_subagents=False)
+        stray_header = corpus_wb._header_of(wb.read_header(stray), stray.stem, path=stray,
+                                            runtime=runtime)
+        self.assertIsNone(stray_header["origin"], "判不到就不许自己填一个 main")
+        self.assertIsNone(stray_header["parent_session"])
+        self.assertEqual(stray_header["extra"]["lineage_origin"], "unknown")
+        self.assertEqual(stray_header["extra"]["lineage_basis"], "missing")
+
+    def test_w3a_ingest_fills_four_columns(self):
+        """真跑一次 `ingest_file`：四列落库、`origin_basis != 'default'`、主键仍是文件名。"""
+        lead = "cd34cd34-cd34-4cd3-8cd3-cd34cd34cd34"
+        path = self.transcript("ws-b", lead, "agent-bbbb", role="software-engineer")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"type": "message", "role": "assistant",
+                                 "content": [{"type": "output_text", "text": "答"}],
+                                 "timestamp": 1795000000000,
+                                 "sessionId": HEADER_SESSION_ID}) + "\n")
+        counters = corpus_wb.ingest_file(self.corpus, path)
+        self.assertEqual(counters["status"], "ok")
+        row = self.row_of(path.stem)
+        self.assertIsNotNone(row, "ingest 没建会话行")
+        self.assertEqual(row["session_id"], path.stem, "主键仍是文件名（§1-7）")
+        self.assertNotEqual(row["session_id"], HEADER_SESSION_ID)
+        self.assertEqual((row["origin"], row["origin_basis"]), ("subagent", "header"))
+        self.assertEqual(row["parent_session"], lead)
+        self.assertEqual(row["delegation_depth"], 1)
+        self.assertEqual(row["role"], "software-engineer")
+        extra = json.loads(row["extra"])
+        self.assertEqual(extra["lineage_basis"], "path")
+        self.assertEqual(extra["role_from"], "header")
+        # 对照组：内容也真采到了（不是"行对了、里子空"）
+        self.assertGreaterEqual(counters["segments_new"], 1)
+
+    def test_w3a_cwd_backfill_does_not_reset_origin(self):
+        """`session-meta` 无 cwd 时，补标只补 cwd：来源四列不许被冲回 `main/default`。
+
+        实测真树就是这个形状（meta 行扫掉 cwd → 后续 message 行补 cwd → 裸头在
+        `_origin_of` 里落到 `main/default`），父与深度靠 upsert 的 COALESCE/MAX 侥幸留住，
+        只有 `origin`/`origin_basis` 被冲干净——所以这条判据盯的正是那两列。
+        """
+        lead = "ef56ef56-ef56-4ef5-8ef5-ef56ef56ef56"
+        folder = self.root / "projects" / "ws-c" / lead / wb.SUBAGENTS_DIR
+        folder.mkdir(parents=True)
+        path = self.write_rows(folder / "agent-cccc.jsonl", [
+            {"type": "message", "role": "user", "providerData": {"agent": "qa"},
+             "content": [{"type": "input_text", "text": "先说一句"}]},
+            {"type": "message", "role": "assistant", "cwd": "/work/wb",
+             "content": [{"type": "output_text", "text": "带 cwd 的回答"}]},
+            {"type": "session-meta", "sessionId": HEADER_SESSION_ID,
+             "timestamp": 1795000000000},
+        ])
+        corpus_wb.ingest_file(self.corpus, path)
+        row = self.row_of("agent-cccc")
+        self.assertIsNotNone(row)
+        self.assertEqual((row["origin"], row["origin_basis"]), ("subagent", "header"))
+        self.assertEqual(row["parent_session"], lead)
+        self.assertEqual(row["role"], "qa")
+        self.assertEqual(row["cwd"], "/work/wb", "对照组：补 cwd 这条功能本身还活着")
+
+
 class WbLayeringTest(unittest.TestCase):
     """分层护栏：适配器顶层**不许** import fish 任何东西（113 §2.5 的叶子方向）。"""
 
@@ -647,6 +785,28 @@ class WbLiveTreeTest(unittest.TestCase):
         leaked = sorted(sid for sid, node in self.by_id.items()
                         if sid in declared and node["basis"] == "path")
         self.assertEqual(leaked, [], "runtime 声明过的 transcript 被判成 path")
+
+    def test_w3a_live_corpus_header_sees_real_subagents(self):
+        """实况抽样：真 transcript 的语料会话头必须是 `subagent` + 父=目录名 + 深度 1。
+
+        抽 12 份（绝对数不锚：活宿主每跑一个子代理就 +1）。**全量四列对账是 W6 的事**
+        （那一波要回填历史行）；本波只保证"新 ingest 写得对"，所以判据打在会话头这一层。
+        """
+        sample = sorted(self.files.values())[:12]
+        headers = [corpus_wb._header_of(wb.read_header(p), p.stem, path=p,
+                                        runtime=self.runtime) for p in sample]
+        parents_ok = sum(1 for header, path in zip(headers, sample)
+                         if header["parent_session"] == path.parent.parent.name)
+        with_role = sum(1 for header in headers if header["role"])
+        print(f"\n[W3a 实况] 抽样 {len(sample)} 份 transcript：origin="
+              f"{sorted({h['origin'] for h in headers})}，父=目录 {parents_ok}/{len(sample)}，"
+              f"role 有值 {with_role}/{len(sample)}")
+        self.assertTrue(sample, "对照组：采样为空时这条判据没有意义")
+        self.assertEqual({header["origin"] for header in headers}, {"subagent"})
+        self.assertEqual([header["parent_session"] for header in headers],
+                         [path.parent.parent.name for path in sample])
+        self.assertEqual({header["delegation_depth"] for header in headers}, {1})
+        self.assertGreater(with_role, 0, "首行 providerData.agent 一条都没读到：角色证据的路断了")
 
     def test_j3_live_j3_1_literal_form_is_documented(self):
         """J3① 的**字面** SQL 在实况上不成立——把读数钉下来，免得下一个人当它绿。

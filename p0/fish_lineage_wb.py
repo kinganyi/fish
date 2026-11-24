@@ -61,6 +61,19 @@ transcript 的文件名（`fish_lineage_schema._SESSION_LINEAGE_DDL` 第 47 行�
 规则从这里落地）；② `resolve()` 把 lead/顶层会话解析成 `origin='main'` 的根节点
 （`basis='db'`）。没有 DB 时这两件事都退化成"判不到"，**不假装**（见 `WbSessions.available`）。
 
+## 语料侧复用（W3a · 113 §4.1 · 2026-11-25）
+
+语料适配器 `fish_corpus_wb` 与树投影**必须用同一份判定**，否则同一条 transcript 会在
+`corpus_session` 与 `session_lineage` 里落两个来源。所以分类被劈成两层：
+
+  · `_classify_source(path, …)`：四条来源优先级的实现（只有一份）；
+  · `classify_transcript(path, first_row, …)`：上面那层 + **首行证据**，多算
+    `role`/`role_from`（`role_evidence`：runtime 的 `agentId` 前缀 > 首行 `providerData.agent`）；
+  · `classify(path, …)`：`classify_transcript(path, None, …)` 的薄封装（兼容既有调用）。
+
+`root_of_path()` 是给语料侧用的：它只拿到文件路径，而 runtime 在 `<root>/teams/` 下，
+所以按路径里最后一级 `projects` 反推根；**推不出来就 `None`**（绝不回落到 `~/.workbuddy`）。
+
 ## 边界（113 §4.5，如实写进交付）
 
 本波只做**离线投影**：hook 侧看不见成员级动作，撞车视图仍是"树上有行、实时看不到"。
@@ -86,6 +99,13 @@ ENV_WB_HOME = "FISH_WB_HOME"
 SUBAGENTS_DIR = "subagents"
 TRANSCRIPT_PREFIX = "agent-"
 TRANSCRIPT_SUFFIX = ".jsonl"
+
+#: WB 的 `projects` 这一级：语料侧只能靠它从路径反推根（`root_of_path`）
+PROJECTS_DIR_NAME = "projects"
+
+#: `role_from`（角色证据来自哪）：取值与 `extra.role_from` 既有口径逐字一致
+ROLE_FROM_RUNTIME = "runtime"
+ROLE_FROM_HEADER = "header"
 
 #: `source` 串（`session_lineage.source` 是 TEXT，约定 `<host>:<来源>`）
 SOURCE_RUNTIME = "wb:runtime"
@@ -123,7 +143,7 @@ def default_root(root: str | os.PathLike | None = None) -> Path:
 
 
 def projects_dir(root: str | os.PathLike | None = None) -> Path:
-    return default_root(root) / "projects"
+    return default_root(root) / PROJECTS_DIR_NAME
 
 
 def teams_dir(root: str | os.PathLike | None = None) -> Path:
@@ -199,6 +219,24 @@ def path_parent(path: str | os.PathLike) -> str | None:
     parts = Path(path).parts
     if len(parts) >= 3 and parts[-2].lower() == SUBAGENTS_DIR:
         return parts[-3]
+    return None
+
+
+def root_of_path(path: str | os.PathLike) -> Path | None:
+    """从 transcript 路径反推 WB 根：`<root>/projects/<ws>/…` → `<root>`。
+
+    为什么需要它：`fish_corpus_wb.ingest_file` 只拿到**一个文件路径**，没有 `root`
+    参数，而 runtime 与 `workbuddy.db` 都在根下。这里按路径里最后出现的 `projects`
+    一级反推（WB 的树结构就是 `projects/<ws>/…`）。
+
+    **推不出来就返回 `None`**，绝不回落到 `default_root()`（= `~/.workbuddy`）：
+    临时树/测试树一旦踩空，读到的会是**生产 runtime** 并给出一个与本文件无关的父
+    ——那比"只有路径证据"糟得多。
+    """
+    parts = Path(path).parts
+    for index in range(len(parts) - 1, 0, -1):
+        if parts[index].lower() == PROJECTS_DIR_NAME:
+            return Path(*parts[:index])
     return None
 
 
@@ -404,6 +442,42 @@ def read_header(path: str | os.PathLike,
 # ============================================================ 判来源（唯一一处）
 
 
+def role_evidence(member: dict | None, first_row: dict | None) -> tuple[str | None, str | None]:
+    """`(role, role_from)`：runtime 的 `agentId` 前缀 > 首行 `providerData.agent`。
+
+    **唯一一处**判角色：树节点的 `agent_role` 与语料 `corpus_session.role`
+    （113 §4.1 的四列之一）都从这里取。两处各写一份必然漂开——一处把 runtime 当权威、
+    另一处当噪声，同一条 transcript 在两个投影里会有两个角色。
+
+    `member=None` 且首行没有 `providerData.agent` → `(None, None)`，**不猜**。
+    """
+    if member is not None and member["agent_role"]:
+        return member["agent_role"], ROLE_FROM_RUNTIME
+    role = _text(_inner(first_row, "providerData", "agent"))
+    if role:
+        return role, ROLE_FROM_HEADER
+    return None, None
+
+
+def classify_transcript(path: str | os.PathLike | None, first_row: dict | None = None, *,
+                        runtime: WbRuntime | None = None,
+                        sessions: WbSessions | None = None) -> dict:
+    """按「transcript 路径 + 首行 row」判来源（`classify` 的超集，树与语料共用）。
+
+    与 `classify()` 的差别只有一个：多看一眼**首行**，把 `role`/`role_from` 一起算出来
+    （语料的第四列就是 `role = providerData.agent`，113 §4.1）。判定本身仍走
+    `_classify_source`（runtime → path → missing 的顺序一个字没改）。
+
+    `path=None` = 只有首行、没有路径（判不到父，`reason='no_path'`）；`first_row=None`
+    = 只有路径（`role` 为 `None`）——**两种"缺一半证据"都不许拿 main 冒充**。
+    """
+    decision = _classify_source(path, runtime=runtime, sessions=sessions)
+    role, role_from = role_evidence(decision.get("member"), first_row)
+    decision["role"] = role
+    decision["role_from"] = role_from
+    return decision
+
+
 def classify(path: str | os.PathLike, *, runtime: WbRuntime | None = None,
              sessions: WbSessions | None = None) -> dict:
     """**唯一一处**判 `origin`/`relation`/`basis`/`parent_session`/`source`（113 §4.2）。
@@ -413,15 +487,33 @@ def classify(path: str | os.PathLike, *, runtime: WbRuntime | None = None,
     不必先去造一整个文件树。
 
     返回的键：`parent_session` / `origin` / `relation` / `basis` / `source` / `member` /
-    `path_parent`（仅在冲突或路径线索时）/ `reason` 与 `unverified_parent`（仅在判不到时）。
+    `path_parent`（仅在冲突或路径线索时）/ `reason` 与 `unverified_parent`（仅在判不到时）/
+    `role` 与 `role_from`（角色证据；本入口没有首行，所以只可能来自 runtime）。
+
+    本函数只是 `classify_transcript(path, None, …)` 的薄封装：**判定只有一份实现**。
     """
+    return classify_transcript(path, None, runtime=runtime, sessions=sessions)
+
+
+def _classify_source(path: str | os.PathLike | None, *, runtime: WbRuntime | None = None,
+                     sessions: WbSessions | None = None) -> dict:
+    """四条来源优先级的**实现**（`classify` / `classify_transcript` 共用，不经外）。
+
+    单独抽出来是为了让 `role` 那层证据（需要首行）能叠在判定之上，而不必把判定
+    写成两个版本。
+    """
+    decision: dict[str, Any] = {
+        "parent_session": None, "origin": "unknown", "relation": None,
+        "basis": BASIS_MISSING, "source": SOURCE_MISSING, "member": None,
+    }
+    if path is None:
+        # 没有路径 = 只有首行证据：连"在不在 subagents/ 下"都判不了 → 判不到
+        decision["reason"] = "no_path"
+        return decision
     path = Path(path)
     parent = path_parent(path)
     member = runtime.member_of_path(path) if runtime is not None else None
-    decision: dict[str, Any] = {
-        "parent_session": None, "origin": "unknown", "relation": None,
-        "basis": BASIS_MISSING, "source": SOURCE_MISSING, "member": member,
-    }
+    decision["member"] = member
     if parent is not None:
         decision["path_parent"] = parent
 
@@ -502,7 +594,7 @@ def transcript_node(path: str | os.PathLike, *, runtime: WbRuntime | None = None
     stem = path.stem
     if header is None:
         header = read_header(path)
-    decision = classify(path, runtime=runtime, sessions=sessions)
+    decision = classify_transcript(path, header, runtime=runtime, sessions=sessions)
     node = _base_fields(path, stem, mtime)
     parent = decision["parent_session"]
     node.update(parent_session=parent, origin=decision["origin"],
@@ -516,10 +608,11 @@ def transcript_node(path: str | os.PathLike, *, runtime: WbRuntime | None = None
         extra["transcript_session_id"] = _text(header.get("sessionId"))
         if header.get("cwd"):
             node["cwd"] = _text(header.get("cwd"))
-        role = _text(_inner(header, "providerData", "agent"))
-        if role:
-            extra["role_from"] = "header"
-            node["agent_role"] = role
+    # 角色只从 `role_evidence` 取（runtime 前缀 > 首行 providerData.agent），
+    # 与语料侧 `role` 列同一份实现——两处各写一份必然漂开（见 `role_evidence`）。
+    if decision["role"]:
+        extra["role_from"] = decision["role_from"]
+        node["agent_role"] = decision["role"]
     member = decision["member"]
     if member is not None:
         extra["team"] = member["team"]
@@ -528,9 +621,6 @@ def transcript_node(path: str | os.PathLike, *, runtime: WbRuntime | None = None
         if member["agent_key"]:
             # runtime 的 `agentId`（`role@team`）是**标签**不是会话 id：放证据，不占 agent_id
             extra["agent_key"] = member["agent_key"]
-        if member["agent_role"]:
-            extra["role_from"] = "runtime"
-            node["agent_role"] = member["agent_role"]
         if member["agent_label"]:
             node["agent_label"] = member["agent_label"]
         if decision.get("path_parent") and decision["path_parent"] != parent:

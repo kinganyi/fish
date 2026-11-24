@@ -86,7 +86,14 @@ ALLOWED_INTERNAL = {
     "fish_corpus_tag.py": {"fish_corpus_store", "fish_corpus_redact", "fish_surface",
                            "fish_activity", "fish_hosts_vocab"},
     "fish_corpus_dsh.py": {"fish_corpus_store", "fish_corpus_redact", "fish_corpus_tag"},
-    "fish_corpus_wb.py": {"fish_corpus_store", "fish_corpus_redact", "fish_corpus_tag"},
+    # 2026-11-25（docs/113 §4.1 · W3a）：`fish_lineage_wb` 进白名单。
+    # 方向是 `fish_corpus_wb → fish_lineage_wb → fish_lineage`，**不反向**：leaf 侧顶层
+    # 只 import stdlib（`fish_lineage` 藏在 TYPE_CHECKING、`SessionNode` 用函数内 import），
+    # 所以既不成环、也不会把 `fish` 带进 `import fish_corpus`（test_04 的子进程判据仍绿）。
+    # 加它的理由：语料四列（origin/parent/depth/role）必须与树投影用**同一份**判定，
+    # 在适配器里另写一份就是第二份真相。
+    "fish_corpus_wb.py": {"fish_corpus_store", "fish_corpus_redact", "fish_corpus_tag",
+                          "fish_lineage_wb"},
     # 排序只依赖"切词单源"（D08/D09），不认识库结构（设计 §2：rank → store/common，
     # 实测只需 common：候选已是过滤好的行，排序不该再摸库）。
     "fish_corpus_rank.py": {"fish_common"},

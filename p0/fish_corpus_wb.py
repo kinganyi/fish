@@ -25,6 +25,29 @@
 `for line in fh` 会整行读进内存——674 MB 的单行会直接把内存打爆。所以这里用
 **有上限的行读取器**：读满 `max_line_bytes` 还没见到换行，就把这一行**丢掉**并
 继续读到行尾（`oversize_line`），内存峰值只跟上限有关，不跟文件大小有关。
+
+W3a（113 §4.1 · 2026-11-25）：血缘四列不再硬编码
+----------------------------------------------
+语料的 `origin` / `parent_session` / `delegation_depth` / `role` 四列以前是**写死**的
+（`None/None/0/None`），于是 742 个 `agent-*` transcript 在库里全是
+`origin=main / basis=default / parent=NULL`——WB 把父写在**路径**里、把角色写在**首行**
+`providerData.agent` 里，这两处证据以前一条都没被用上（110 §2.3）。
+
+现在四列一律取自 `fish_lineage_wb`（树投影用的**同一份**判定，见 `_lineage_columns`）：
+`_header_of` 只是把判定结果贴到会话头，`origin_basis` 因此从 `default` 变成 `header`。
+`session_id` 的来源**一个字节没动**（仍是 `path.stem`，§1-7 的 742 行主键不许漂）。
+
+三条边界（都是实测，不是假想）：
+1. **多数 transcript 没有 `session-meta` 首行**：实测 2,099 份里 **2,099 份**首行都是
+   `message`，所以只改 `_header_of` 是徒劳的——"会话不存在"那条分支（`ingest_file`
+   建行）也必须走同一个 `_header_of`，否则四列永远是默认值（库里 341 行
+   `{"header_missing": 1}` 就是这条路的指纹）。
+2. **首行要单独读一次**（`read_header`，≤1 MiB 只读一行）：建行时还没进行循环，
+   拿不到流里的 first row；而角色证据就在它身上。
+3. **语料 `origin` 的值域只有 `main|subagent`**（DDL 与 `fish_corpus_tag` 的常量），
+   `unknown` 无处安放：判不到父的 `agent-*`（挪出 `subagents/`）**不主张**来源、
+   只把 `unknown/missing` 的判定写进 `extra`——写 `main` 是 113 §4.2 ③ 明令禁止的兜底。
+   实测这种行 = **0**（2,099/2,099 都有父）。
 """
 from __future__ import annotations
 
@@ -36,6 +59,7 @@ from pathlib import Path
 
 import fish_corpus_redact as redact_mod
 import fish_corpus_store as store
+import fish_lineage_wb as lineage_wb
 from fish_corpus_tag import TagError, Tagger
 
 HOST = "workbuddy"
@@ -265,19 +289,158 @@ def map_row(row: dict):
     return "unknown", rtype
 
 
-def _header_of(row: dict, path_session_id, fallback_cwd=None) -> dict:
-    sid = row.get("sessionId") or path_session_id
+#: 顶层会话文件的证据口径（`origin_basis` 只有 header|default，这是 header 的具体来源）
+BASIS_ROOT_PATH = "root-path"
+SOURCE_ROOT = "wb:root-path"
+
+#: 只带 cwd/title 的补标不许碰的列：血缘四列 + `origin_basis` + `extra`（证据）。
+#: 详见 `ingest_file.backfill_cwd` 的 docstring（实测这条冲掉了 742 行的 origin）。
+LINEAGE_CARRY_FIELDS = ("origin", "origin_basis", "parent_session", "delegation_depth",
+                        "role", "extra")
+
+
+def _is_root_file(path: Path) -> bool:
+    """WB **顶层会话文件**：`<…>/projects/<ws>/<非 agent-*.jsonl>`。
+
+    为什么这条判据成立：WB 把主会话写在 `projects/<ws>/<sid>.jsonl`（**两层**），把子代理
+    写在 `projects/<ws>/<父 sid>/subagents/agent-*.jsonl`（四层）。所以"两层 + 名字不是
+    `agent-*`"就是"这是顶层会话"的**形态证据**，不是猜的。
+
+    只按名字判（`not is_transcript_name`）不够：挪出 `subagents/` 的 `agent-*.jsonl`
+    也在 `projects/<ws>/<父 sid>/` 下，那是**判不到**（stray），不是根。
+    """
+    if lineage_wb.is_transcript_name(path.name):
+        return False
+    parent = path.parent
+    return parent.parent.name.lower() == lineage_wb.PROJECTS_DIR_NAME
+
+
+#: `_wb_runtime` 的进程内缓存：`{根的字符串: (指纹, WbRuntime)}`
+_WB_RUNTIME_CACHE: dict = {}
+
+
+def _runtime_stamp(teams: Path) -> tuple:
+    """`teams/*/runtime.json` 的 (目录名, mtime_ns, 字节数) 指纹（10 次 stat，~0.1 ms）。"""
+    try:
+        entries = sorted(teams.glob("*/runtime.json"))
+    except OSError:
+        return ()
+    stamp = []
+    for entry in entries:
+        try:
+            info = entry.stat()
+        except OSError:                     # 刚好被宿主编走：不算一个指纹位
+            continue
+        stamp.append((entry.parent.name, info.st_mtime_ns, info.st_size))
+    return tuple(stamp)
+
+
+def _wb_runtime(path):
+    """本棵 WB 树的 `teams/*/runtime.json` 索引；**推不出根就 `None`**。
+
+    语料侧只拿到文件路径，根由 `lineage_wb.root_of_path` 反推。推不出来时宁可只有
+    路径证据，也绝不回落到 `~/.workbuddy`——临时树/测试树踩空会读到生产 runtime，
+    给出一个与本文件无关的父（那是比"判不到"糟得多的错）。
+
+    **进程内按"这一刻的 runtime 指纹"缓存**：实测本机 10 份 runtime 共 4.5 MB、
+    单次 `load_runtime` 738 ms（每个成员都要 `is_file()`）；一次全量 ingest 要过
+    2,099 个文件，不缓存就是 +26 分钟。指纹取 10 份文件的 `(名, mtime_ns, size)`，
+    所以宿主新增/改写一份 runtime 之后缓存立刻失效——缓存的是**同这一刻的真相**，
+    不是"今天第一次看到的真相"。
+    """
+    root = lineage_wb.root_of_path(path)
+    if root is None:
+        return None
+    teams = lineage_wb.teams_dir(root)
+    stamp = _runtime_stamp(teams)
+    key = str(root)
+    cached = _WB_RUNTIME_CACHE.get(key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    runtime = lineage_wb.load_runtime(root)
+    if len(_WB_RUNTIME_CACHE) > 8:          # 临时树/判据会造很多根：别让缓存无界长
+        _WB_RUNTIME_CACHE.clear()
+    _WB_RUNTIME_CACHE[key] = (stamp, runtime)
+    return runtime
+
+
+def _lineage_columns(path, first_row, *, runtime=None) -> dict:
+    """W3a：语料**四列** = `fish_lineage_wb` 的血缘判定（113 §4.1）。
+
+    语料 `origin` 的值域只有 `main|subagent`，`unknown` 无处安放，所以三种形态分开处理，
+    **没有一条是"看不出来就写 main"**：
+
+      · 有父（路径父 / runtime 的 lead）→ `subagent` + 父 + `delegation_depth=1`；
+      · WB 顶层会话文件（`_is_root_file`）→ 显式 `main`（`origin_basis` 落 `header`，
+        **不是** tagger 的 `default` 兜底）+ 深度 0；
+      · 其余（挪出 `subagents/` 的 `agent-*`）→ **不主张**（`origin=None`），把
+        `unknown/missing` 与原因写进 `extra`。写 `main` 是 113 §4.2 ③ 的后备兜底，
+        正是 `fish_corpus_tag.py:240` 被当反面教材的那条。
+
+    返回 `{origin, parent_session, delegation_depth, role, evidence}`；`evidence` 进
+    `corpus_session.extra`，让"这一行凭什么这么判"可对账（basis/source/reason）。
+    """
+    path = None if path is None else Path(path)
+    decision = lineage_wb.classify_transcript(path, first_row, runtime=runtime)
+    evidence = {"lineage_basis": decision["basis"], "lineage_source": decision["source"]}
+    if decision.get("role_from"):
+        evidence["role_from"] = decision["role_from"]
+    role = decision.get("role")
+    if role:                       # `role` 也是宿主文本：与 title 走同一份脱敏（安全口径）
+        role = redact_mod.redact(str(role))[0]
+    columns = {"origin": None, "parent_session": None, "delegation_depth": 0,
+               "role": role, "evidence": evidence}
+    if decision["origin"] == "subagent":
+        columns.update(origin="subagent", parent_session=decision["parent_session"],
+                       delegation_depth=1)
+        return columns
+    if path is not None and _is_root_file(path):
+        # 形态即证据：顶层会话文件 → 显式 main（basis 落 header，不是 default）。
+        # 这里**不带** `reason='not_in_subagents'`：那是"判不到"的原因，不是根的原因。
+        columns.update(origin="main", delegation_depth=0)
+        evidence.update(lineage_origin="main", lineage_basis=BASIS_ROOT_PATH,
+                        lineage_source=SOURCE_ROOT)
+        return columns
+    for key in ("reason", "unverified_parent"):
+        if decision.get(key):
+            evidence[key] = decision[key]
+    evidence["lineage_origin"] = "unknown"     # 判不到：留证据，不主张（见 docstring ③）
+    return columns
+
+
+def _header_of(row, path_session_id, fallback_cwd=None, *, path=None,
+               runtime=None, first_row=None) -> dict:
+    """`session-meta` 行（或文件首行）→ 打标用的会话头。
+
+    W3a（113 §4.1）：`origin`/`parent_session`/`delegation_depth`/`role` 四列不再硬编码，
+    一律来自 `_lineage_columns`（= `fish_lineage_wb` 的判定）。`session_id` 的来源
+    **一个字节没动**（`row.sessionId or 文件名`；调用方再按文件名覆盖，§1-7 的护栏）。
+
+    两个入参各管一件事，**不合并**：
+      · `row` 给 `cwd`/`sessionId`/`created_at`（有 `session-meta` 时就是它）；
+      · `first_row` 给**角色证据**（`providerData.agent`）——文件首行往往不是
+        `session-meta`，而角色恰好在首行上；不给就用 `row` 自己。
+    """
+    data = row if isinstance(row, dict) else {}
+    evidence_row = first_row if first_row is not None else data
+    lineage = _lineage_columns(path, evidence_row, runtime=runtime)
+    # `header_missing` 是"这一行不是会话头"的既有指纹（库里 341 行的形状），保持不变
+    extra = ({"source": "session-meta"} if data.get("type") == "session-meta"
+             else {"header_missing": 1})
+    extra.update(lineage["evidence"])
     return {
-        "session_id": str(sid),
-        "cwd": row.get("cwd") or fallback_cwd,
+        "session_id": str(data.get("sessionId") or path_session_id),
+        "cwd": data.get("cwd") or fallback_cwd,
         "title": None,
-        "origin": None,
-        "parent_session": None,
-        "delegation_depth": 0,
+        # ↓ W3a 四列：唯一来源 `_lineage_columns`（旧实现是 None/None/0/None 硬编码）
+        "origin": lineage["origin"],
+        "parent_session": lineage["parent_session"],
+        "delegation_depth": lineage["delegation_depth"],
+        "role": lineage["role"],
+        # ↑ 四列
         "agent_preset": None,
-        "role": None,
-        "created_at": _to_utc(row.get("timestamp")),
-        "extra": {"source": "session-meta"},
+        "created_at": _to_utc(data.get("timestamp")),
+        "extra": extra,
     }
 
 
@@ -378,9 +541,19 @@ def ingest_file(conn, path, cursor=None, *, tagger=None, dry_run: bool = False,
     last_line = (cursor or {}).get("last_line_seen")
     events_seen_before = int((cursor or {}).get("events_seen") or 0)
     tagger = tagger or Tagger()
+    # W3a：四列的证据在这里备好，**建行与 `session-meta` 两条路共用**。
+    #   首行只读一行（≤1 MiB，与树投影同一个 `read_header`）——实测 2,099 份 transcript
+    #   的首行全是 `message`，角色 `providerData.agent` 就在它上面；不读首行就只剩 null。
+    #   runtime 只读本棵树（`<root>/teams/*/runtime.json`），推不出根就不读。
+    first_row = lineage_wb.read_header(path)
+    wb_runtime = _wb_runtime(path)
     session = store.get_session(conn, HOST, sid)
     if session is None:
-        session = tagger.tag_session({"session_id": sid, "extra": {"header_missing": 1}}, HOST)
+        # ⚠️ 这里是**大部分 transcript 唯一会走到的建行分支**（首行不是 session-meta），
+        #   所以四列必须在这里就判好；否则 `_header_of` 改得再对也永远不被调用。
+        header = _header_of(first_row, sid, path=path, runtime=wb_runtime)
+        header["session_id"] = sid     # 游标按文件建：与 meta 分支同一条纪律（§1-7）
+        session = tagger.tag_session(header, HOST)
         if not dry_run:
             with store.write_txn(conn):
                 store.upsert_session(conn, session)
@@ -404,6 +577,13 @@ def ingest_file(conn, path, cursor=None, *, tagger=None, dry_run: bool = False,
         不补的后果很具体：整类 WB 会话会被标成 `no_cwd`（"连比都没法比"），而它其实
         **有**归属证据。只在会话还没有 cwd 时补一次，且仍然走同一个 `Tagger`
         ——补的不是"猜一个项目"，是把宿主真给的 cwd 喂进同一套解析（R2 不变）。
+
+        **W3a：这个头只带 cwd/title，四列必须原样带过去**（`LINEAGE_CARRY_FIELDS`）。
+        实测真树：`session-meta` 行常常没有 cwd，于是"meta 扫掉 cwd → 补 cwd → meta 再扫"
+        来回好几轮；而裸头在 `_origin_of` 里是"无 origin 无父"= `main/default`，照抄就把
+        子代理行写成主会话。父与深度当时靠 upsert 的 `COALESCE`/`MAX` 侥幸留住了，
+        唯独 `origin`/`origin_basis` 被冲干净——**行看起来有父、来源却是 main/default**，
+        这种"半对"最难查，所以在这里堵死而不是等对账发现。
         """
         nonlocal session
         row_cwd = row.get("cwd")
@@ -413,6 +593,9 @@ def ingest_file(conn, path, cursor=None, *, tagger=None, dry_run: bool = False,
             {"session_id": sid, "cwd": row_cwd, "title": session.get("title"),
              "created_at": session.get("started_at")}, HOST)
         tagged["title"] = session.get("title") or tagged.get("title")
+        for key in LINEAGE_CARRY_FIELDS:
+            if session.get(key) is not None:
+                tagged[key] = session[key]
         session.update(tagged)
         if not dry_run:
             store.upsert_session(conn, session)
@@ -513,7 +696,8 @@ def ingest_file(conn, path, cursor=None, *, tagger=None, dry_run: bool = False,
             counters["events_seen"] += 1
             kind, payload = map_row(row)
             if kind == "meta":
-                header = _header_of(payload, sid)
+                header = _header_of(payload, sid, path=path, runtime=wb_runtime,
+                                    first_row=first_row)
                 try:
                     tagged = tagger.tag_session(header, HOST)
                 except TagError as exc:

@@ -22,6 +22,8 @@ W3 的判据几乎全是"**例外为 0**"与"来源对不对"：`basis='default'
   M3  runtime 分支短路（`if False and …`）         → 成员父不再是 lead（J3①/兄弟 红）
   M4  判不到的兜底改成 `main`                       → J3③ 红（挪出去的行变 main）
   M5  无 transcript 成员的 `agent_id` 拿 `agentId` 顶上 → 退化② 判据红
+  M6  语料四列退回硬编码（`fish_corpus_wb._header_of`） → W3a 判据红（新行掉回 main/default）
+  M7  语料"判不到"的默认值改成 `main`                   → W3a 三态判据红（main/default 混用）
 
 用法：`python -X utf8 mutation_lineage_wb.py [--only D0|M1..M5] [--data-only] [--src-only]`
 """
@@ -43,6 +45,7 @@ from mutation_source import SourceText
 
 HERE = Path(__file__).resolve().parent
 WB_PY = HERE / "fish_lineage_wb.py"
+CORPUS_PY = HERE / "fish_corpus_wb.py"
 TEST = "test_lineage_wb.py"
 
 #: D0 用的假宿主常量（与真宿主无关：这是一棵临时树）
@@ -76,6 +79,22 @@ MUTANTS = [
      '        "agent_id": stem,                                         # ← 只有文件名能当 agent_id\n',
      '        "agent_id": stem or agent_key,\n',
      "退化②：无 transcriptPath 的成员拿 agentId 标签顶了 agent_id"),
+    ("M6", CORPUS_PY, "w3a_ingest_fills_four_columns",
+     '        "origin": lineage["origin"],\n'
+     '        "parent_session": lineage["parent_session"],\n'
+     '        "delegation_depth": lineage["delegation_depth"],\n'
+     '        "role": lineage["role"],\n',
+     '        "origin": None,\n'
+     '        "parent_session": None,\n'
+     '        "delegation_depth": 0,\n'
+     '        "role": None,\n',
+     "W3a：四列退回硬编码（= W3 因边界没做时的原状）→ 语料行掉回 main/default"),
+    ("M7", CORPUS_PY, "w3a_header_three_shapes",
+     '    columns = {"origin": None, "parent_session": None, "delegation_depth": 0,\n'
+     '               "role": role, "evidence": evidence}\n',
+     '    columns = {"origin": "main", "parent_session": None, "delegation_depth": 0,\n'
+     '               "role": role, "evidence": evidence}\n',
+     "W3a：判不到的行兜回 main（113 §4.2 ③ 明令禁止；`fish_corpus_tag.py:240` 的前科）"),
 ]
 
 
