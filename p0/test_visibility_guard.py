@@ -40,6 +40,8 @@ if str(HERE) not in sys.path:
 
 import fish  # noqa: E402
 import fish_common  # noqa: E402  —— _open_loop_rows 在链底
+import fish_ui  # noqa: E402  生产读口的唯一开法（mode=ro + Row 工厂）
+import fish_workbench_api  # noqa: E402  工作台读口（热搜标题曾是无过滤通道，P2-4）
 
 
 
@@ -761,6 +763,81 @@ class PrivateWriteGuardTest(unittest.TestCase):
         self.assertEqual(i2["state"], "forbidden",
                          f"上跳路径没被拒：state={i2['state']}")
 
+
+class WorkbenchStatsVisibilityTest(unittest.TestCase):
+    """**P2-4（docs/108 §4）**：工作台「热搜」曾是一条无过滤的标题通道。
+
+    `collect_stats` 要显示热搜标题，所以它是**可见读路径**；而它原来的
+    `SELECT code, title FROM code_index WHERE code IN (...)` 是裸查——
+    `privacy.visibility_enforced` 打开时，`visibility=private` 的标题照样
+    出现在右栏。这不是"另加一条判据"，是把已有执行层（`_visibility_sql`）
+    接到漏掉的读口上，然后把它钉住。
+
+    判据造**临时库**（schema 现建，不碰生产库；也不 mock 过滤函数）：
+      · 正向：一条 private（owner=别人）+ 一条 access_log → 标题**不出现**
+      · 反向：改成 shared → 标题**出现**（否则"整列删掉"也能让正向变绿）
+
+    连接用**生产那条**（`fish_ui.open_readonly` = mode=ro + Row 工厂）：
+    `collect_stats` 按列名取值，判据若拿 tuple 工厂的写连接凑合，
+    它连跑都跑不起来——那就不是同一条读路径了。
+
+    变异：去掉 `collect_stats` 里那句 `+ vis_sql`（只留过滤前的 SQL）→ 正向红。
+    """
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="fish-wb-vis-")
+        self.root = Path(self._tmp) / "data"
+        self.root.mkdir(parents=True)
+        self.conn = fish.connect(self.root)
+        self.conn.executescript(fish.SCHEMA)
+        fish.migrate(self.conn)
+        self.conn.execute(
+            "INSERT INTO code_registry (prefix, namespace, last_date, last_seq)"
+            " VALUES ('P','P','2026-11-18',0)")
+        # 开关必须用 "true"：`get_config` 对 bool 只认 `raw == "true"`
+        self._config("privacy.visibility_enforced", "true", "bool")
+        # 主人 citizen：`collect_stats` 用 `fish_common.resolve_owner` 解析 viewer
+        self._config("owner_citizen", "C-OWNER", "string")
+        self.conn.commit()
+        self.ro = fish_ui.open_readonly(str(self.root / "index.sqlite"))
+
+    def tearDown(self):
+        for attr in ("ro", "conn"):
+            conn = getattr(self, attr, None)
+            try:
+                conn.close()
+            except Exception:      # noqa: BLE001 —— 夹具清理
+                pass
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _config(self, key, value, typ):
+        self.conn.execute(
+            "INSERT OR REPLACE INTO config (key,value,type,updated_at) VALUES (?,?,?,?)",
+            (key, value, typ, fish.now_utc()))
+
+    def _hot_titles(self):
+        stats = fish_workbench_api.collect_stats(self.ro, days=7, top=10)
+        hot = stats["data"]["hotAccess"]
+        return [r["title"] or "" for r in hot["window"] + hot["allTime"]]
+
+    def test_stats_hot_titles_respect_visibility(self):
+        code, _rel = fish.record_memory(
+            self.conn, self.root, project="P", title="P24私密热搜标题",
+            body="正文\n", visibility="private", owner="C-OTHER", mem_type="fact")
+        self.conn.execute(
+            "INSERT INTO memory_access_log (code, via, accessed_at) VALUES (?,?,?)",
+            (code, "read_body", fish.now_utc()))
+        self.conn.commit()
+
+        self.assertNotIn("P24私密热搜标题", self._hot_titles(),
+                         "别人的 private 标题出现在工作台热搜里（读口没接可见性）")
+
+        self.conn.execute("UPDATE code_index SET visibility='shared' WHERE code=?", (code,))
+        self.conn.commit()
+        self.assertIn("P24私密热搜标题", self._hot_titles(),
+                      "改成 shared 后标题也没出现——过滤过头（整列删掉也能让上面绿）")
+
+
 # ---------------------------------------------------------------- 读路径清单
 #
 # **F-P1-X（第三轮评审后的自查）**：我补私有过滤时，是按"我记得的那几条"补的。
@@ -797,6 +874,8 @@ FILTERED = {
     "mcp_server.py:read_resource":        "_visibility_sql 无 viewer（第 38 轮补 fish://index）",
     "mcp_server.py:tool_resolve":         "内联可见性判定（第 46 轮补：编号 ≠ 能读）",
     "gen_index_md.py:main":               "默认剔除 private（第 43 轮补；--include-private 可显式放行）",
+    # 第 108/P2-4 轮：工作台热搜榜显示标题，原来是一条裸查（开关打开时 private 会露）。
+    "fish_workbench_api.py:collect_stats": "_visibility_sql（P2-4 补：热搜标题是可见读路径）",
 }
 
 BY_EXACT_CODE = {

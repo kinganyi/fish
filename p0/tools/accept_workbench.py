@@ -204,42 +204,91 @@ class _Ws:
             pass
 
 
-#: 一次页面探测要取的三个量（都是机检判据的输入）。
+#: 应用页的标题（`ui/index.html` 的 `<title>`）——页面身份的唯一锚点（P1-4）。
+APP_TITLE = "fish 现场"
+
+#: 一次页面探测要取的量（都是机检判据的输入）。
 _PROBES = {
     "text": "document.body ? document.body.innerText : ''",
     "rows": "document.querySelectorAll('[data-row]').length",
     "origins": "document.querySelectorAll('details summary[aria-label$=\"来源与口径\"]').length",
+    # 页面身份（P1-4）：浏览器错误页也有 `body.innerText`，光看文本会把
+    # "嗯… 无法访问此页面… ERR_CONNECTION_REFUSED" 当成应用页 → 假红。
+    "title": "document.title",
+    "rootKids": "(document.getElementById('root') || {childElementCount: -1}).childElementCount",
+    # 列表**持有**多少条（`VirtualList` 容器上的 `data-count`）：A-11 的机检口径要用它。
+    # 少了这个数，"DOM 行节点 < 200" 在只载入 40 条时永远成立 → 判据没有判别力（P1-2）。
+    "count": "(() => { const el = document.querySelector('[role=list]');"
+             " return el && el.hasAttribute('data-count')"
+             " ? Number(el.getAttribute('data-count')) : null; })()",
 }
 
+#: 滚到底触发无限加载（A-11 要"载入 ≥200 条"才谈得上"虚拟滚动在起作用"）。
+_SCROLL_BOTTOM = ("(() => { const el = document.querySelector('[role=list]');"
+                  " if (!el) return -1; el.scrollTop = el.scrollHeight;"
+                  " return el.scrollTop; })()")
 
-def dom_probe(url: str, wait_ms: int = 6000, attempts: int = 3) -> dict:
-    """渲染一个页面并取回 `{text, rows, origins}`；起不来抛 RuntimeError（调用方判 SKIP）。
+
+class _PageNotApp(RuntimeError):
+    """读到的不是应用页（浏览器错误页 / 空白页）——这不是判据失败，是托管不可达（P1-4）。"""
+
+
+def _page_identity(probe: dict) -> tuple[bool, str]:
+    """页面身份判据：标题对得上，或 `#root` 里挂着节点——两者都否就不是应用页。
+
+    为什么不能只看文本（P1-4）：Edge 的错误页也有 `document.body.innerText`
+    （"嗯… 无法访问此页面… ERR_CONNECTION_REFUSED"，实测 chars=94）。旧探针把它当应用页，
+    于是 8799 一停就有 5 条 DOM 判据报 FAIL——那是**假红**：环境不可达不等于产品不达标。
+    改成 SKIP 之后，"没验"与"不合格"才分得清。
+    """
+    title = (probe.get("title") or "").strip()
+    kids = probe.get("rootKids")
+    kids = int(kids) if isinstance(kids, (int, float)) else -1
+    if title == APP_TITLE or kids > 0:
+        return True, ""
+    head = (probe.get("text") or "").strip().replace("\n", " ")[:80]
+    return False, (f"静态托管不可达：读到的不是应用页"
+                   f"（title={title!r}，#root 子节点={kids}，文本前 80 字={head!r}）")
+
+
+def dom_probe(url: str, wait_ms: int = 6000, attempts: int = 3,
+              scroll_rounds: int = 0) -> dict:
+    """渲染一个页面并取回 `{text, rows, origins, title, rootKids, count}`。
+
+    起不来抛 `RuntimeError`（调用方判 SKIP）；读到的不是应用页抛 `_PageNotApp`
+    （同为 RuntimeError 子类，但**不重试**——托管都不可达了，重试三次只是白等）。
 
     为什么要重试：本机无头 Edge 偶发"调试端口 15 秒内没起来"（连续跑多条判据时更容易撞上），
     一次失败就判 SKIP 会让"环境抖一下"看起来像"功能没有"。三次都起不来才算真起不来。
+
+    `scroll_rounds` > 0 时先滚到底 N 轮，把无限加载（每轮 40 条）跑起来再读数——A-11 用。
     """
     errors = []
     for attempt in range(1, attempts + 1):
         try:
-            return _dom_probe_once(url, wait_ms)
+            return _dom_probe_once(url, wait_ms, scroll_rounds)
+        except _PageNotApp:
+            raise
         except RuntimeError as exc:
             errors.append(f"第{attempt}次：{exc}")
             time.sleep(1.5)
     raise RuntimeError("；".join(errors))
 
 
-def _dom_probe_once(url: str, wait_ms: int) -> dict:
+def _dom_probe_once(url: str, wait_ms: int, scroll_rounds: int = 0) -> dict:
     browser = find_browser()
     if not browser:
         raise RuntimeError("找不到无头浏览器（Edge/Chrome）")
     profile = tempfile.mkdtemp(prefix="fish-wb-accept-")
     port = _free_port()
-    proc = subprocess.Popen(
-        [browser, "--headless=new", "--disable-gpu", "--no-first-run",
-         "--no-default-browser-check", f"--user-data-dir={profile}",
-         f"--remote-debugging-port={port}", "about:blank"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc: subprocess.Popen | None = None
+    ws: _Ws | None = None
     try:
+        proc = subprocess.Popen(
+            [browser, "--headless=new", "--disable-gpu", "--no-first-run",
+             "--no-default-browser-check", f"--user-data-dir={profile}",
+             f"--remote-debugging-port={port}", "about:blank"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         target = None
         for _ in range(80):
             try:
@@ -255,24 +304,37 @@ def _dom_probe_once(url: str, wait_ms: int) -> dict:
         if not target:
             raise RuntimeError("CDP 目标没起来（调试端口绑不上）")
         ws = _Ws(target["webSocketDebuggerUrl"])
-        try:
-            ws.call(1, "Page.enable")
-            ws.call(2, "Runtime.enable")
-            ws.call(3, "Page.navigate", {"url": url})
-            time.sleep(wait_ms / 1000.0)
-            out = {}
-            for index, (name, expression) in enumerate(_PROBES.items(), start=10):
-                result = ws.call(index, "Runtime.evaluate",
-                                 {"expression": expression, "returnByValue": True})
-                out[name] = result.get("result", {}).get("value")
-            if not (out.get("text") or "").strip():
-                raise RuntimeError("页面文本为空")
-            return out
-        finally:
-            ws.close()
+        ws.call(1, "Page.enable")
+        ws.call(2, "Runtime.enable")
+        ws.call(3, "Page.navigate", {"url": url})
+        time.sleep(wait_ms / 1000.0)
+        for _ in range(scroll_rounds):
+            # 一轮 = 一次无限加载（40 条）：先滚到底，再等它请求 + 合并 + 重渲染。
+            ws.call(4, "Runtime.evaluate",
+                    {"expression": _SCROLL_BOTTOM, "returnByValue": True})
+            time.sleep(0.6)
+        out = {}
+        for index, (name, expression) in enumerate(_PROBES.items(), start=10):
+            result = ws.call(index, "Runtime.evaluate",
+                             {"expression": expression, "returnByValue": True})
+            out[name] = result.get("result", {}).get("value")
+        ok_page, why = _page_identity(out)
+        if not ok_page:
+            raise _PageNotApp(why)
+        if not (out.get("text") or "").strip():
+            raise RuntimeError("页面文本为空")
+        return out
     finally:
-        _kill_tree(proc)
-        shutil.rmtree(profile, ignore_errors=True)
+        # P2-5：关浏览器与删临时 profile **都**要在 finally 里，且要"确认死透"再删。
+        # 顺序有讲究：先请浏览器自己 `Browser.close`（它会释放 profile 里的文件句柄），
+        # 再 taskkill 兜底，最后才删目录——只 taskkill 时目录常常删不掉（实测残留 60 个）。
+        if ws is not None:
+            _browser_close(ws)
+            ws.close()
+        if proc is not None:
+            _kill_tree(proc)
+        if not _rmtree_retry(profile):
+            print(f"# 残留：临时 profile 删不掉 {profile}", file=sys.stderr)
 
 
 def _free_port() -> int:
@@ -292,6 +354,154 @@ def _kill_tree(proc: subprocess.Popen) -> None:
     if os.name == "nt":
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    # taskkill 之后等一会儿：句柄释放是异步的，立刻删 profile 会删不掉。
+    try:
+        proc.wait(timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
+        time.sleep(0.5)
+
+
+def _browser_close(ws: "_Ws") -> None:
+    """先请浏览器**自己退**（CDP `Browser.close`），再 taskkill 兜底（P2-5）。
+
+    为什么不能只 taskkill：它把进程砍了，但 profile 里的文件句柄由内核异步回收，
+    紧接着 `rmtree` 常常失败（实测残留 60 个 `%TEMP%\fish-wb-*`）。
+    `Browser.close` 会走正常退出路径、自己释放 profile。对端在回复前就关连接，
+    所以这里把"连接断开"也当成功。
+    """
+    try:
+        ws.call(9, "Browser.close")
+    except (RuntimeError, OSError):
+        pass
+
+
+#: 删不掉的临时目录（老实记账：收尾一起报，不静默吞）
+_RESIDUE: list[str] = []
+
+
+def _rmtree_retry(path: str, attempts: int = 8, delay: float = 0.4) -> bool:
+    """删临时 profile：刚退出的浏览器还会短暂持有文件句柄，秒删会失败，必须重试。"""
+    for _ in range(attempts):
+        shutil.rmtree(path, ignore_errors=True)
+        if not os.path.exists(path):
+            return True
+        time.sleep(delay)
+    _RESIDUE.append(path)
+    return False
+
+
+# ── 环境残留自检（P2-5）──────────────────────────────────────────────────
+def _residue_dirs() -> list[str]:
+    """本工具链的临时 profile **目录**（`%TEMP%\\fish-wb-*`）——本脚本自己的必须为 0。
+
+    只认目录：`%TEMP%` 里还有别的工具留下的 `fish-wb-*.log` 文件（不是 profile），
+    把它们算进来会让残留读数虚高，也会让"删不掉"清单里出现一堆普通文件。
+    """
+    temp = os.environ.get("TEMP") or tempfile.gettempdir()
+    if not os.path.isdir(temp):
+        return []
+    return sorted(name for name in os.listdir(temp)
+                  if name.startswith("fish-wb-") and os.path.isdir(os.path.join(temp, name)))
+
+
+def _msedge_count() -> int | None:
+    """整机 `msedge.exe` 进程数（含用户自己开的浏览器）——**只作前后对比**的粗略读数。
+
+    不用 WMI 取命令行：本机实测一次 `Get-CimInstance Win32_Process` 要 ~14 s，
+    跑两遍就把验收拖慢半分钟。命令行的精确读数放在 `--sweep-residue` 里单独做。
+    """
+    if os.name != "nt":
+        return None
+    try:
+        out = subprocess.run(["tasklist", "/FI", "IMAGENAME eq msedge.exe", "/FO", "CSV", "/NH"],
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    return sum(1 for line in (out.stdout or "").splitlines() if '"msedge.exe"' in line)
+
+
+def _browsers_with_fishwb(details: bool = False):
+    """命令行里带 `fish-wb` 的 Edge 进程（精确读数，慢：本机 ~14 s，只在自检/清理时跑）。
+
+    `details=False` → `[pid, ...]`；`details=True` → `[(pid, 已运行秒数, 命令行), ...]`。
+    为什么要带"已运行秒数"：判陈旧只能看**进程启动时间**——上一轮遗留的浏览器会一直写
+    profile，目录 mtime 永远"新鲜"，按目录判会把真正的残留一直留住（实测 11 个老浏览器
+    被这么留住过）。我们的探针寿命是秒级，所以"起于 30 分钟前"一定是残留。
+    """
+    if os.name != "nt":
+        return None
+    script = ("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
+              "Where-Object { $_.CommandLine -like '*fish-wb*' } | "
+              "ForEach-Object { \"$($_.ProcessId)|$([int]((Get-Date) - $_.CreationDate).TotalSeconds)|$($_.CommandLine)\" }")
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
+                              "-EncodedCommand", encoded],
+                             capture_output=True, text=True, encoding="utf-8",
+                             errors="replace", timeout=180)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    found = []
+    for line in (out.stdout or "").splitlines():
+        pid_text, _, rest = line.partition("|")
+        age_text, _, cmdline = rest.partition("|")
+        if not pid_text.strip().isdigit():
+            continue
+        age = int(age_text) if age_text.strip().isdigit() else -1
+        found.append((int(pid_text), age, cmdline))
+    return found if details else [pid for pid, _, _ in found]
+
+
+def _residue_report() -> dict:
+    """残留读数：临时目录 + msedge 总数（快）；带 `fish-wb` 的无头浏览器（慢，可选）。"""
+    return {"dirs": _residue_dirs(), "msedge": _msedge_count()}
+
+
+def _print_residue(tag: str, report: dict) -> None:
+    dirs = report["dirs"]
+    print(f"# 残留自检[{tag}] %TEMP%\\fish-wb-* = {len(dirs)} 个 · "
+          f"msedge.exe = {report['msedge'] if report['msedge'] is not None else '判不到'}"
+          + (f" · 删不掉的：{_RESIDUE}" if _RESIDUE else ""))
+
+
+def _sweep_residue(older_than_sec: int = 1800) -> dict:
+    """清掉上一轮跑剩的东西（P2-5 的收尾）：无头浏览器进程 + 陈旧的临时 profile。
+
+    安全性：只清**命令行里带 `fish-wb`** 的 Edge，而且只清**启动于 `older_than_sec` 秒前**
+    的那些——正在跑的那一轮（含别人的）不动。要不要杀只看进程启动时间，不看 profile 目录
+    的 mtime（老浏览器会一直写目录，mtime 永远新鲜，按它判会把残留全留住）。
+    用户的浏览器 profile 里不含 `fish-wb`，不会命中。
+    """
+    found = _browsers_with_fishwb(details=True)
+    if found is None:
+        return {"killed": [], "keptFresh": [], "dirsRemoved": [],
+                "note": "取不到进程命令行（非 Windows 或 PowerShell 不可用）"}
+    killed, kept = [], []
+    for pid, age, _cmdline in found:
+        if 0 <= age < older_than_sec:
+            kept.append(pid)
+            continue
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        killed.append(pid)
+    time.sleep(0.8)
+    temp = os.environ.get("TEMP") or tempfile.gettempdir()
+    removed = []
+    for name in _residue_dirs():
+        path = os.path.join(temp, name)
+        try:
+            if (time.time() - os.path.getmtime(path)) < older_than_sec:
+                continue
+        except OSError:
+            continue
+        if _rmtree_retry(path, attempts=3, delay=0.2):
+            removed.append(name)
+    return {"killed": killed, "keptFresh": kept, "dirsRemoved": removed}
 
 
 def visible_numbers(text: str) -> list[str]:
@@ -444,7 +654,12 @@ def a03(ctx) -> tuple[bool, str]:
 
 
 class _MutationSkip(RuntimeError):
-    """变异**没有作用对象**——不是判据失败，也不是通过：必须显式 SKIP 并给原因。"""
+    """变异**没有作用对象**——不是判据失败，也不是通过：必须显式 SKIP 并给原因。
+
+    当前没有哪条变异会抛它了（A-3 改成自带固定 fixture 后，作用对象不再依赖数据运气；
+    其余变异本来就是构造坏输入）。留着这个类别是因为"没自证"与"自证失败"必须能分开记：
+    以后加变异只要抛它，main 就会记 `MUTATION-SKIP`（不计通过、也不计判别力失败）。
+    """
 
 
 def _same_second_groups(items: list[dict]) -> int:
@@ -494,37 +709,53 @@ def a03_mut(ctx) -> tuple[bool, str]:
 
     旧变异打在投影层（`_stub_item` 的 `sk`）：排序发生在 `accumulated` 上，而投影在
     排序**之后**才跑，所以改投影永远不会改变顺序 → 变异恒绿、判据没有判别力
-    （QA/评审在 docs/104 KI-1 的定位）。现在把打散注入 `_fetch_batch` 的返回行，
+    （QA/评审在 docs/104 KI-1 的定位）。后来把打散注入 `_fetch_batch` 的返回行，
     让 `collect_stream` 自己的 `sort(key=sk)` 去吃这份被打散的行。
+
+    **P2-3**：作用对象不再依赖真实数据的运气（106 收尾那次首屏没有同秒并列 →
+    `MUTATION-SKIP`）。这里自带一个固定 fixture（`_make_tie_fixture`：2 行同 ts、同源
+    → 同 rk → 顺序只由 pk 决定），打散一定有用武之地，变异**无条件可红**。
     """
     A = ctx["A"]
-    original = A._fetch_batch
-    state = {"rotation": 1}
-    ties = {"groups": 0}
-
-    def scrambled(conn, **kwargs):
-        rows = original(conn, **kwargs)
-        return _rotate_same_second(rows, state["rotation"])
-
-    A._fetch_batch = scrambled
+    tmpdir = tempfile.mkdtemp(prefix="fish-wb-tie-")
+    conn = None
     try:
-        runs = []
-        for index in range(3):
-            state["rotation"] = index + 1
-            items = _stream(ctx, limit=40)["data"]["items"]
-            runs.append([item["key"] for item in items])
-            ties["groups"] = max(ties["groups"], _same_second_groups(items))
+        fixture = os.path.join(tmpdir, "tie.sqlite")
+        info = _make_tie_fixture(ctx["db"], fixture, ctx["since"])
+        conn = A.open_conn(fixture)
+        # fixture 是"另一个库"：ctx 的 conn 还指着真库，所以给 `_stream` 一份新上下文。
+        fctx = {"A": A, "conn": conn, "since": ctx["since"]}
+        original = A._fetch_batch
+        state = {"rotation": 1}
+
+        def scrambled(inner_conn, **kwargs):
+            return _rotate_same_second(original(inner_conn, **kwargs), state["rotation"])
+
+        A._fetch_batch = scrambled
+        try:
+            runs = []
+            ties = 0
+            for index in range(3):
+                state["rotation"] = index + 1
+                items = _stream(fctx, limit=40)["data"]["items"]
+                runs.append([item["key"] for item in items])
+                ties = max(ties, _same_second_groups(items))
+        finally:
+            A._fetch_batch = original
     finally:
-        A._fetch_batch = original
-    if ties["groups"] == 0:
-        raise _MutationSkip(
-            "首屏 40 条里没有同秒并列（排序键 ts 全不同）→ 打散没有作用对象，"
-            "这条判据在本次数据上不能自证；按纪律显式 SKIP，不算通过")
+        if conn is not None:
+            conn.close()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    if ties == 0:
+        # 固定 fixture 都造不出同秒并列，说明 fixture 本身坏了——这是**变异跑不通**，
+        # 不是"数据没并列所以跳过"，所以抛 RuntimeError（main 记 MUTATION-SKIP 且计入失败面）。
+        raise RuntimeError("固定 fixture 里没有同秒并列（fixture 构造失效，不是数据运气问题）")
     ok = runs[0] == runs[1] == runs[2]
     return ok, json.dumps({"identicalUnderMutation": ok,
-                           "sameSecondGroups": ties["groups"],
+                           "sameSecondGroups": ties,
+                           "fixture": info,
                            "first6PerRun": [run[:6] for run in runs],
-                           "note": "变异方向：同秒并列被打散 → 3 次顺序必须不同"},
+                           "note": "变异方向：固定 fixture 的同秒并列被打散 → 3 次顺序必须不同"},
                           ensure_ascii=False)
 
 
@@ -785,11 +1016,11 @@ def a10(ctx) -> tuple[bool, str]:
                  if codes[key] in bundle]
     in_page = False
     if ctx["static"]:
-        try:
-            probe = dom_probe(f"{ctx['static']}/?api=http://127.0.0.1:9", wait_ms=5000)
-            in_page = codes["unreachable"][:6] in probe["text"]
-        except RuntimeError:
-            in_page = False
+        # 静态托管不可达 / 读到的不是应用页 → 让它抛（主流程记 SKIP）。
+        # 不能像旧代码那样 `except RuntimeError: in_page = False`——那会把"没验"变成"不合格"，
+        # 正是 P1-4 要止住的那类假红。
+        probe = dom_probe(f"{ctx['static']}/?api=http://127.0.0.1:9", wait_ms=5000)
+        in_page = codes["unreachable"][:6] in probe["text"]
     ok = unique and not _four_distinct(codes) and len(in_bundle) == 3 and in_page
     return ok, json.dumps({"fourDistinct": unique, "inBundle": in_bundle,
                            "unreachableInPage": in_page}, ensure_ascii=False)
@@ -806,6 +1037,133 @@ def a10_mut(ctx) -> tuple[bool, str]:
 
 
 # ── A-11 ────────────────────────────────────────────────────────────────
+#: 虚拟滚动的机检口径（一处定义：正常态与变异吃**同一份**判据，改口径只改这里）。
+A11_ROWS_MAX = 200       # DOM 行节点上限（96 §十）
+A11_LOAD_MIN = 200       # 至少要载入这么多条，"虚拟滚动"才有意义
+A11_SCROLL_ROUNDS = 5    # 每轮 = 无限加载 40 条 → 初始 40 + 5×40 = 240 条
+A11_WARM_MAX_MS = 300.0  # HTTP 热态单请求上限（**能失败**）
+A11_INPROC_MAX_MS = 1000.0
+
+
+def _a11_rows_verdict(rows, count) -> dict:
+    """A-11 的 DOM 半边：**唯一**的行数判据（正常态与变异都吃这一份）。
+
+    三句话缺一不可：
+    - `0 < rows`：零行不是"虚拟滚动生效"，是页面坏了（P1-2 补的下界——旧判据
+      `rows is not None and rows < 200` 让空白页/错误页都能 PASS）；
+    - `rows < 200`：96 §十 的硬上限；
+    - `count >= 200` 且 `rows < count`：DOM 里的行**严格少于**列表持有的条数，且列表
+      确实载了足够多条——这才叫"只渲染一部分"。少了这半句，列表只载 40 条时
+      `< 200` 恒成立，判据对"关掉虚拟滚动"毫无判别力（40 行也 < 200）。
+    """
+    reasons: list[str] = []
+    if rows is None:
+        reasons.append("DOM 行数取不到")
+    else:
+        try:
+            rows = int(rows)
+        except (TypeError, ValueError):
+            reasons.append(f"DOM 行数不是数字：{rows!r}")
+            rows = None
+        else:
+            if rows <= 0:
+                reasons.append("DOM 行数是 0（空白页不能算虚拟滚动通过）")
+            if rows >= A11_ROWS_MAX:
+                reasons.append(f"DOM 行 {rows} ≥ {A11_ROWS_MAX}（没在虚拟化）")
+    if count is None:
+        reasons.append("列表持有条数取不到（页面上没有 [role=list] 的 data-count）")
+    else:
+        try:
+            count = int(count)
+        except (TypeError, ValueError):
+            reasons.append(f"data-count 不是数字：{count!r}")
+            count = None
+        else:
+            if count < A11_LOAD_MIN:
+                reasons.append(f"列表只持有 {count} 条 < {A11_LOAD_MIN}（载入不够，判据不成立）")
+            if rows is not None and rows >= count:
+                reasons.append(f"DOM 行 {rows} ≥ 列表持有 {count}（全量渲染，虚拟滚动没起作用）")
+    return {"ok": not reasons, "reason": "；".join(reasons) or None, "rows": rows, "count": count}
+
+
+def _http_timed(url: str, timeout: float = 180.0) -> dict:
+    """打一次 HTTP 并记「请求时刻 + 耗时」——A-11 的 P1-3 半边（HTTP 路径的真实读数）。"""
+    at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    started = time.perf_counter()
+    error = None
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            resp.read()
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        error = f"{type(exc).__name__}: {exc}"
+    return {"at": at, "ms": round((time.perf_counter() - started) * 1000, 1), "error": error}
+
+
+def _http_warm(api: str, samples: int = 6) -> dict:
+    """HTTP **热态**：真服务上连打 N 次，丢掉第一次（可能撞上预热线程/缓存冷），取中位。
+
+    为什么这条必须有（P1-3）：A-11 原来只报"进程内函数中位"（32.8 / 96.5 ms），
+    那不是 UI 走的路。QA 在 HTTP 上量到的冷态是 14.06 / 9.90 / 4.01 / 6.74 / 0.96 s，
+    热态 0.10 s——两档差两个数量级，混成一句"首屏 < 1s"就是失真。
+    """
+    runs = [_http_timed(f"{api}/api/stream?win=24h&limit=40") for _ in range(samples)]
+    body = runs[1:] or runs
+    times = [r["ms"] for r in body if not r["error"]]
+    return {"samplesMs": [r["ms"] for r in runs],
+            "medianMs": round(statistics.median(times), 1) if times else None,
+            "errors": [r["error"] for r in runs if r["error"]],
+            "firstAt": runs[0]["at"], "lastAt": runs[-1]["at"]}
+
+
+def _http_cold(db_path: str) -> dict:
+    """HTTP **冷态**：新起一个读口，记三个时刻（进程拉起 → 端口可连 → 第一次请求完成）。
+
+    "冷"= **这个进程**的第一次 HTTP 请求。就绪探测用 socket 连端口、**不发请求**
+    （用 `/api/health` 探测本身就是一次预热，会把冷态读数洗掉）。
+    冷态**只记录、不设硬阈值**（启动成本是进程级，阈值会随机器漂）；能失败的半边放在热态。
+    """
+    port = _free_port()
+    spawn_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    started = time.perf_counter()
+    proc = subprocess.Popen(
+        [sys.executable, "-X", "utf8", os.path.join(_P0, "fish_workbench_api.py"),
+         "--db", db_path, "--port", str(port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        ready_at = None
+        for _ in range(240):     # 最长等 60 s
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=1):
+                    ready_at = time.perf_counter()
+                    break
+            except OSError:
+                time.sleep(0.25)
+        if ready_at is None:
+            return {"ok": False, "error": "冷启动的读口 60 s 内没有监听端口", "spawnAt": spawn_at,
+                    "spawnToListMs": None, "coldMs": None}
+        listen_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        first = _http_timed(f"http://127.0.0.1:{port}/api/stream?win=24h&limit=40")
+        stats_first = _http_timed(f"http://127.0.0.1:{port}/api/stats?days=1")
+        cold = first["ms"]
+        if first["error"]:
+            verdict = f"判不到：{first['error']}"
+        elif cold < 1000:
+            verdict = "可接受（<1 s）"
+        elif cold < 3000:
+            verdict = "偏慢（1–3 s，首屏能感知）"
+        else:
+            verdict = "很慢（≥3 s：冷启动必须常驻或预热）"
+        return {"ok": first["error"] is None,
+                "spawnAt": spawn_at, "listenAt": listen_at,
+                "spawnToListMs": round((ready_at - started) * 1000, 1),
+                "coldMs": cold, "coldRequestAt": first["at"],
+                "statsColdMs": stats_first["ms"],
+                "firstResponseAfterSpawnMs": round(((ready_at - started) * 1000) + cold, 1),
+                "verdict": verdict}
+    finally:
+        _kill_tree(proc)
+
+
 def a11(ctx) -> tuple[bool, str]:
     times = []
     for _ in range(5):
@@ -815,29 +1173,64 @@ def a11(ctx) -> tuple[bool, str]:
     median = statistics.median(times)
     page = http_json(f"{ctx['api']}/api/stream?win=24h&limit=40")
     total = page["data"]["counts"]["total"] or 0
-    rows = None
-    if ctx["static"]:
-        try:
-            rows = dom_probe(f"{ctx['static']}/?api={ctx['api']}", wait_ms=7000)["rows"]
-        except RuntimeError:
-            rows = None
-    rows_ok = rows is not None and rows < 200
-    ok = median < 1000.0 and total >= 200 and rows_ok
-    return ok, json.dumps({"medianMs": round(median, 1),
-                           "min": round(min(times), 1), "max": round(max(times), 1),
-                           "total": total, "domRows": rows,
-                           "target": "首屏中位 <1000ms；DOM 行节点 <200 而流里有上千条"},
-                          ensure_ascii=False)
+    warm = _http_warm(ctx["api"])
+    cold = _http_cold(ctx["db"])
+    static = ctx["static"]
+    if not static:
+        raise RuntimeError("缺 --static（A-11 的 DOM 半边要数浏览器里真正的行节点）")
+    # 先滚 5 轮把列表撑到 ~240 条，再数 DOM：只载 40 条时"<200"永远成立，测不出东西。
+    probe = dom_probe(f"{static}/?api={ctx['api']}", wait_ms=7000,
+                      scroll_rounds=A11_SCROLL_ROUNDS)
+    verdict = _a11_rows_verdict(probe["rows"], probe["count"])
+    ok = (median < A11_INPROC_MAX_MS
+          and warm["medianMs"] is not None and warm["medianMs"] <= A11_WARM_MAX_MS
+          and cold.get("ok") is True
+          and total >= 200
+          and verdict["ok"])
+    detail = json.dumps({"inprocMedianMs": round(median, 1),
+                         "inprocMin": round(min(times), 1),
+                         "inprocMax": round(max(times), 1),
+                         "httpWarm": warm, "httpCold": cold,
+                         "total": total, "domRows": probe["rows"],
+                         "listHeld": probe["count"],
+                         "rowsVerdict": verdict,
+                         "target": (f"服务端中位 <{A11_INPROC_MAX_MS:.0f}ms；HTTP 热态中位 "
+                                    f"≤{A11_WARM_MAX_MS:.0f}ms；载入 ≥{A11_LOAD_MIN} 条后 "
+                                    f"0 < DOM 行 < {A11_ROWS_MAX} 且少于持有条数；"
+                                    "冷态只记录不设阈值（COLD）")},
+                        ensure_ascii=False)
+    return ok, detail
 
 
 def a11_mut(ctx) -> tuple[bool, str]:
-    """变异：假设没虚拟滚动（DOM 行节点 = 流条数）→ 判据必须红。"""
-    page = http_json(f"{ctx['api']}/api/stream?win=24h&limit=1")
-    total = page["data"]["counts"]["total"] or 0
-    fake_rows = total
-    ok = fake_rows < 200
-    return ok, json.dumps({"domRowsUnderMutation": fake_rows, "total": total},
-                          ensure_ascii=False)
+    """变异：**真的关掉虚拟滚动**（`?novirtual=1` → VirtualList 全量渲染）→ 行数判据必须红。
+
+    P1-2 原文：旧变异 `fake_rows < 200` 是自造数字，根本没关虚拟滚动。现在走产品自己的
+    开关（`ui/src/components/VirtualList.tsx` 读 `?novirtual=1` 时全量渲染），
+    走的是同一段渲染代码、同一个 DOM 探针、同一份 `_a11_rows_verdict`。
+
+    第二条反例：把页面指向一个死读口（整页 0 行）→ **下界**必须红
+    （旧判据 `rows is not None and rows < 200` 会让 0 行 PASS）。
+    """
+    static = ctx["static"]
+    if not static:
+        raise RuntimeError("缺 --static（这条变异要在浏览器里关虚拟滚动）")
+    novirtual = dom_probe(f"{static}/?api={ctx['api']}&novirtual=1", wait_ms=7000,
+                          scroll_rounds=A11_SCROLL_ROUNDS)
+    blank = dom_probe(f"{static}/?api=http://127.0.0.1:9", wait_ms=5000)
+    got_novirtual = _a11_rows_verdict(novirtual["rows"], novirtual["count"])
+    got_blank = _a11_rows_verdict(blank["rows"], blank["count"])
+    # 变异自证的期望：两条坏输入都必须让判据**红**。
+    # 返回的是"判据在坏输入下是否仍然绿"——绿了就是 MUTATION-FAIL。
+    ok = got_novirtual["ok"] or got_blank["ok"]
+    detail = json.dumps({
+        "novirtual": {"rows": novirtual["rows"], "listHeld": novirtual["count"],
+                      "verdict": got_novirtual},
+        "blankPage": {"rows": blank["rows"], "listHeld": blank["count"],
+                      "verdict": got_blank},
+        "note": "变异方向：关掉虚拟滚动 / 零行页面 → 行数判据都必须红"},
+        ensure_ascii=False)
+    return ok, detail
 
 
 # ── A-12 ────────────────────────────────────────────────────────────────
@@ -896,30 +1289,93 @@ def a13_mut(ctx) -> tuple[bool, str]:
 
 
 # ── F-7 / F-8：状态构造与「partial 已删」的证据（--f78）────────────────────
-def _copy_schema_only(source_db: str, target_db: str, drop: tuple[str, ...] = ()) -> None:
-    """把真库的**表结构**复制成一个空库（不带一行数据），可再删掉几张表来造「缺」。
+def _copy_schema_only(source_db: str, target_db: str, drop: tuple[str, ...] = (),
+                      with_views: bool = True) -> dict:
+    """把真库的**表结构 + 视图**复制成一个空库（不带一行数据），可再删掉几张表来造「缺」。
+
+    为什么要连 VIEW 一起复制（P1-1）：真库里 `citizens_all` 是 **VIEW**，而读口的
+    `STATS_TABLES` 守卫用 `table_exists`（认 table+view）。只复制表的空库副本缺这个 view
+    → `/api/stats` 回 `availability.state="missing"` → 前端 `isEmptyDb(facets, stats)`
+    在 stats 为 null 时返回 false → 三处"库是空的"退化成"窗口内没行为"。
+    也就是说：F-7「空态」那条判据当时是**被 fixture 判死的**，不是产品坏了。
+    所以 fixture 必须与真库**同构**：表 + 视图一起复制。
+
+    `with_views=False` 是**反向判据**的开关：造一个"缺视图"的副本，用来证明这条判据
+    真的有判别力——不复制视图，空态文案必须消失（判据必须红）。
 
     跳过 FTS5 虚拟表：`CREATE VIRTUAL TABLE` 依赖 fts5 模块，复制过去既没必要也可能失败
     （读写口只用它在别的视图里，工作台四个端点都不碰）。
+
+    返回 `{"tables": [...], "views": [...], "failed": [...]}`：跑坏了要看得见，不静默吞。
     """
     src = sqlite3.connect("file:" + source_db.replace("\\", "/") + "?mode=ro", uri=True)
     try:
         rows = list(src.execute(
-            "SELECT name, sql FROM sqlite_master WHERE type='table' AND sql IS NOT NULL"))
+            "SELECT type, name, sql FROM sqlite_master "
+            "WHERE type IN ('table','view') AND sql IS NOT NULL "
+            "ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, rowid"))
     finally:
         src.close()
     dst = sqlite3.connect(target_db)
+    copied: dict = {"tables": [], "views": [], "failed": []}
     try:
-        for name, sql in rows:
-            if name in drop or "VIRTUAL" in sql.upper():
+        for kind, name, sql in rows:
+            # `sqlite_%` 是引擎内部对象（sqlite_sequence / sqlite_stat1）：不许手工建，跳过。
+            if name.startswith("sqlite_") or name in drop or "VIRTUAL" in sql.upper():
+                continue
+            if kind == "view" and not with_views:
                 continue
             try:
                 dst.execute(sql)
-            except sqlite3.Error:
-                pass
+                copied["tables" if kind == "table" else "views"].append(name)
+            except sqlite3.Error as exc:
+                copied["failed"].append(f"{kind}:{name}:{exc}")
         dst.commit()
     finally:
         dst.close()
+    return copied
+
+
+#: P2-3：同秒并列的固定 fixture 条数（同源 → 同 rk → 顺序只由第三段 pk 决定）
+TIE_FIXTURE_ROWS = 2
+
+
+def _make_tie_fixture(source_db: str, target_db: str, since: str) -> dict:
+    """造一个**必有同秒并列**的库：从真库抄 2 行 `tool_activity`，把 ts 改成同一个值。
+
+    为什么必须造数据（P2-3）：`a03_mut` 的打散对象是"同一 `ts` 的多行"，而真实库里有没有
+    同秒并列是**数据的运气**（106 收尾那次首屏就没有 → `MUTATION-SKIP`：没自证）。判据的
+    判别力不该建立在运气上，所以变异自带一份固定输入。
+
+    为什么选 tool 源：它的 `rk` 固定是 0——`sk = ts|9-rk|pk`，同 ts 且同 rk 时先后只能由
+    第三段 pk 决定，轮转 pk 一定改变顺序；跨源（rk 不同）时 rk 先决定先后，打散就没有
+    作用对象（这也是"同秒但不同源"仍然测不出东西的原因）。
+
+    为什么用 `INSERT ... SELECT *` 而不是手写 INSERT：列清单跟着真库走，NOT NULL / 默认值
+    / 新加列都不会因为 fixture 手抄而漂。
+    """
+    copied = _copy_schema_only(source_db, target_db)
+    conn = sqlite3.connect(target_db)
+    try:
+        conn.execute("ATTACH DATABASE ? AS src", (source_db,))
+        conn.execute(
+            "INSERT INTO main.tool_activity SELECT * FROM src.tool_activity "
+            "WHERE seen_at >= ? ORDER BY seen_at DESC LIMIT ?",
+            (since, TIE_FIXTURE_ROWS))
+        conn.execute(
+            "UPDATE main.tool_activity SET seen_at = "
+            "(SELECT MAX(seen_at) FROM main.tool_activity)")
+        conn.commit()
+        rows = conn.execute(
+            "SELECT id, seen_at, session_key FROM tool_activity ORDER BY id").fetchall()
+        distinct = conn.execute(
+            "SELECT COUNT(DISTINCT seen_at) FROM tool_activity").fetchone()[0]
+    finally:
+        conn.close()
+    return {"copiedTables": len(copied["tables"]), "copiedViews": copied["views"],
+            "failed": copied["failed"],
+            "rows": [{"id": int(r[0]), "ts": r[1], "session": r[2]} for r in rows],
+            "distinctTs": int(distinct)}
 
 
 def _start_api(db_path: str, port: int) -> subprocess.Popen:
@@ -1012,8 +1468,26 @@ def _partial_leftovers(ctx) -> list[str]:
     return hits
 
 
+def _stats_state(api: str) -> dict:
+    """读 `/api/stats` 的 availability 与累计条数——P1-1「空态为什么消失」的直接证据。"""
+    try:
+        payload = http_json(f"{api}/api/stats?days=1", timeout=30)
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    avail = payload.get("availability") or {}
+    data = payload.get("data") or {}
+    tools = (data.get("tools") or {}) if isinstance(data, dict) else {}
+    return {"state": avail.get("state"), "detail": avail.get("detail"),
+            "cumulative": tools.get("cumulative")}
+
+
 def run_states(ctx, args) -> int:
-    """F-7 的"每个 state 至少被构造一次" + F-8 的"partial 已删"证据。"""
+    """F-7 的"每个 state 至少被构造一次" + F-8 的"partial 已删"证据。
+
+    P1-1 的落点在这里：`empty` 那个 fixture 现在与真库**同构**（表 + 视图），
+    并额外跑一条**反向判据**——复制表但不复制视图，空态文案必须消失
+    （证明"复制视图"这件事本身有判别力，不是把 FAIL 改成 SKIP 蒙过去）。
+    """
     static = ctx["static"]
     if not static:
         print("SKIP  F-7 状态构造  缺 --static（需要一个静态托管地址）")
@@ -1025,16 +1499,27 @@ def run_states(ctx, args) -> int:
     tmpdir = tempfile.mkdtemp(prefix="fish-wb-states-")
     procs: list[subprocess.Popen] = []
     servers: list[ThreadingHTTPServer] = []
-    results: list[tuple[str, bool, str]] = []
+    results: list[tuple[str, str, str]] = []
+    mutation_ok = True
     try:
         empty_db = os.path.join(tmpdir, "empty.sqlite")
-        _copy_schema_only(ctx["db"], empty_db)
+        copied = _copy_schema_only(ctx["db"], empty_db)
         missing_db = os.path.join(tmpdir, "missing.sqlite")
         _copy_schema_only(ctx["db"], missing_db, drop=("push_log",))
+        # 反向判据的 fixture：同样的表，**故意不复制视图**。
+        noview_db = os.path.join(tmpdir, "noview.sqlite")
+        copied_noview = _copy_schema_only(ctx["db"], noview_db, with_views=False)
+        print(f"# fixture 复制（P1-1）：同构副本 表 {len(copied['tables'])} / "
+              f"视图 {len(copied['views'])} 个（{copied['views']}）"
+              f" · 缺视图副本 表 {len(copied_noview['tables'])} / "
+              f"视图 {len(copied_noview['views'])} 个"
+              + (f" · 建库失败项 {copied['failed']}" if copied["failed"] else ""))
         empty_port = _free_port()
         procs.append(_start_api(empty_db, empty_port))
         missing_port = _free_port()
         procs.append(_start_api(missing_db, missing_port))
+        noview_port = _free_port()
+        procs.append(_start_api(noview_db, noview_port))
         error_server, error_port = _start_fake("error")
         servers.append(error_server)
         slow_server, slow_port = _start_fake("slow")
@@ -1050,17 +1535,50 @@ def run_states(ctx, args) -> int:
         for name, url, wait_ms, marker in cases:
             try:
                 probe = dom_probe(url, wait_ms=wait_ms)
-                ok = marker in probe["text"]
-                detail = json.dumps({"marker": marker, "chars": len(probe["text"]),
-                                     "domRows": probe["rows"]}, ensure_ascii=False)
+            except _PageNotApp as exc:
+                # P1-4：读到的不是应用页（浏览器错误页）→ SKIP，不冒充 FAIL。
+                results.append((name, "SKIP", str(exc)))
+                print(f"SKIP  F-7 状态 {name:<8} {exc}")
+                continue
             except RuntimeError as exc:
-                ok, detail = False, f"页面起不来：{exc}"
-            results.append((name, ok, detail))
+                results.append((name, "FAIL", f"页面起不来：{exc}"))
+                print(f"FAIL  F-7 状态 {name:<8} 页面起不来：{exc}")
+                continue
+            ok = marker in probe["text"]
+            payload: dict = {"marker": marker, "chars": len(probe["text"]),
+                             "domRows": probe["rows"]}
+            if name == "empty":
+                # 空态的根因证据：stats 必须是 ok/empty 且累计 0，不是 missing。
+                payload["stats"] = _stats_state(f"http://127.0.0.1:{empty_port}")
+            detail = json.dumps(payload, ensure_ascii=False)
+            results.append((name, "PASS" if ok else "FAIL", detail))
             print(f"{'PASS' if ok else 'FAIL'}  F-7 状态 {name:<8} {detail}")
+
+        # ── P1-1 反向判据：不复制 VIEW → 空态必须消失（新判据必须有判别力）──
+        try:
+            noview_probe = dom_probe(f"{static}/?api=http://127.0.0.1:{noview_port}",
+                                     wait_ms=7000)
+            noview_stats = _stats_state(f"http://127.0.0.1:{noview_port}")
+            marker_in_noview = CODES["emptyDb"][:12] in noview_probe["text"]
+            # 两件事都得成立：① stats 真的退化成 missing（fixture 确实缺了东西）；
+            # ② 空态文案真的消失（判据在坏输入下会红）。
+            degraded = noview_stats.get("state") == "missing"
+            mutation_ok = degraded and not marker_in_noview
+            verdict = "MUTATION OK" if mutation_ok else "MUTATION-FAIL"
+            print(f"{verdict}  P1-1 反向判据（缺视图 → 空态必须红）  "
+                  + json.dumps({"statsState": noview_stats.get("state"),
+                                "statsDetail": noview_stats.get("detail"),
+                                "emptyMarkerSeen": marker_in_noview,
+                                "chars": len(noview_probe["text"])},
+                               ensure_ascii=False))
+        except (_PageNotApp, RuntimeError) as exc:
+            mutation_ok = False
+            print(f"MUTATION-FAIL  P1-1 反向判据跑不起来：{type(exc).__name__}: {exc}")
 
         leftovers = _partial_leftovers(ctx)
         ok = not leftovers
-        results.append(("partial", ok, json.dumps(leftovers, ensure_ascii=False)))
+        results.append(("partial", "PASS" if ok else "FAIL",
+                        json.dumps(leftovers, ensure_ascii=False)))
         print(f"{'PASS' if ok else 'FAIL'}  F-8 partial 已删   "
               f"{json.dumps({'leftovers': leftovers}, ensure_ascii=False)}")
     finally:
@@ -1071,9 +1589,12 @@ def run_states(ctx, args) -> int:
             server.server_close()
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-    passed = sum(1 for _, ok, _ in results if ok)
-    print(f"\n# F-7/F-8 小结 {passed}/{len(results)} PASS")
-    return 0 if passed == len(results) else 1
+    passed = sum(1 for _, status, _ in results if status == "PASS")
+    skipped = sum(1 for _, status, _ in results if status == "SKIP")
+    failed = sum(1 for _, status, _ in results if status == "FAIL")
+    print(f"\n# F-7/F-8 小结 {passed}/{len(results)} PASS · {failed} FAIL · {skipped} SKIP"
+          f" · P1-1 反向变异 {'成立' if mutation_ok else '不成立'}")
+    return 0 if (failed == 0 and skipped == 0 and mutation_ok) else 1
 
 
 # ── 判据表 ───────────────────────────────────────────────────────────────
@@ -1135,6 +1656,10 @@ def main() -> int:
     parser.add_argument("--only", default="", help="只跑某一条（如 a02）")
     parser.add_argument("--f78", action="store_true",
                         help="额外跑 F-7 状态构造（ok/empty/missing/error/loading）与 F-8 证据")
+    parser.add_argument("--residue-browsers", action="store_true",
+                        help="残留自检顺带数「命令行里带 fish-wb 的 Edge」（慢：本机 ~14s）")
+    parser.add_argument("--sweep-residue", action="store_true",
+                        help="开跑前清掉上一轮的残留（只杀带 fish-wb 的 Edge、只删 >30 分钟的临时 profile）")
     parser.add_argument("--child", default="", help="内部用：变异子进程")
     args = parser.parse_args()
 
@@ -1153,12 +1678,29 @@ def main() -> int:
         dist_mtime = datetime.fromtimestamp(os.path.getmtime(dist_index), timezone.utc)
         print(f"# dist/index.html mtime {dist_mtime.strftime('%Y-%m-%dT%H:%M:%SZ')}")
 
+    # ── P2-5：残留自检（跑之前先记一笔，跑完再记一笔；两次读数才看得出"有没有收拾干净"）
+    if args.sweep_residue:
+        swept = _sweep_residue()
+        print(f"# 残留清理（P2-5）：杀掉陈旧的无头浏览器 {len(swept['killed'])} 个"
+              f"（PID {swept['killed'][:10]}）· 留住仍在跑的 {len(swept.get('keptFresh') or [])} 个"
+              f" · 删掉陈旧临时 profile {len(swept['dirsRemoved'])} 个"
+              + (f" · {swept['note']}" if swept.get("note") else ""))
+    before = _residue_report()
+    _print_residue("跑前", before)
+    if args.residue_browsers:
+        pids = _browsers_with_fishwb()
+        print(f"# 残留自检[跑前·精确] 命令行带 fish-wb 的 Edge = "
+              f"{len(pids) if pids is not None else '判不到'}"
+              + (f"（前 10 个 PID {pids[:10]}）" if pids else ""))
+
     ctx = build_ctx(args)
     if args.f78:
         try:
-            return run_states(ctx, args)
+            code = run_states(ctx, args)
         finally:
             ctx["conn"].close()
+        _print_residue("跑后", _residue_report())
+        return code
 
     mutation_fail = 0
     mutation_skip = 0
@@ -1224,6 +1766,14 @@ def main() -> int:
                     print(f"      ↳ 变异自证 OK（坏输入下必红）：{mutated_detail}")
     finally:
         ctx["conn"].close()
+
+    _print_residue("跑后", _residue_report())
+    if args.residue_browsers or _RESIDUE:
+        pids = _browsers_with_fishwb()
+        print(f"# 残留自检[跑后·精确] 命令行带 fish-wb 的 Edge = "
+              f"{len(pids) if pids is not None else '判不到'}"
+              + (f"（PID {pids}）" if pids else "")
+              + (f" · 本脚本删不掉的 profile：{_RESIDUE}" if _RESIDUE else ""))
 
     total = passed + failed + skipped
     print(f"\n# 汇总 {passed}/{total} PASS · {failed} FAIL · {skipped} SKIP · "
