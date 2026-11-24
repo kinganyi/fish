@@ -18,8 +18,13 @@
 
 ## 三条纪律（都是踩过的坑）
 
-1. **不做 `realpath`/不解析符号链接**：只做词法归一。解析符号链接要访问磁盘，
+1. **默认不做 `realpath`/不解析符号链接**：只做词法归一。解析符号链接要访问磁盘，
    在 hook 快路径上是不可接受的成本，而且会引入「同一文件两个路径」的不确定性。
+   **唯一例外**（2026-11-24 · 112 W-C）：项目解析需要跨过 junction/symlink/8.3 短路径
+   的两种写法，`longest_prefix` 在**文本比对没命中时**才补一次 `canonical_path`。
+   为什么可以：①只在 miss 时才付磁盘成本，命中路径零额外开销；②这条语义原先只在
+   `fish.resolve_project_by_cwd` 里，`fish_activity.resolve_project`（hook 实际走的
+   那条）没有——同一 payload 两个解析器给不同项目（112 §三 A2 实测反例）。
 2. **按路径分量判前缀，不做字符串包含**：`a/b` 不该命中 `a/bc`（那是两条不同的路）。
 3. **绝对 vs 相对是常态**：生产 `presence.surface` 里已有 `I:/app/...` 这样的绝对路径，
    只做「同基准前缀」比较会**静默漏判**（看着有判定，其实永远不命中）。
@@ -301,12 +306,33 @@ def path_hit(surface, target, *, min_segments: int = 2):
     return None
 
 
+def canonical_path(path) -> str:
+    """物理路径归一（junction / symlink / 8.3 短路径都折到同一目录）；失败退回文本归一。
+
+    2026-11-24（112 W-C · A2）：从 `fish._canonical_path` **原样下沉**到本叶子模块。
+    为什么方向是下沉：`fish_activity` 不能 import `fish`（`fish` 反过来 import 它，
+    会成环），而 `fish_surface` 是零 fish 依赖的叶子——两边都能用。
+
+    `realpath` 失败（盘不存在 / 没权限 / mock）时**不许抛**，退回文本归一即可。
+    """
+    text = normalize_path(path)
+    if not text:
+        return ""
+    try:
+        return normalize_path(os.path.realpath(str(path)))
+    except (OSError, ValueError):
+        return text
+
+
 def longest_prefix(path, pairs: Iterable):
     """按「最长前缀 + 路径分量边界」解析归属，返回 `(归一前缀, 值)`；无匹配返回 None。
 
-    与 `fish.resolve_project_by_cwd` 同语义（含 tie-break）：
+    与 `fish.resolve_project_by_cwd` 同语义（含 tie-break 与 canonical 兜底）：
       · 同长度不可能有两条不同前缀（主键唯一），但仍给稳定次序——
         按值字典序，免得将来碰上脏数据时输出随查询顺序漂；
+      · **文本比对没命中时再按 `canonical_path` 比一次**：junction / symlink / 8.3
+        短路径会让同一个物理目录有两种写法（112 §三 A2 的实测反例）。
+        物理比对只在 miss 时补，长度仍用**命中那条前缀**的归一键长——最长前缀语义不变；
       · **没有匹配返回 None，绝不回退到"猜一个"**（R1 的病根就是猜）。
 
     `pairs` 是 `(前缀, 值)` 的可迭代对象（workspace_map 的 `(path_prefix, project)`）。
@@ -314,15 +340,23 @@ def longest_prefix(path, pairs: Iterable):
     target = normalize_path(path)
     if not target:
         return None
+    target_canon = None              # 懒算：文本命中的路径不付 realpath 的磁盘成本
     best = None                     # (长度, 值, 归一前缀)
     for key, value in pairs:
         norm = normalize_path(key)
         if not norm:
             continue
         if target == norm or target.startswith(norm + "/"):
-            cand = (len(norm), value, norm)
-            if best is None or cand[0] > best[0] or (cand[0] == best[0] and cand[1] < best[1]):
-                best = cand
+            canon = norm
+        else:
+            if target_canon is None:
+                target_canon = canonical_path(path)
+            canon = canonical_path(key)
+            if not (target_canon == canon or target_canon.startswith(canon + "/")):
+                continue
+        cand = (len(canon), value, canon)
+        if best is None or cand[0] > best[0] or (cand[0] == best[0] and cand[1] < best[1]):
+            best = cand
     return (best[2], best[1]) if best else None
 
 def _path_inside(child, parent) -> bool:

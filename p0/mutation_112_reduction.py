@@ -42,6 +42,7 @@ from mutation_source import SourceText  # noqa: E402
 NEW_FILES = {
     "wa": "test_reduction_wa",
     "wb": "test_reduction_wb",
+    "wc": "test_reduction_wc",
 }
 
 MUTANTS = [
@@ -154,6 +155,32 @@ MUTANTS = [
         "must_fail": [
             "test_reduction_wb.AcceptRateSingleSourceTest"
             ".test_all_three_read_paths_call_the_one_function",
+        ],
+        "others": [],
+    },
+    # ── W-C ──────────────────────────────────────────────────────────────
+    {
+        "id": "WC-M1",
+        "file": "fish_surface.py",
+        "desc": "摘掉 canonical 兜底（junction 上两个解析器又分叉，112 §三 A2）",
+        "old": ('        if target == norm or target.startswith(norm + "/"):\n'
+                '            canon = norm\n'
+                '        else:\n'
+                '            if target_canon is None:\n'
+                '                target_canon = canonical_path(path)\n'
+                '            canon = canonical_path(key)\n'
+                '            if not (target_canon == canon '
+                'or target_canon.startswith(canon + "/")):\n'
+                '                continue\n'),
+        "new": ('        if target == norm or target.startswith(norm + "/"):\n'
+                '            canon = norm\n'
+                '        else:\n'
+                '            continue  # 变异：只做文本归一\n'),
+        "must_fail": [
+            "test_reduction_wc.JunctionParityTest.test_mapping_real_query_link",
+            "test_reduction_wc.JunctionParityTest.test_mapping_link_query_real",
+            "test_reduction_wc.JunctionParityTest"
+            ".test_longest_prefix_and_component_boundary_survive_realpath",
         ],
         "others": [],
     },

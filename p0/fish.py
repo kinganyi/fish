@@ -3904,65 +3904,39 @@ def normalize_workspace_path(path) -> str:
     return s.lower()
 
 
-def _canonical_path(path) -> str:
-    """物理路径归一（junction / symlink / 短路径都折到同一目录）；失败退回文本归一。
-
-    2026-10-27（C）：`C:\\Users\\x\\.dsh` 与 `I:\\...\\home` 是**同一个物理目录**，
-    只做文本归一它们永远是两个字符串：映射里写的是后者、hook 报的是前者 → 解析成 None。
-    `realpath` 解析失败（盘不存在/权限）时**不许抛**，退回文本归一即可。
-    """
-    text = normalize_workspace_path(path)
-    if not text:
-        return ""
-    try:
-        return normalize_workspace_path(os.path.realpath(str(path)))
-    except (OSError, ValueError):
-        return text
+# 物理路径归一（junction / symlink / 8.3 短路径）**唯一实现在 `fish_surface.canonical_path`**。
+#
+# 2026-11-24（112 W-C · A2）：原先这里有一份、`fish_surface` 没有，于是 hook 实际走的
+# `fish_activity.resolve_project`（→ `fish_surface.longest_prefix`）拿不到 realpath 兜底——
+# 同一 payload 两个解析器给不同项目（实测反例见 112 §三 A2）。
+# `fish._canonical_path` 这个名字保留为**转发别名**：既有调用与 `test_workspace_map` 依赖它，
+# 而它现在与 `fish_surface.canonical_path` 是**同一个对象**（不是副本）。
+_canonical_path = fish_surface.canonical_path
 
 
 def resolve_project_by_cwd(conn, cwd) -> "str | None":
     """按**最长前缀 + 路径分量边界**把工作区路径解析成项目前缀；没有匹配返回 None。
 
-    为什么不按"包含"匹配：`/a/b` 是 `/a/bc` 的字符串前缀，但**不是**它的父路径。
-    必须按分量边界判：`/a/b` 覆盖 `/a/b` 与 `/a/b/...`，不覆盖 `/a/bc`。
-    为什么最长优先：父子目录可以各有归属（`/a` → P1、`/a/b` → P2），
-    `/a/b/c` 应该属于更具体的 `/a/b`。
+    完整语义（最长前缀 / 分量边界 / 读侧归一 / canonical 兜底 / tie-break）只有一份：
+    `fish_surface.longest_prefix`。本函数只做两件事——**查表**，然后把比对交出去。
 
     为什么在 Python 里全表扫、不用 SQL LIKE：前缀里的 `_` / `%` 是 LIKE 的通配符，
     要正确匹配就得转义（转义写错是**静默错配**，最难查的那类 bug）；而这张表是按
     "项目"维护的配置表，行数是个位数。全扫 + 内存里比长度更不容易错，真到几千行再换。
 
-    读侧再归一一次：库里若有人手写了大写/尾斜杠的行，这里不让它变成幽灵路径
-    （写侧 set_workspace_mapping 已经归一，读侧这次是防手写数据）。
+    为什么读侧还要归一一次（在 `longest_prefix` 里）：库里若有人手写了大写/尾斜杠的行，
+    这里不让它变成幽灵路径（写侧 `set_workspace_mapping` 已经归一，读侧这次是防手写数据）。
 
-    2026-10-27（C · 链接坑）：文本归一之外**再按 `os.path.realpath` 比一次**——junction /
-    symlink / 8.3 短路径会让同一个物理目录有两种写法。最长前缀与分量边界的语义不变：
-    物理比对只在文本没命中时补一次，长度仍用**命中那条前缀**的长度（前缀越长越优先）。
+    为什么还要 canonical 兜底：junction / symlink / 8.3 短路径会让同一个物理目录有两种
+    写法（2026-10-27 的现场）。它只在文本没命中时补一次，最长前缀与分量边界语义不变。
 
     **没有匹配返回 None，绝不回退到"猜一个"**：R1 的病根就是猜（见
-    _resolve_injection_project 的四档说明）。返回 None 让上层能直说"未声明"。
+    `_resolve_injection_project` 的四档说明）。返回 None 让上层能直说"未声明"。
     """
-    target = normalize_workspace_path(cwd)
-    if not target:
-        return None
-    target_canon = _canonical_path(cwd)
-    best = None                       # (prefix_len, project)
-    for prefix, project in conn.execute(
-            "SELECT path_prefix, project FROM workspace_map").fetchall():
-        norm = normalize_workspace_path(prefix)
-        if not norm:
-            continue
-        canon = norm
-        if not (target == norm or target.startswith(norm + "/")):
-            canon = _canonical_path(prefix)       # C：两种写法指向同一物理目录
-            if not (target_canon == canon or target_canon.startswith(canon + "/")):
-                continue
-        key = (len(canon), project)
-        # 同长度不可能有两条不同前缀（主键唯一）；仍给一个稳定次序，
-        # 免得将来碰上脏数据时输出随查询顺序漂。
-        if best is None or key[0] > best[0] or (key[0] == best[0] and key[1] < best[1]):
-            best = key
-    return best[1] if best else None
+    pairs = conn.execute(
+        "SELECT path_prefix, project FROM workspace_map").fetchall()
+    hit = fish_surface.longest_prefix(cwd, pairs)
+    return hit[1] if hit else None
 
 
 def list_workspace_candidates(conn, cwd) -> list:

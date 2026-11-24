@@ -262,14 +262,18 @@ MUTATIONS = (
        "SUPPORTED_FORMATS = (store.FORMAT_DSH_V4,)  # 变异：v0 回到 unsupported_format")],
      "test_corpus_ingest_dsh.LegacyV0FormatTest"),
     ("C1", "项目解析按 realpath 补一次比对（链接/短路径） → 删掉物理比对分支",
-     [("fish.py",
-       "        canon = norm\n"
-       "        if not (target == norm or target.startswith(norm + \"/\")):\n"
-       "            canon = _canonical_path(prefix)       # C：两种写法指向同一物理目录\n"
+     [("fish_surface.py",
+       "        if target == norm or target.startswith(norm + \"/\"):\n"
+       "            canon = norm\n"
+       "        else:\n"
+       "            if target_canon is None:\n"
+       "                target_canon = canonical_path(path)\n"
+       "            canon = canonical_path(key)\n"
        "            if not (target_canon == canon or target_canon.startswith(canon + \"/\")):\n"
        "                continue\n",
-       "        canon = norm\n"
-       "        if not (target == norm or target.startswith(norm + \"/\")):\n"
+       "        if target == norm or target.startswith(norm + \"/\"):\n"
+       "            canon = norm\n"
+       "        else:\n"
        "            continue  # 变异：只做文本归一\n")],
      "test_workspace_map.RealpathMatchTest"),
     # ── 采集时间窗口（2026-10-27 用户决策：只投影最近 3 天）──
