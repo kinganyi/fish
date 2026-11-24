@@ -284,7 +284,12 @@ def _read_conn(db_path: str) -> sqlite3.Connection:
         try:
             conn.execute(pragma)
         except sqlite3.Error:
-            pass
+            # 这两句是**连接级调优提示**，不是正确性判据：SQLite 拒绝它（某些编译配置
+            # 不支持 temp_store、连接被换掉 pager 等等）只说明这条连接用不上这个提示，
+            # 后面真正的查询照跑，真错误会在那里原样抛出来。而它**每个读请求都跑一次**，
+            # 用 warn_ignored 会把同一条无害噪声刷满 stderr——日志是给"出了事没人知道"
+            # 用的，不是给"每次都没事"用的。
+            pass  # A档：提示失败 ≠ 数据错，且每次读口都跑，出声只会变成日志洪水
     return conn
 
 
@@ -552,6 +557,53 @@ def _kb_folder(rel: str) -> tuple[str, str]:
     return (head, head)
 
 
+def _visible_titles(conn: sqlite3.Connection, codes, vis=None) -> dict:
+    """按 code 集合取**允许显示**的标题；被可见性挡掉的 code 不出现在返回里。
+
+    ## 为什么标题单独取，而不是把谓词塞进聚合的 WHERE
+
+    推送面板三处标题（`topCodes` / `breakdown.kb.topFiles` / `events`）都来自
+    `code_index`，而 `push_log` 只是「推过什么」的事件流。可见性要挡的是**标题文本**：
+
+      · 把谓词加进聚合的 WHERE → private 的推送行从 `breakdown`/`topCodes`/`events`
+        里**消失**，而 `totals`（`push_stats`，不 join `code_index`）与 `channels`
+        （纯 `push_log`）不会少。「摘要五数相加 == 窗口总数」（V-31）在开关打开时
+        会当场断掉，而且断的是一个**正确性判据**，不是一句显示细节；
+      · 关着开关时又必须与旧行为逐字节等价（`_visibility_sql` 返回空片段）。
+
+    所以**计数一个不动，只把看不见的标题留空**——与工作台热搜（`collect_stats`）
+    同一条口径：行的存在是事实，标题是可见性管的。
+
+    ## 谓词从哪来
+
+    `vis = (vis_sql, vis_params)`，**缺省自己解析**（`fish_common._visibility_sql`
+    + `resolve_owner`）：可见性是默认行为，新调用点忘了传也不会漏过滤。
+    调用方在同一函数里已经算过谓词时传进来——一次读只解析一次身份，
+    也免得同一请求里两次读 `citizens`/`config`。
+
+    ## 为什么按 code 精确补，而不是在聚合里 LEFT JOIN 取
+
+    三处的 `LIMIT` 都在**聚合行**上（`topCodes` 12 条、`events` 20 条）。LEFT JOIN 取
+    标题的话，过滤只能落在行上，开关一开就变成「先 LIMIT 后过滤」少行；
+    这里先定行、再按 code 精确补齐，`LIMIT` 的语义一个字节都不动。
+    """
+    vis_sql, vis_params = (vis if vis is not None
+                           else fish_common._visibility_sql(
+                               conn, fish_common.resolve_owner(conn)))
+    wanted = sorted({code for code in codes if code})
+    if not wanted:
+        return {}
+    titles: dict = {}
+    for start in range(0, len(wanted), 500):      # SQLite 参数上限 999：按 500 切
+        chunk = wanted[start:start + 500]
+        for row in conn.execute(
+                "SELECT code, title FROM code_index WHERE code IN ("
+                + ",".join("?" * len(chunk)) + ")" + vis_sql,
+                [*chunk, *vis_params]):
+            titles[row["code"]] = row["title"] or ""
+    return titles
+
+
 # ── 只读：概览 ──────────────────────────────────────────────────────────
 def overview(db_path: str, days: int = DEFAULT_DAYS) -> dict:
     """推送面板的整页数据（契约见 `docs/109-推送面板-设计与验收-20261124.md`）。
@@ -679,13 +731,20 @@ def _build_overview(conn: sqlite3.Connection, *, days: int, now: datetime) -> di
     }
 
     # ── ⑤ 诊断：开放词表 / artifact ────────────────────────────────────
+    # 可见性谓词在本函数里解析一次：⑤ 的判定条件**就是标题内容**（`title LIKE '%…%'`），
+    # 看不见的标题不该让这个计数变大；⑦ 的标题也从同一个谓词过（见 `_visible_titles`）。
+    vis_sql, vis_params = fish_common._visibility_sql(
+        conn, fish_common.resolve_owner(conn))
     keywords = tuple(fish_common.ATTENTION_OPEN_KEYWORDS)
-    like = " OR ".join(["ci.title LIKE ?"] * len(keywords))
+    like = " OR ".join(["title LIKE ?"] * len(keywords))
     open_row = conn.execute(
         "SELECT COUNT(*) AS pushes, COUNT(DISTINCT pl.code) AS codes FROM push_log pl "
-        "JOIN code_index ci ON ci.code = pl.code "
-        f"WHERE pl.pushed_at >= ? AND ({like})",
-        (since, *[f"%{word}%" for word in keywords])).fetchone()
+        # 原来是 `JOIN code_index ci … WHERE ci.title LIKE ?`：`code_index.code` 是主键
+        # （一对一），所以「push 行的 code 落在命中集合里」与它命中**同一批行**；
+        # 换成子查询后谓词挂在裸列上，不必给共享原语 `_visibility_sql` 加别名参数。
+        f"WHERE pl.pushed_at >= ? AND pl.code IN (SELECT code FROM code_index "
+        f"WHERE ({like}){vis_sql})",
+        (since, *[f"%{word}%" for word in keywords], *vis_params)).fetchone()
     open_pushes = int(open_row["pushes"] or 0)
     open_loop = {
         "pushes": open_pushes,
@@ -731,19 +790,21 @@ def _build_overview(conn: sqlite3.Connection, *, days: int, now: datetime) -> di
     }
 
     # ── ⑦ Top offenders ───────────────────────────────────────────────
+    # 标题**不在这条聚合里取**：`LIMIT` 落在聚合行上，先过滤标题会「少行」。
+    # 先定这 12 条，再用同一个可见性谓词按 code 精确补齐（见 `_visible_titles`）。
     top_codes = []
     for row in conn.execute(
             "SELECT pl.code AS code, COUNT(*) AS n, "
             "SUM(CASE WHEN pl.reaction='accepted' THEN 1 ELSE 0 END) AS accepted, "
             "SUM(CASE WHEN pl.reaction='ignored' THEN 1 ELSE 0 END) AS ignored, "
-            "MAX(pl.pushed_at) AS last_at, ci.title AS title, ci.project AS project, "
+            "MAX(pl.pushed_at) AS last_at, ci.project AS project, "
             "ci.mem_type AS mem_type "
             "FROM push_log pl LEFT JOIN code_index ci ON ci.code = pl.code "
             "WHERE pl.pushed_at >= ? GROUP BY pl.code "
             "ORDER BY n DESC, last_at DESC LIMIT ?", (since, TOP_CODES_LIMIT)):
         top_codes.append({
             "code": row["code"] or "",
-            "title": row["title"] or "",
+            "title": "",          # 补齐：见下方 `_visible_titles`（不在聚合里取）
             "project": row["project"],
             "kind": classify_kind(row["code"], row["mem_type"]),
             "count": int(row["n"] or 0),
@@ -751,6 +812,10 @@ def _build_overview(conn: sqlite3.Connection, *, days: int, now: datetime) -> di
             "ignored": int(row["ignored"] or 0),
             "lastAt": row["last_at"],
         })
+    titles = _visible_titles(conn, [item["code"] for item in top_codes],
+                             vis=(vis_sql, vis_params))
+    for item in top_codes:
+        item["title"] = titles.get(item["code"], "")
 
     elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
     # `code_index` 的 `rows` 是**这张表的行数**（原来这里写的是 `len(top_codes)`，
@@ -822,10 +887,15 @@ def _build_breakdown(conn: sqlite3.Connection, *, since: str, open_loop: dict) -
        和 `kinds` 的相等关系是**另一条独立路径**，交给判据去对（V-31），不在这里靠赋值保证。
     3. 每一行都是同一形状 `{key,label,total,accepted,ignored,pending,share}`
        （`topFiles` 例外：它是「文件」不是「分组」，按 code/rel/title 给），
-       前端不用为不同的组写不同的字段判空。
+       前端不用为不同的组写不同的字段判空。`topFiles[].title` 是**可见读路径**，
+       经 `_visible_titles` 补齐（看不见的留空，计数不动——理由见那个函数）。
     4. **空库 / 单通道不抛**：所有桶为空时各组返回 `[]`、total 为 0；`git_repo` 缺表时
        仓库名退回编码本身（那一列不是判据，读不到就不猜）。
     """
+    # 标题补齐要用的可见性谓词：一次解析，交给 `_visible_titles`（不在聚合里过滤）。
+    vis_sql, vis_params = fish_common._visibility_sql(
+        conn, fish_common.resolve_owner(conn))
+
     # ── 内容源 ① 记忆：一条 SQL 同时喂 type / project / channel ──────────
     by_type: dict = {}
     by_project: dict = {}
@@ -858,19 +928,20 @@ def _build_breakdown(conn: sqlite3.Connection, *, since: str, open_loop: dict) -
     memory_total = sum(int(item["total"]) for item in by_type.values())
 
     # ── 内容源 ② 知识库：目录 / 通道 / top 文件（一条 SQL）────────────────
+    # 这条只要计数与 code：标题从 `_visible_titles` 取（见那个函数），
+    # 原来 `LEFT JOIN code_index` 只为拿 `ci.title`，现在一整列都不取了。
     kb_by_folder: dict = {}
     kb_by_channel: dict = {}
     kb_files: dict = {}
     for row in conn.execute(
             "SELECT pl.code AS code, COALESCE(pl.channel,'') AS chan, "
-            "COALESCE(ci.title,'') AS title, "
             "COUNT(*) AS total, "
             "SUM(CASE WHEN pl.reaction='accepted' THEN 1 ELSE 0 END) AS accepted, "
             "SUM(CASE WHEN pl.reaction='ignored' THEN 1 ELSE 0 END) AS ignored, "
             "SUM(CASE WHEN pl.reaction IS NULL THEN 1 ELSE 0 END) AS pending "
-            "FROM push_log pl LEFT JOIN code_index ci ON ci.code = pl.code "
+            "FROM push_log pl "
             "WHERE pl.pushed_at >= ? AND pl.code LIKE 'kb:%' "
-            "GROUP BY pl.code, chan, ci.title", (since,)):
+            "GROUP BY pl.code, chan", (since,)):
         code = row["code"] or ""
         _vault, rel = _kb_vault_rel(code)
         folder_key, folder_label = _kb_folder(rel)
@@ -880,13 +951,16 @@ def _build_breakdown(conn: sqlite3.Connection, *, since: str, open_loop: dict) -
         item = kb_files.get(code)
         if item is None:
             item = kb_files[code] = {"code": code, "rel": rel,
-                                     "title": (row["title"] or "").strip(),
+                                     "title": "",     # 补齐：见下方 top_files
                                      "total": 0, "accepted": 0, "ignored": 0, "pending": 0}
         for field in ("total", "accepted", "ignored", "pending"):
             item[field] += int(row[field] or 0)
     kb_total = sum(int(item["total"]) for item in kb_files.values())
     top_files = sorted(kb_files.values(), key=lambda item: (-item["total"], item["code"]))[:5]
+    kb_titles = _visible_titles(conn, [item["code"] for item in top_files],
+                                vis=(vis_sql, vis_params))
     for item in top_files:
+        item["title"] = kb_titles.get(item["code"], "").strip()
         # `rel` 与 `title` **至少一个可读**：两个都空时退回编码本身（空白比编码更难查）。
         if not item["rel"] and not item["title"]:
             item["rel"] = item["code"]
@@ -1014,6 +1088,9 @@ def events(db_path: str, *, limit: int = EVENTS_LIMIT_DEFAULT,
 
     **不设时间窗**：这一块叫「最近推送」，问的是「刚发生了什么」，不是「30 天内」。
     加窗口会让「昨天刚停推」这种状态看起来像「什么都没有」（空态与窗口空态混淆）。
+
+    **标题按可见性取**（`_visible_titles`）：private 的推送行**仍在事件流里**——它确实是
+    「推过什么」的一行事实，计数与 `LIMIT` 都不动；但标题不显示给看不见它的人。
     """
     limit = check_limit(limit)
     channel = check_channel(channel)
@@ -1024,6 +1101,9 @@ def events(db_path: str, *, limit: int = EVENTS_LIMIT_DEFAULT,
         problem = _guard_tables(conn, ("push_log",))
         if problem:
             raise RuntimeError(problem)
+        # 谓词在这里解析一次，交给标题取口（同一次读里不重复解析身份）。
+        vis_sql, vis_params = fish_common._visibility_sql(
+            conn, fish_common.resolve_owner(conn))
         where = ["1=1"]
         args: list = []
         if channel:
@@ -1040,16 +1120,18 @@ def events(db_path: str, *, limit: int = EVENTS_LIMIT_DEFAULT,
         rows = conn.execute(
             "SELECT pl.id AS id, pl.channel AS channel, pl.code AS code, "
             "pl.project AS project, pl.pushed_at AS pushed_at, pl.reaction AS reaction, "
-            "pl.latency_sec AS latency_sec, ci.title AS title, ci.mem_type AS mem_type "
+            "pl.latency_sec AS latency_sec, ci.mem_type AS mem_type "
             "FROM push_log pl LEFT JOIN code_index ci ON ci.code = pl.code "
             f"WHERE {' AND '.join(where)} ORDER BY pl.id DESC LIMIT ?", tuple(args)).fetchall()
+        titles = _visible_titles(conn, [row["code"] for row in rows],
+                                 vis=(vis_sql, vis_params))
     finally:
         conn.close()
     items = [{
         "id": int(row["id"]),
         "channel": row["channel"] or "",
         "code": row["code"] or "",
-        "title": row["title"] or "",
+        "title": titles.get(row["code"] or "", ""),
         "project": row["project"],
         "kind": classify_kind(row["code"], row["mem_type"]),
         "pushedAt": row["pushed_at"],

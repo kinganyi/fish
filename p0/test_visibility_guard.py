@@ -876,6 +876,14 @@ FILTERED = {
     "gen_index_md.py:main":               "默认剔除 private（第 43 轮补；--include-private 可显式放行）",
     # 第 108/P2-4 轮：工作台热搜榜显示标题，原来是一条裸查（开关打开时 private 会露）。
     "fish_workbench_api.py:collect_stats": "_visibility_sql（P2-4 补：热搜标题是可见读路径）",
+    # 第 113 轮（推送面板）：三处 `code_index.title` 读口 —— 推送面板的标题原来由
+    # `push_log LEFT JOIN code_index` 直接带出来，开关打开时 private 标题照样显示。
+    # 接法与工作台同源：谓词仍来自 `_visibility_sql`，只是**标题单独取**（聚合里过滤会
+    # 改计数，见 `_visible_titles` 的函数头），`topFiles`/`topCodes`/`events` 三处都走它。
+    "fish_push_audit.py:_visible_titles":  "_visibility_sql（标题的唯一取口；缺省自己解析 viewer，默认就带守卫）",
+    "fish_push_audit.py:_build_overview":  "_visibility_sql（openLoop 的判定条件就是标题 + topCodes 的标题补齐）",
+    "fish_push_audit.py:_build_breakdown": "_visibility_sql（kb.topFiles 的标题经 _visible_titles 补齐）",
+    "fish_push_audit.py:events":           "_visibility_sql（事件流的标题经 _visible_titles 补齐，行与 LIMIT 不动）",
 }
 
 BY_EXACT_CODE = {
