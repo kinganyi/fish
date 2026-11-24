@@ -653,9 +653,10 @@ class WbLiveTreeTest(unittest.TestCase):
 
         113 §4.3 写的是"`basis='path'` 且父同时出现在 `basis='runtime'` 行里的 = 0"。
         实况：lead 目录下有 1,419 份 transcript，其中只有 818 份在 `runtime.json` 的
-        `members[]` 里——剩下 601 份是**更早的子代理**（runtime 只是当前快照）。
-        所以按父聚合必然 >0；真正成立的不变式是**会话级**的：runtime 声明过的
-        transcript 一个都不许落成 path（上一条判据 `leaked == []`）。
+        `members[]` 里——剩下 601 份是**更早的子代理**（runtime 只是当前快照）；
+        其中 czhy-p5 那 30 份的 lead 没有任何带 transcript 的成员，所以字面式读数
+        实测 **571**（不是 601）。按父聚合必然 >0；真正成立的不变式是**会话级**的：
+        runtime 声明过的 transcript 一个都不许落成 path（上一条判据 `leaked == []`）。
         """
         runtime_parents = {n["parent_session"] for n in self.nodes if n["basis"] == "runtime"}
         literal = [n["session_id"] for n in self.nodes
