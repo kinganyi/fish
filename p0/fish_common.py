@@ -455,6 +455,50 @@ def parse_utc(s):
 def local_date() -> str:
     return datetime.datetime.now().strftime("%y%m%d")
 
+
+# ---------------------------------------------------------------- 推送词表与采纳率
+#
+# 2026-11-24（112 W-B · A1/N-3）：这两件东西各只留一份实现。
+#
+# ## 推送渠道词表（`push_log.channel`）
+#
+# 词表之前在**五处**声明、给了**三种**答案（`fish.py:302` 注释写 4 个还漏了 prompt、
+# `fish.py:1245` 常量写 5 个、`fish_push_audit.py:122` 写 3 个并自称唯一真相、
+# UI 注释写 3 个、`fish_schema` 一个约束都没有）。
+#
+# 根因是**两个维度被并进了一个词表**：多出的两个值各自来自别处——
+#   · `hook`        → `session_context.channel` 的值（`cli/hook/parent`，另一张表）；
+#   · `situational` → 候选 **kind** 的值（`fish_push.py` 的 kind 字段）。
+# 所以**实际数据只有三个**（生产 6,326 行实测；写端四个调用点也只写这三个），
+# UI 词表就用这三个；两个历史词只保留**写入兼容**，并显式登记在下面——
+# 删掉它们不会报错，只会让库里的历史行/外部调用方被新校验挡回去。
+
+#: 推送渠道的**唯一真相**（`push_log.channel`）；顺序即 UI 的显示顺序。
+PUSH_CHANNELS = ("inject", "prompt", "tool_after")
+#: 历史词（各自属于另一个维度，见上）；**只做写入兼容与读端识别**，不进 UI 词表。
+LEGACY_PUSH_CHANNELS = ("hook", "situational")
+#: 读端筛选允许的值 = 实际三词 + 历史词。旧故障是"写端接受五词、读端只认三词"——
+#: 写进去了却筛不出来（112 §三 A1）。写端另有一份**每次现算**的集合（见
+#: `fish._push_write_channels`）：那份要能被测试临时 patch 掉一个词。
+PUSH_CHANNELS_WRITE = PUSH_CHANNELS + LEGACY_PUSH_CHANNELS
+
+
+def accept_rate(accepted, ignored):
+    """推送采纳率 = `accepted / (accepted + ignored)`；没有已判 → `None`（不是 0）。
+
+    唯一实现（112 N-3 之前三份：`fish.push_stats` 内联两处、`fish_push_audit._rate`、
+    `fish_workbench_api.collect_stats` 的推送 Top）。第三处的注释自己写着
+    "与 push_stats 同一分母"——**用文字保证同步就是没保证**。
+
+    **分母口径不许改**：已判 = accepted + ignored（pending 不进分母）。
+    空数据回 `None` 不是 0：0 表示"推了但没人理"，None 表示"还没推过"，
+    混用会让"还没开始推"看起来像"推了没用"。
+    """
+    accepted = int(accepted or 0)
+    ignored = int(ignored or 0)
+    decided = accepted + ignored
+    return (accepted / decided) if decided else None
+
 def _presence_columns(conn) -> tuple:
     """`presence` 当前真实列名（按声明序）。表不存在 → `()`。"""
     try:

@@ -118,8 +118,10 @@ EVENTS_LIMIT_MAX = 100
 TOP_CODES_LIMIT = 12
 CACHE_TTL_S = 15.0
 
-#: 通道词的唯一真相（`push_log.channel`）。顺序即 UI 的显示顺序。
-CHANNELS = ("inject", "prompt", "tool_after")
+#: 通道词的唯一真相在 `fish_common.PUSH_CHANNELS`（**同一个对象**，不是副本）。
+#: 顺序即 UI 的显示顺序；历史词 `hook`/`situational` 只做写入兼容与读端识别，
+#: 不进这份 UI 词表（聚合时追加成额外行并标 `legacy=True`，见 112 W-B · A1）。
+CHANNELS = fish_common.PUSH_CHANNELS
 #: `events` 允许的 reaction 过滤值。**`pending` = 待判**（库里 `reaction IS NULL`）。
 #:
 #: 为什么不是空串（评审 🟠-2）：`parse_qs` 默认把 `reaction=` 丢成「没有这个参数」，
@@ -324,11 +326,16 @@ def check_limit(limit) -> int:
 
 
 def check_channel(channel) -> str | None:
+    """筛选参数校验：**写端接受什么，这里就接受什么**（含历史词）。
+
+    旧故障（112 §三 A1）：写端接受 5 个值、这里只认 3 个 → 历史词写进去了却筛不出来。
+    实际三词仍是 UI 词表；历史词只用于"把旧数据筛出来"，聚合侧会标 `legacy`。
+    """
     raw = "" if channel is None else str(channel).strip()
     if not raw:
         return None
-    if raw not in CHANNELS:
-        raise ValueError(f"channel 只能是 {list(CHANNELS)}，收到 {raw}")
+    if raw not in fish_common.PUSH_CHANNELS_WRITE:
+        raise ValueError(f"channel 只能是 {list(fish_common.PUSH_CHANNELS_WRITE)}，收到 {raw}")
     return raw
 
 
@@ -476,12 +483,6 @@ def _prefix_sql(column: str) -> str:
             f"THEN substr({column}, 1, instr(COALESCE({column},''), ':') - 1) ELSE '' END")
 
 
-def _rate(accepted: int, ignored: int):
-    """采纳率：分母 = 已判（accepted + ignored）；没有已判回 `None`（不是 0）。"""
-    decided = accepted + ignored
-    return (accepted / decided) if decided else None
-
-
 # ── 二级拆解的分组小工具（只有这一处实现）──────────────────────────────
 def _blank_row(key: str, label: str) -> dict:
     return {"key": key, "label": label, "total": 0, "accepted": 0,
@@ -616,7 +617,10 @@ def _build_overview(conn: sqlite3.Connection, *, days: int, now: datetime) -> di
             "accepted": accepted,
             "ignored": ignored,
             "pending": int(row["pending"] or 0) if row else 0,
-            "acceptRate": _rate(accepted, ignored),
+            "acceptRate": fish_common.accept_rate(accepted, ignored),
+            # 历史词（hook/situational）出现在这里说明库里有旧数据：显式标出来，
+            # 免得它看起来像"当前还会写入的通道"（UI 词表只有实际三词）。
+            "legacy": name in fish_common.LEGACY_PUSH_CHANNELS,
         })
 
     # ── ③ kinds（mem_type 优先 → 前缀兜底 → memory）────────────────────
@@ -977,14 +981,19 @@ def _build_breakdown(conn: sqlite3.Connection, *, since: str, open_loop: dict) -
 
 
 def _session_tag(session_key: str | None) -> str:
-    """人类面的会话短标识：复用 `fish_naming.session_short`（4→6→8 避撞阶梯）。"""
+    """人类面的会话短标识：正常路径与兜底路径是**同一个函数**（112 W-B · N-5）。
+
+    旧实现是两条路径各一份取法（正常路径取 id 前 4–8 位、兜底路径取末 4 位），
+    同一个会话能显示成两个都"看着对"的标签。现在只有 `fish_naming.session_short`
+    一份；**空标签的展示策略由调用点决定**（这里是 `(未归属)`，面板侧是 `""`）。
+    """
     if not session_key:
         return "(未归属)"
     try:
         import fish_naming
-        return fish_naming.session_short(session_key) or fish_ui.session_tag(session_key)
-    except Exception:  # noqa: BLE001  短标识不是判据，取不到就退回 host#末4位
-        return fish_ui.session_tag(session_key)
+        return fish_naming.session_short(session_key)
+    except Exception:  # noqa: BLE001  短标识不是判据：取不到就给空串，不编一个
+        return ""
 
 
 # ── 只读：最近推送事件 ──────────────────────────────────────────────────

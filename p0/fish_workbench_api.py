@@ -46,12 +46,12 @@ fish 工作台首屏要一条**真实**的五源合流时间线：工具动作�
 
 - 只读连接与写拒绝证明：`fish_ui.open_readonly` / `fish_ui.assert_write_rejected`
 - 人名：`fish_naming.disambiguate`（经 `base_label`，绝不吐公民 ID）
-- 会话短标识：`fish_naming.session_short`（4→6→8 避撞阶梯），非法会话键回落
-  `fish_ui.session_tag`
+- 会话短标识：`fish_naming.session_short`（**唯一实现**，4→6→8 避撞阶梯；
+  空/非法键给空串，标签怎么展示由调用点决定——112 W-B · N-5）
 - 宿主：**一律取 `session_key` 前缀**（实测 `tool_activity.host` 列与之一致率仅 2.5%，
   详见 §1.2六）；`citizens_all.host` 是自报值域，另作「公民档案的宿主」
-- 推送采纳率：`fish.push_stats(...)` 的 `accept_rate`（分母 `decided = accepted + ignored`；
-  无已判时回 `None` 不回 0）——这里**不重算**
+- 推送采纳率：`fish_common.accept_rate` / `fish.push_stats(...)` 的 `accept_rate`
+  （分母 `decided = accepted + ignored`；无已判时回 `None` 不回 0）——这里**不重算**
 
 ## 用
 
@@ -689,7 +689,11 @@ def load_citizen_labels(conn: sqlite3.Connection, citizen_ids) -> dict:
 
 
 def session_tag(session_key: str | None) -> str:
-    """会话短标识：优先 `fish_naming.session_short`（4→6→8），非法键回落 `fish_ui.session_tag`。
+    """会话短标识：**只有一份实现**（`fish_naming.session_short`；112 W-B · N-5）。
+
+    旧实现是"正常路径 `session_short` → 兜底 `fish_ui.session_tag`（取末 4 位）"，
+    同一个会话两条路径给出两个都"看着对"的标签。现在两处同取**前缀**，兜底分支
+    不再有意义；空标签的展示策略由调用点决定（面板这里是 `""`）。
 
     结果缓存（F-3）：`session_short` 每次要跑一遍避撞阶梯，单次 ~30 µs；500 条的页要调它
     1.8k 次（实测占 `limit=500` 总耗时的 55 ms）。会话键与短标识在一次进程生命周期内不变，
@@ -702,7 +706,7 @@ def session_tag(session_key: str | None) -> str:
 def _session_tag_cached(key: str) -> str:
     if not key:
         return ""
-    return fish_naming.session_short(key) or fish_ui.session_tag(key) or ""
+    return fish_naming.session_short(key)
 
 
 def host_from_session(session_key: str | None) -> str:
@@ -1526,14 +1530,13 @@ def collect_stats(conn: sqlite3.Connection, *, days: int, top: int) -> dict:
         for r in top_rows:
             accepted = int(r["accepted"] or 0)
             ignored = int(r["ignored"] or 0)
-            decided = accepted + ignored
             push_top.append({
                 "code": r["code"] or "",
                 "pushed": int(r["pushed"] or 0),
                 "accepted": accepted, "ignored": ignored,
                 "pending": int(r["pending"] or 0),
-                # 与 push_stats 同一分母（decided = accepted + ignored）；无已判回 None 不回 0
-                "rate": (accepted / decided) if decided else None,
+                # 与 push_stats 同一个函数（fish_common.accept_rate）；无已判回 None 不回 0
+                "rate": fish_common.accept_rate(accepted, ignored),
                 "lastPushedAt": r["last"],
             })
         channels = conn.execute(

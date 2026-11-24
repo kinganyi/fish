@@ -44,6 +44,7 @@ fish 的设计哲学是"单机 SQLite，无外部服务依赖"。为了一屏仪
 """
 from __future__ import annotations
 from fish_common import warn_ignored
+import fish_naming   # 会话短标识的唯一实现（叶子：只 import re + fish_hosts_vocab）
 
 import argparse
 import json
@@ -96,17 +97,18 @@ def assert_write_rejected(conn: sqlite3.Connection) -> None:
 
 # ── 可读名（人类面契约）──────────────────────────────────────────────────
 def session_tag(session_key: str) -> str:
-    """从 session_key 取人类可读的短标识。
+    """`session_key` → 人类可读短标识（**唯一实现**：`fish_naming.session_short`）。
 
     契约（docs/design/03-board-collision.md §5）：人类面**永不含完整会话键**，
-    形如 `名字·dsh#88f9`。这里只取宿主 + 末 4 位。
+    形如 `名字·dsh#88f9`。
+
+    2026-11-24（112 W-B · N-5）：旧实现是**第二份**短标签逻辑，而且取 id 的**末** 4 位；
+    正常路径（`fish_naming.session_short`）取**前** 4–8 位。于是同一个会话在正常路径
+    显示 `dsh#88f9`、在兜底路径显示 `dsh#b6a5`——两种都"看着对"，没有任何地方会报错。
+    现在只取**同一端**（前缀）且只有一份实现；非法的会话键给空串，
+    **空标签由调用点决定**（审计侧 `(未归属)`、面板侧 `""`）。
     """
-    if not session_key:
-        return ""
-    host, _, rest = session_key.partition(":")
-    host = host or "?"
-    tail = rest[-4:] if len(rest) >= 4 else rest
-    return f"{host}#{tail}"
+    return fish_naming.session_short(session_key)
 
 
 def readable_name(display_name: str | None, session_key: str) -> str:

@@ -90,7 +90,8 @@ import fish_common  # noqa: F401 —— 模块本身也要在（判据 J1d 查�
 import fish_profile
 from fish_common import (  # noqa: F401
     _exc_text, count_tokens, fts_match_expr, fts_text, index_tokens, iso_local,
-    now_utc, ulid, citizen_ids_known, warn_ignored
+    now_utc, ulid, citizen_ids_known, warn_ignored,
+    LEGACY_PUSH_CHANNELS, PUSH_CHANNELS,      # 推送渠道词表的唯一真相（112 W-B · A1）
 )
 
 # 原始对话语料层（2026-10-27 · 语料层 T01/T02）：独立库 `corpus.sqlite`，与主库零耦合。
@@ -299,7 +300,8 @@ def normalize_occurred_at(value):
 # 压在 JSON 里每次都得解包再算，ix_push_code 也会变成空转。
 #
 # 字段语义：
-#   channel       inject | hook | tool_after | situational（代码里校验，见 PUSH_CHANNELS）
+#   channel       inject | prompt | tool_after（词表唯一真相在 `fish_common.PUSH_CHANNELS`；
+#                 历史词 hook/situational 只在写入校验里兼容，见 `_push_write_channels`）
 #   budget_tokens 这次推送**批次**占的预算（同批次 N 行同值，不是单条成本）
 #   candidate_id  候选池 id —— 候选池没实现之前恒为 NULL（**不许编**）
 #   reaction      NULL=待判 | accepted | ignored | expired
@@ -1242,13 +1244,27 @@ def access_log_rows(conn, code=None, citizen_id=None, session_key=None, via=None
 #   push_log          = **这一次推送**：我们主动塞了什么、占多少预算、有没有反应
 # inject 已经写过 access_log(via='push')——那记的是"这条被展示了"，记不出"这次推送批次"。
 # 而批次恰恰是时机策略的计量单位：推 3 条读了 1 条 ≠ 推 1 条读了 1 条。
-PUSH_CHANNELS = ("inject", "hook", "tool_after", "situational", "prompt")
+# 渠道词表：**唯一真相在 `fish_common.PUSH_CHANNELS`**（112 W-B · A1）。
+# `fish.PUSH_CHANNELS` 是从 `fish_common` 再导出的同一个对象（不是副本）——测试与
+# 既有调用方继续用这个名字；`fish_push_audit.CHANNELS` 也是同一个对象。
+# 词表里只有实际三词；`hook`/`situational` 两个历史词各自来自另一个维度
+# （会话通道 / 候选 kind），只保留写入兼容，见下面的 `_push_write_channels`。
 # 反应值是一个**封闭词表**（NULL=待判 / accepted / ignored / expired），但它没有写入校验点：
 # reaction 只由 mark_push_accepted 与 close_stale_pushes 两个函数写，取值写死在 SQL 里。
 # 刻意不设 PUSH_REACTIONS 常量：现在没有任何地方**校验**它，那只会变成一份会漂移的注释。
 # 也刻意没有 dismissed：它需要"用户主动关掉推送"这个信号源，现在没有，不许编。
 
 _UNSET = object()          # "不过滤"的哨兵；None 本身就是 reaction 的合法取值（待判）
+
+
+def _push_write_channels() -> tuple:
+    """写端接受的渠道 = 实际三词 + 历史词；**每次现算**，不预先拼常量。
+
+    为什么现算：`test_prompt_push.test_prompt_not_in_channels_goes_red` 会
+    `mock.patch.object(fish, "PUSH_CHANNELS", (...))` 来证明"少一个值就响亮失败"。
+    预先拼好的元组会让那个补丁失效——判据就此变成假绿。
+    """
+    return tuple(PUSH_CHANNELS) + tuple(LEGACY_PUSH_CHANNELS)
 
 
 def append_push_log(conn, codes, *, channel, session_key=None, citizen_id=None,
@@ -1268,9 +1284,10 @@ def append_push_log(conn, codes, *, channel, session_key=None, citizen_id=None,
     codes = [c for c in (codes or []) if c]
     if not codes:
         return 0
-    if channel not in PUSH_CHANNELS:
+    if channel not in _push_write_channels():
         raise ValueError(
-            f"未知推送渠道 channel={channel!r}（可用：{', '.join(PUSH_CHANNELS)}）")
+            f"未知推送渠道 channel={channel!r}"
+            f"（可用：{', '.join(_push_write_channels())}）")
     ts = pushed_at or now_utc()
     proj = {}
     if project is None:
@@ -8145,8 +8162,8 @@ def push_stats(conn, days=30, now=None):
     lat = sorted(r[5] for r in rows if r[4] == "accepted" and isinstance(r[5], int))
     median_lat = lat[len(lat) // 2] if lat else None
 
-    # ① 采纳率
-    accept_rate = (accepted / decided) if decided else None
+    # ① 采纳率（唯一实现：`fish_common.accept_rate`；分母 = accepted + ignored）
+    accept_rate = fish_common.accept_rate(accepted, ignored)
 
     # ② 盲区消除率：推过之后真的读了正文
     cleared = 0
@@ -8196,9 +8213,8 @@ def push_stats(conn, days=30, now=None):
             s["pending"] += 1
     rates = []
     for s in by_session.values():
-        d = s["accepted"] + s["ignored"]
-        s["accept_rate"] = (s["accepted"] / d) if d else None
-        if d:
+        s["accept_rate"] = fish_common.accept_rate(s["accepted"], s["ignored"])
+        if s["accept_rate"] is not None:
             rates.append(s["accept_rate"])
     if len(rates) >= 2:
         mean = sum(rates) / len(rates)

@@ -41,6 +41,7 @@ from mutation_source import SourceText  # noqa: E402
 #: 各波的判据文件（按波次加；未落地的波次不进基线）
 NEW_FILES = {
     "wa": "test_reduction_wa",
+    "wb": "test_reduction_wb",
 }
 
 MUTANTS = [
@@ -98,6 +99,61 @@ MUTANTS = [
                 '        return True'),
         "must_fail": [
             "test_reduction_wa.AtomicStateWriteTest.test_activity_state_write_uses_fish_atomic",
+        ],
+        "others": [],
+    },
+    # ── W-B ──────────────────────────────────────────────────────────────
+    {
+        "id": "WB-M1",
+        "file": "fish_common.py",
+        "desc": "往通道单源里加历史词 `hook`（声明集合 ≠ 库实际集合）",
+        "old": 'PUSH_CHANNELS = ("inject", "prompt", "tool_after")',
+        "new": 'PUSH_CHANNELS = ("inject", "prompt", "tool_after", "hook")',
+        "must_fail": [
+            "test_reduction_wb.ChannelVocabularyTest.test_single_source_is_the_actual_three",
+            "test_reduction_wb.ChannelVocabularyTest"
+            ".test_declared_equals_db_actual_with_a_negative_control",
+        ],
+        "others": [],
+    },
+    {
+        "id": "WB-M2",
+        "file": "fish_common.py",
+        "desc": "采纳率分母改成 accepted+ignored+1（口径漂移的典型形态）",
+        "old": "    decided = accepted + ignored",
+        "new": "    decided = accepted + ignored + 1",
+        "must_fail": [
+            "test_reduction_wb.AcceptRateSingleSourceTest.test_formula_and_cross_endpoint_agreement",
+            "test_reduction_wb.AcceptRateSingleSourceTest.test_workbench_stats_uses_the_same_rate",
+        ],
+        "others": [],
+    },
+    {
+        "id": "WB-M3",
+        "file": "fish_ui.py",
+        "desc": "兜底短标签改回取 id 的**末** 4 位（同一会话两个标签）",
+        "old": "    return fish_naming.session_short(session_key)",
+        "new": ('    if not session_key:\n'
+                '        return ""\n'
+                '    host, _, rest = session_key.partition(":")\n'
+                '    tail = rest[-4:] if len(rest) >= 4 else rest\n'
+                '    return "%s#%s" % (host or "?", tail)'),
+        "must_fail": [
+            "test_reduction_wb.SessionShortLabelTest.test_ui_tag_equals_naming_short",
+            "test_reduction_wb.SessionShortLabelTest.test_tail_of_id_is_never_used",
+        ],
+        "others": [],
+    },
+    {
+        "id": "WB-M4",
+        "file": "fish_workbench_api.py",
+        "desc": "推送 Top 的率改回内联公式（不再是单源，但数值可能一样）",
+        "old": '                "rate": fish_common.accept_rate(accepted, ignored),',
+        "new": ('                "rate": ((accepted / (accepted + ignored))\n'
+                '                         if (accepted + ignored) else None),'),
+        "must_fail": [
+            "test_reduction_wb.AcceptRateSingleSourceTest"
+            ".test_all_three_read_paths_call_the_one_function",
         ],
         "others": [],
     },
