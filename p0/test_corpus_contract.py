@@ -170,12 +170,61 @@ class CorpusBoundaryTest(unittest.TestCase):
             self.assertEqual(hits, [], "%s 用了模块自身身份：行 %s" % (path.name, hits))
 
     def test_06_adapter_registry_has_both_hosts(self):
-        """J1：两个宿主都在注册表里（C-P2-1 的扩展位就是这个 dict）。"""
+        """J1：两个宿主都在注册表里（C-P2-1 的扩展位就是这个 dict）。
+
+        评审 107 🟠-2：`ADAPTERS`/`HOSTS`/`DEFAULT_HOSTS` 是派生的，但 `run_command` 的
+        `--host all` 分支与四处 CLI `choices` 曾把两台**又写死一遍**——白名单加一台后
+        `ADAPTERS` 会跟随，而 ingest **静默只采两台**（import 期对拍照样绿）。
+        下面两条钉住「唯一来源」：
+          · `--host all` 的解析结果 == `DEFAULT_HOSTS`（同序同一份）；
+          · 把**单源**临时换成 3 台含幽灵宿主 → `--host zcode` 被 argparse 收下、
+            `--host all` 也把它交给 `ingest`（写死两台时两处都红）。
+        """
         self.assertEqual(sorted(fish_corpus.ADAPTERS), ["dsh", "workbuddy"])
         self.assertEqual(fish_corpus.adapter_for("dsh").host, "dsh")
         self.assertEqual(fish_corpus.adapter_for("WorkBuddy").host, "workbuddy")
         with self.assertRaises(fish_corpus.CorpusError):
             fish_corpus.adapter_for("codex")       # 未实现宿主必须响亮失败
+        # 派生链：ADAPTERS → HOSTS → DEFAULT_HOSTS 必须同序同一份
+        self.assertEqual(tuple(fish_corpus.ADAPTERS), fish_corpus.HOSTS)
+        self.assertEqual(fish_corpus.HOSTS, fish_corpus.DEFAULT_HOSTS)
+
+        import argparse
+
+        def build_parser():
+            parser = argparse.ArgumentParser(prog="fish", add_help=False)
+            fish_corpus.register_cli(parser.add_subparsers(dest="cmd"), lambda _args: 0)
+            return parser
+
+        def parsed_hosts(host_arg):
+            """跑一遍 `run_command` 的 ingest 分支，返回它交给 `ingest` 的宿主元组。
+
+            `ingest` 换成假函数并返回 `busy`：不建库、不写盘，只读它收到的第一个参数。
+            """
+            args = build_parser().parse_args(["corpus", "ingest", "--host", host_arg])
+            args.root = str(P0)
+            seen = {}
+
+            def fake_ingest(hosts, **_kwargs):
+                seen["hosts"] = tuple(hosts)
+                return {"busy": True, "skipped": 0}
+
+            with mock.patch.object(fish_corpus, "ingest", fake_ingest):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(fish_corpus.run_command(args), 0)
+            return seen["hosts"]
+
+        self.assertEqual(parsed_hosts("all"), fish_corpus.DEFAULT_HOSTS,
+                         "`--host all` 的解释必须就是派生的 DEFAULT_HOSTS")
+        # 幽灵可采宿主：只换单源（不 reload 模块，避免进程内类身份漂移）
+        ghost = tuple(fish_corpus.DEFAULT_HOSTS) + ("zcode",)
+        with mock.patch.multiple(fish_corpus, HOSTS=ghost, DEFAULT_HOSTS=ghost,
+                                 ADAPTERS=dict(fish_corpus.ADAPTERS,
+                                               zcode=fish_corpus.ADAPTERS["dsh"])):
+            self.assertEqual(parsed_hosts("zcode"), ("zcode",),
+                             "CLI choices 没跟随 DEFAULT_HOSTS：写死的两台会把幽灵宿主挡在门外")
+            self.assertEqual(parsed_hosts("all"), ghost,
+                             "`--host all` 没跟随 DEFAULT_HOSTS：白名单加一台 = 静默只采旧的两台")
 
 
 class TokenizerSingleSourceTest(unittest.TestCase):

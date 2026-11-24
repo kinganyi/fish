@@ -1440,7 +1440,10 @@ def run_command(args, resolvers=None) -> int:
     action = str(getattr(args, "action", "") or "")
     host_arg = str(getattr(args, "host", "all") or "all")
     if action == "ingest":
-        hosts = ("dsh", "workbuddy") if host_arg == "all" else (host_arg,)
+        # ⚠️ `all` 的解释只有一处 = 派生的 `DEFAULT_HOSTS`（docs/107 🟠-2）：
+        # 在这里另写一份宿主清单，白名单加一台后 `ADAPTERS` 会跟随、而采集**静默只采旧的**
+        # ——与 W4「少一行 = 某个宿主的语料静默停采」完全同型，且 import 期对拍照样绿。
+        hosts = DEFAULT_HOSTS if host_arg == "all" else (host_arg,)
         result = ingest(hosts, root=root, limit=getattr(args, "limit", None),
                         dry_run=bool(getattr(args, "dry_run", False)),
                         days=getattr(args, "days", None),
@@ -1734,8 +1737,9 @@ def register_cli(subparsers, cmd_corpus):
     corp = subparsers.add_parser(
         "corpus", help="语料：ingest/stats/retag/search/read/forget/rebuild/doctor")
     corpsub = corp.add_subparsers(dest="action", required=True)
-    c_ing = corpsub.add_parser("ingest", help="增量采集两个宿主到独立库 corpus.sqlite")
-    c_ing.add_argument("--host", default="all", choices=["all", "dsh", "workbuddy"])
+    # help 里不再写"两个宿主"：宿主数由 `DEFAULT_HOSTS` 派生，文案写死个数就是又一份真相。
+    c_ing = corpsub.add_parser("ingest", help="增量采集各宿主到独立库 corpus.sqlite")
+    c_ing.add_argument("--host", default="all", choices=["all", *DEFAULT_HOSTS])
     c_ing.add_argument("--limit", type=int, default=None, help="每宿主最多几个文件")
     c_ing.add_argument("--days", type=int, default=DEFAULT_WINDOW_DAYS,
                        help="只采最近 N 天（0=不限；缺省 3）")
@@ -1743,10 +1747,10 @@ def register_cli(subparsers, cmd_corpus):
                        help="只算不写（不建库；库在则只读）")
     c_ing.set_defaults(func=cmd_corpus)
     c_stat = corpsub.add_parser("stats", help="采集读数：段/会话/degraded/孤儿/滞后")
-    c_stat.add_argument("--host", default="all", choices=["all", "dsh", "workbuddy"])
+    c_stat.add_argument("--host", default="all", choices=["all", *DEFAULT_HOSTS])
     c_stat.set_defaults(func=cmd_corpus)
     c_re = corpsub.add_parser("retag", help="按库里已有 cwd 重算项目归属（补映射后用）")
-    c_re.add_argument("--host", default="all", choices=["all", "dsh", "workbuddy"])
+    c_re.add_argument("--host", default="all", choices=["all", *DEFAULT_HOSTS])
     c_re.add_argument("--session", default=None, help="只重算一个会话")
     c_re.add_argument("--all", dest="all", action="store_true",
                       help="全量重算（缺省即全量；保留此开关以便脚本显式表达）")
@@ -1768,7 +1772,7 @@ def register_cli(subparsers, cmd_corpus):
     c_rb = corpsub.add_parser("rebuild", help="全量重放（跳过 tombstone）；默认只报计划")
     c_rb.add_argument("target", nargs="?", default=None)
     c_rb.add_argument("--apply", action="store_true")
-    c_rb.add_argument("--host", default="all", choices=["all", "dsh", "workbuddy"])
+    c_rb.add_argument("--host", default="all", choices=["all", *DEFAULT_HOSTS])
     c_rb.set_defaults(func=cmd_corpus)
     corpsub.add_parser("doctor", help="语料体检：全库凭证形态必须 0").set_defaults(
         func=cmd_corpus)

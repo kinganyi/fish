@@ -156,7 +156,13 @@ WB_PRETOOL_MATCHER = PRETOOL_MATCHER
 WB_POSTTOOL_MATCHER = ("Read|read|Bash|bash|Glob|glob|Grep|grep|"
                        "Write|write|Edit|edit|MultiEdit|multiedit|"
                        "NotebookEdit|notebookedit")
-REQUIRED_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse")
+# ⚠️ 这里**不许**再写 `REQUIRED_EVENTS = (...)` 的字面量：事件集只在文件头派生一次
+# （`REQUIRED_EVENTS = tuple(INSTALL_SPECS[0].events)`，见上方的同序守卫）。
+# 补一份字面量 = 「事件」这一维凭空多出第二份真相：spec 加了第 5 个事件后
+# `desired_hooks`/`merge_hooks` 会渲染并**写入**它，而 `diff_hooks`/`config_matches`/
+# `validate_hooks` 仍只认旧的那几个 → 对「缺该事件的文件」`--check` 判一致 **exit 0**，
+# `--apply` 却会写入——两者结论相反（docs/107 🟠-1 的原始反例）。
+# 判据：test_surface_naming.py 里临时给 spec 加第 5 个事件后 `--check` 必须 exit 2。
 
 # ── 宿主方言契约的两条判据（F1 + Round 5/N1）────────────────────────────────
 # 纯字面备选：只允许字母数字下划线与 `|`——宿主按**字面比较**，不编译正则。

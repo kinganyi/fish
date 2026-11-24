@@ -629,6 +629,98 @@ class InstallerTest(unittest.TestCase):
         self.assertIn("Stop", doc, "别人的事件仍在")
         self.assertEqual(set(doc) - {"Stop"}, set(self.ih.REQUIRED_EVENTS))
 
+    # ------------------------------------------------ 评审 107 🟠-1 + 🟡-1
+    #
+    # 两条判据合成**一条**新增测试（本轮判据只允许 42 → 43），两段各有独立失败文案：
+    #
+    #  ① 🟠-1「事件集的唯一来源是 spec」：临时给两台安装宿主各加第 5 个事件
+    #     （进程内构造，**不改生产 spec、不写盘**）→ `REQUIRED_EVENTS` 必须跟着变、
+    #     `--check` 对「缺该事件的文件」必须 exit 2。被 `:159` 的字面量覆盖时它只认
+    #     4 个事件 → 判一致 exit 0，而 `--apply` 会写入第 5 个——**结论相反**。
+    #  ② 🟡-1「`cmd_check` 经模块全局名调用 `desired_hooks`」：合法配置 +
+    #     `patch.object(ih, "desired_hooks", return_value={})` → 必须 exit 2。
+    #     直调 spec 渲染的绕过变体 = exit 0。既有 `:432/:452` 两条**没有**这个判别力
+    #     ——它们的红来自 `validate_hooks` 读**文件**里的非法 matcher，与 patch 无关。
+    #
+    # 执行顺序 ② → ①：② 要用生产 spec 下的合法配置做对照，① 的 reload 留在最后
+    # （cleanup 里会再 reload 一次，把模块全局放回生产状态）。
+
+    NEW_EVENT = "Stop"          # 只在进程内用的第 5 个事件（生产 spec 一个字不改）
+
+    def _reload_with_extra_event(self):
+        """给所有 `hooks_install` 宿主临时加一个事件，并**重载**安装器模块。
+
+        为什么必须 reload：`REQUIRED_EVENTS` 是 import 期的派生快照，只在进程内改 spec
+        不会让它跟着变——而这条判据要证明的正是「它跟着 spec 走」。只动进程内元组，
+        不写盘、不改生产 spec；cleanup 还原 `HOSTS`/`REGISTRY` 之后再 reload 一次，
+        把模块全局放回生产状态（否则后面的测试会跑在被污染的模块上）。
+        """
+        import dataclasses
+        import importlib
+
+        import fish_hosts
+
+        original_hosts = fish_hosts.HOSTS
+        original_registry = dict(fish_hosts.REGISTRY)
+
+        def restore():
+            fish_hosts.REGISTRY.clear()
+            fish_hosts.REGISTRY.update(original_registry)
+            fish_hosts.HOSTS = original_hosts
+            importlib.reload(self.ih)
+
+        def with_event(spec):
+            # 第 5 个事件用**非采集器**脚本：`collectors()` 的口径不变，红只来自「缺事件」。
+            plan = fish_hosts.HookPlan(event=self.NEW_EVENT, script="fish_prompt_hook.py",
+                                       args=f"--host {spec.id}", timeout=5)
+            return dataclasses.replace(spec, events=spec.events + (self.NEW_EVENT,),
+                                       hooks_plan=spec.hooks_plan + (plan,))
+
+        patched = {spec.id: with_event(spec) for spec in original_hosts if spec.hooks_install}
+        fish_hosts.HOSTS = tuple(patched.get(spec.id, spec) for spec in original_hosts)
+        fish_hosts.REGISTRY.update(patched)
+        self.addCleanup(restore)      # 先登记还原，再 reload：reload 炸了也不会污染全局
+        return importlib.reload(self.ih)
+
+    def test_cmd_check_goes_through_module_global_and_events_derived(self):
+        # ── ② `cmd_check` 必须经**模块全局名**调用 `desired_hooks`（🟡-1）──────────
+        good = self.tmp / "hooks.json"
+        self.ih.apply_host("dsh", good)
+        with mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(self.ih.cmd_check(["dsh"], str(good)), 0,
+                             "对照组：不 patch 时合法配置必须 exit 0（红只可能来自 patch）")
+        buf = io.StringIO()
+        with mock.patch.object(self.ih, "desired_hooks", return_value={}):
+            with mock.patch("sys.stdout", buf):
+                code = self.ih.cmd_check(["dsh"], str(good))
+        text = buf.getvalue()
+        self.assertEqual(code, 2,
+                         "patch `desired_hooks→{}` 后仍 exit 0 = `cmd_check` 没经模块全局名"
+                         "调用它（直调 spec 渲染时 :432/:452 的变异永远绿）：" + text)
+        self.assertIn("与目标不一致", text, "patch 生效后必须逐事件报「不一致」")
+
+        # ── ① 事件集只能来自 spec，不能再有第二份字面量（🟠-1）────────────────────
+        ih = self._reload_with_extra_event()
+        self.assertEqual(tuple(ih.REQUIRED_EVENTS),
+                         ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+                          self.NEW_EVENT),
+                         "REQUIRED_EVENTS 必须由 spec 派生；写死字面量会让它停在旧值")
+        hooks = ih.desired_hooks("dsh")
+        self.assertIn(self.NEW_EVENT, hooks, "前提：渲染结果里必须有第 5 个事件")
+        holes = self.tmp / "hooks-5ev-missing.json"
+        holes.write_text(json.dumps({"hooks": {k: v for k, v in hooks.items()
+                                               if k != self.NEW_EVENT}},
+                                    ensure_ascii=False, indent=2) + "\n",
+                         encoding="utf-8", newline="")
+        buf = io.StringIO()
+        with mock.patch("sys.stdout", buf):
+            code = ih.cmd_check(["dsh"], str(holes))
+        text = buf.getvalue()
+        self.assertEqual(code, 2,
+                         "spec 有第 5 个事件、文件缺它 → `--check` 必须 exit 2；"
+                         "判一致就是 check 与 apply 结论相反（🟠-1）：" + text)
+        self.assertIn(self.NEW_EVENT, text, "要指名缺的是哪个事件")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
