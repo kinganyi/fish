@@ -197,7 +197,7 @@ READONLY_SPECS: tuple = (
 READONLY_KEYS = tuple(spec[0] for spec in READONLY_SPECS)
 READONLY_KEY_SET = frozenset(READONLY_KEYS)
 
-#: 预设（用户 2026-11-24 拍板的两个动作）。键必须都在白名单里。
+#: 预设（用户 2026-11-24 拍板的两个动作，见 docs/109-推送面板-设计与验收-20261124.md）。键必须都在白名单里。
 PRESETS = {
     "pause": {
         "push.after_tool_every_n_calls": 9999,
