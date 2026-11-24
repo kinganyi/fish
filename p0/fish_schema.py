@@ -13,14 +13,14 @@
 `SCHEMA` 是**组合者**：它要拼上 `fish_kb._KB_SCHEMA`。把它也搬进来，本模块就得
 import `fish_kb`，于是分层变成 `fish_schema → fish_kb`——而 schema 概念上应当在
 kb 之下。所以 `SCHEMA` 留在 `fish.py`，它从这里和 `fish_kb` 两边取零件拼装。
-这样本模块**只依赖 stdlib**，是最干净的一层。
 
 ## 与 J2 的关系（`fish → fish_kb → fish_common`）
 
-本模块不 import 任何 fish_* 模块，所以它在 J2 的允许侧，谁都可以安全依赖它。
-`fish.py` 通过 `from fish_schema import (...)` 保持同名，既有引用一个字都不改。
+本模块不 import 任何**业务**模块：只拼 `fish_git_schema`（git）与 `fish_lineage_schema`
+（会话树）两个零 import 的纯常量叶子；`fish.py` 重新导出，既有引用一个字都不改。
 """
 from fish_git_schema import _GIT_SCHEMA   # git 仓库身份层五张表；理由见该模块 docstring
+from fish_lineage_schema import _LINEAGE_SCHEMA   # 会话树投影两张表；理由同上
 
 _ACCESS_LOG_DDL = """CREATE TABLE IF NOT EXISTS memory_access_log (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -315,81 +315,6 @@ CREATE TABLE IF NOT EXISTS session_context (session_key TEXT PRIMARY KEY, citize
 CREATE INDEX IF NOT EXISTS ix_session_ctx_citizen ON session_context(citizen_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS ix_session_ctx_cwd ON session_context(cwd);
 """ + "\n")
-
-# ============================================================
-# 会话树投影（113 §2.3 · 2026-11-25 · W1）：两张**派生表**，可整体重建。
-#
-# 真相在宿主日志（110 §3.2），本表只是可查询的投影——所以**没有外键、没有触发器**，
-# 回退只需要 `DROP TABLE`（113 §2.7）。三条反直觉的取舍必须留在这里（113 §2.3 末）：
-#   ① 不建外键：`citizens_all` 是视图、公民又分冷热两表，FK 只能指向热表，
-#      归档公民立刻违约。改用判据兜：`citizen_id` 必须能在 `citizens_all` 查到。
-#   ② `origin='main' + 有父` 做成 CHECK（110 §6 J-D4 的库级兜底）：库里就**不可能**
-#      存在这种行。代价是"计数是否为 0"恒 0、没有判别力，所以 W1 判据改成**试插入**。
-#   ③ `session_identity.session_key` 允许带 `#role` 尾（113 §1-5：`issue_agent_token`
-#      的子键是 `<父会话>#<role>`，W4 不执行去尾）：join 一律走
-#      `fish_lineage.identity_key_of()` 这一个剥离点，不许各处自己 split。
-#
-# `lineage_path` 随深度线性变长（深 100 层就上千字符）：**只许展示、不许判据**（113 §2.8）。
-# ============================================================
-_SESSION_LINEAGE_DDL = """CREATE TABLE IF NOT EXISTS session_lineage (
-  host           TEXT NOT NULL,              -- dsh | workbuddy | codebuddy
-  session_id     TEXT NOT NULL,              -- 宿主原始形态：不带 'host:' 前缀，**不做前缀归一**（110 §3.2 末）
-  parent_session TEXT,                       -- 裸父 id；NULL = 根 或 判不到（由 basis 区分）
-  lineage_path   TEXT NOT NULL DEFAULT '',   -- '/a/b/c'；根=''；**只许用于展示，不许用于判据**
-  depth          INTEGER NOT NULL DEFAULT 0, -- 由链重算（§3.6.1）；宿主值落 depth_host
-  depth_host     INTEGER,                    -- 宿主 delegationDepth，仅对拍；与 depth 不等 → basis='conflict'
-  origin         TEXT NOT NULL,              -- main | subagent | fork | unknown
-  relation       TEXT,                       -- spawn | fork | team_member | continue | cycle | NULL
-  agent_id       TEXT,                       -- DSH 恒 NULL；WB = transcript 文件名 'agent-<..>'
-  agent_role     TEXT,                       -- DSH = agentPreset；WB = runtime members[].agentId 的 role 段
-  agent_label    TEXT,                       -- DSH = catalog.label；WB = members[].taskDescription
-  agent_path     TEXT,                       -- 预留（同会话多代理宿主）；本期**恒 NULL**，不许为对称先填
-  cwd            TEXT,
-  agent_preset   TEXT,
-  basis          TEXT NOT NULL,              -- header|catalog|db|path|runtime|depth|inferred|missing|conflict
-  source         TEXT NOT NULL,              -- 'dsh:header' / 'wb:runtime' / 'wb:path' / ...
-  extra          TEXT,                       -- JSON：infer_rule / path_id_mismatch / notes
-  observed_at    TEXT NOT NULL,
-  retracted_at   TEXT,
-  PRIMARY KEY (host, session_id),
-  CHECK (origin IN ('main','subagent','fork','unknown')),
-  CHECK (relation IS NULL OR relation IN ('spawn','fork','team_member','continue','cycle')),
-  CHECK (basis IN ('header','catalog','db','path','runtime','depth','inferred','missing','conflict')),
-  CHECK (depth >= 0),
-  -- 把 110 §6 的 J-D4 做成**约束**：主+有父 在库里就不可能存在
-  CHECK (origin <> 'main' OR parent_session IS NULL)
-);"""
-
-_SESSION_IDENTITY_DDL = """CREATE TABLE IF NOT EXISTS session_identity (
-  session_key    TEXT PRIMARY KEY,           -- 宿主原始形态；可能带 '#role' 尾（§1-5）
-  citizen_id     TEXT NOT NULL,              -- 解析结果
-  inherited_from TEXT,                       -- 最近一个**有身份**祖先的 session_key；NULL = 本会话自己的公民
-  origin         TEXT NOT NULL,              -- direct | inherited | provisional
-  evidence       TEXT NOT NULL,              -- machine | inherited | self-reported | provisional
-  created_at     TEXT NOT NULL,
-  observed_at    TEXT NOT NULL,
-  CHECK (origin IN ('direct','inherited','provisional')),
-  CHECK (origin <> 'inherited'  OR inherited_from IS NOT NULL),
-  CHECK (origin <> 'direct'     OR inherited_from IS NULL),
-  CHECK (origin <> 'provisional' OR citizen_id <> '')
-);"""
-
-_LINEAGE_INDEXES = (
-    # 三张索引对应三种取数口：按父找子（树）、按深度分层（渲染/对账）、按证据强度筛（判据）
-    "CREATE INDEX IF NOT EXISTS idx_lineage_parent ON session_lineage(host, parent_session);",
-    "CREATE INDEX IF NOT EXISTS idx_lineage_depth  ON session_lineage(host, depth);",
-    "CREATE INDEX IF NOT EXISTS idx_lineage_basis  ON session_lineage(basis);",
-    # 身份继承的两条读：按公民反查（"这个公民有哪些会话"）/ 按祖先找后代（继承链）
-    "CREATE INDEX IF NOT EXISTS ix_identity_citizen ON session_identity(citizen_id);",
-    # 部分索引：`inherited_from IS NULL` 的行（本会话自己的公民）**根本不进**这个索引
-    "CREATE INDEX IF NOT EXISTS ix_identity_inherited "
-    "ON session_identity(inherited_from) WHERE inherited_from IS NOT NULL;",
-)
-
-# 拼装纪律同 `_PROFILE_SCHEMA`：索引串之间必须补分号，否则 `CREATE TABLE` 之后紧跟
-# `CREATE INDEX` 会拼成 `...)CREATE INDEX ...` —— sqlite 报 near "CREATE": syntax error。
-_LINEAGE_SCHEMA = ("\n" + _SESSION_LINEAGE_DDL + "\n\n" + _SESSION_IDENTITY_DDL
-                   + "\n" + "\n".join(_LINEAGE_INDEXES) + "\n")
 
 _TOOL_ACTIVITY_COLS = (
     ("host", "TEXT"),

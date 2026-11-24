@@ -15,12 +15,16 @@ W1 的全部承诺是"**什么都没变**"（0 行、旧读数不变、migrate �
       → 同一个 `assert_lineage_empty` 必须红；`DELETE` 后必须复绿。
       （113 §2.6 J-W1-1 的变异要求：证明"0 行"读数不是假的）
 
-  M1  `_ensure_lineage_tables` 顺手写一行         → J-W1-1b 红（migrate 写了行）
+  M1  `ensure_tables` 里顺手写一行               → J-W1-1b 红（migrate 写了行）
   M2  摘掉 `CHECK (origin <> 'main' OR parent_session IS NULL)` → J-W1-3 红
   M3  去掉 DDL 的 `IF NOT EXISTS`                 → J-W1-4 红（第二次 table already exists）
-  M4  注释掉 `migrate()` 里那句 `_ensure_lineage_tables(conn)` → J-W1-5 红（旧库补不出表）
+  M4  注释掉 `migrate()` 里那句 `fish_lineage.ensure_tables(conn)` → J-W1-5 红（旧库补不出表）
   M5  SCHEMA 拼装链摘掉 `+ _LINEAGE_SCHEMA`        → J-W1-1 红（新库根本没有表）
-  M6  摘掉 `_ensure_lineage_tables` 的索引循环      → J-W1-5 红（旧库升级缺索引）
+  M6  摘掉 `_LINEAGE_SCHEMA` 的索引拼装            → J-W1-5 红（旧库升级缺索引）
+
+W1b 抽层后**锚点跟着代码走**（2026-11-25）：DDL 三块进了 `fish_lineage_schema`，
+`ensure_tables` 进了 `fish_lineage`。变异体打的是"这条判据有没有判别力"，
+锚点留在旧文件里只会每轮报"靶点未命中"——那是红在找错地方，不是变异生效。
 
 用法：`python -X utf8 mutation_lineage_w1.py [--only M3] [--data-only] [--src-only]`
 """
@@ -41,7 +45,8 @@ from mutation_source import SourceText
 
 HERE = Path(__file__).resolve().parent
 SCHEMA_PY = HERE / "fish_schema.py"
-DB_PY = HERE / "fish_db.py"
+LEAF_PY = HERE / "fish_lineage_schema.py"      # W1b：DDL 叶子（块从 fish_schema 搬来）
+LINEAGE_PY = HERE / "fish_lineage.py"          # W1b：ensure_tables 从 fish_db 搬来
 FISH_PY = HERE / "fish.py"
 TEST = "test_lineage_schema.py"
 
@@ -53,23 +58,21 @@ _LEAK_INSERT = (
 
 # (名字, 文件, -k 选择器, 靶点原文, 变异后, 打的是哪条判据)
 MUTANTS = [
-    ("M1", DB_PY, "j_w1_1",
-     "    for ddl in (_SESSION_LINEAGE_DDL, _SESSION_IDENTITY_DDL):\n"
-     "        conn.execute(ddl)                  # IF NOT EXISTS：已有的表原样不动\n",
-     "    for ddl in (_SESSION_LINEAGE_DDL, _SESSION_IDENTITY_DDL):\n"
-     "        conn.execute(ddl)\n" + _LEAK_INSERT,
+    ("M1", LINEAGE_PY, "j_w1_1",
+     "    conn.executescript(_LINEAGE_SCHEMA)\n",
+     "    conn.executescript(_LINEAGE_SCHEMA)\n" + _LEAK_INSERT,
      "J-W1-1b：migrate 顺手写了一行"),
-    ("M2", SCHEMA_PY, "j_w1_3",
+    ("M2", LEAF_PY, "j_w1_3",
      "  CHECK (origin <> 'main' OR parent_session IS NULL)\n",
      "  CHECK (1)\n",
      "J-W1-3：主+有父 不再被拒"),
-    ("M3", SCHEMA_PY, "j_w1_4",
+    ("M3", LEAF_PY, "j_w1_4",
      "CREATE TABLE IF NOT EXISTS session_identity (",
      "CREATE TABLE session_identity (",
      "J-W1-4：第二次 migrate 报 table already exists"),
     ("M4", FISH_PY, "j_w1_5",
-     "    _ensure_lineage_tables(conn)\n",
-     "    # _ensure_lineage_tables(conn)\n",
+     "    fish_lineage.ensure_tables(conn)\n",
+     "    # fish_lineage.ensure_tables(conn)\n",
      "J-W1-5：旧库升级补不出表"),
     ("M5", SCHEMA_PY, "j_w1_1_tables_exist",
      "    + _ACTIVITY_SCHEMA + _LINEAGE_SCHEMA + _KB_SCHEMA + _PROFILE_SCHEMA + _GIT_SCHEMA"
@@ -77,9 +80,9 @@ MUTANTS = [
      "    + _ACTIVITY_SCHEMA + _KB_SCHEMA + _PROFILE_SCHEMA + _GIT_SCHEMA"
      "   # 画像 / git / 会话树\n",
      "J-W1-1：SCHEMA 没拼上会话树"),
-    ("M6", DB_PY, "j_w1_5",
-     "    for stmt in _LINEAGE_INDEXES:\n        conn.execute(stmt)\n",
-     "    pass\n",
+    ("M6", LEAF_PY, "j_w1_5",
+     '                   + "\\n" + "\\n".join(_LINEAGE_INDEXES) + "\\n")\n',
+     '                   + "\\n")\n',
      "J-W1-5：旧库升级缺 5 条索引"),
 ]
 

@@ -58,6 +58,9 @@ FISH_PROFILE = P0 / "fish_profile.py"
 # 所以它必须比 schema 更底层）；`fish_git` 是逻辑层（发现器 / 身份归一 / 观测探针）。
 FISH_GIT = P0 / "fish_git.py"
 FISH_GIT_SCHEMA = P0 / "fish_git_schema.py"
+# 2026-11-25（113 W1b）：会话树 DDL 叶子（W1 那三块常量从 fish_schema 抽出）。
+# 它必须比 `fish_schema` 更底层——零 import、零函数，只含字符串常量（同 fish_git_schema）。
+FISH_LINEAGE_SCHEMA = P0 / "fish_lineage_schema.py"
 # 2026-11-20（Phase 3）：写库层从 fish_git 拆出（它一度六职责、589 行超窗）。
 # 分层：store → git 是向下（写层用读层的解析结果），反向禁止。
 FISH_GIT_STORE = P0 / "fish_git_store.py"
@@ -186,16 +189,13 @@ FISH_REBUILD_LINES_MIN = 380
 FISH_REBUILD_LINES_MAX = 565
 # 2026-11-11 新模块 · 数据库 DDL 常量 + `SCHEMA` 拼装 + `connect`（纯数据 + 8 行连接）。
 # 第三刀把知识库表结构与主库拼装也归到这里——所以窗口随之上抬到 700。
-# 2026-11-25（113 W1 · 会话树）：700 → **780**。账算在这里，不是"顺手抬窗"：
-#   · 新增块 = `_SESSION_LINEAGE_DDL` / `_SESSION_IDENTITY_DDL` / `_LINEAGE_INDEXES`
-#     共 76 行（净增 75），**逐字照 113 §2.3**（含"为什么不建外键 / 为什么 J-D4 做成
-#     CHECK / 为什么键允许带 `#role`"三条取舍注释——删注释腾空间就是把这些信息丢掉）；
-#   · 施工前实测本文件 = **700 = 上限**（零余量），加任何一行都会红；
-#   · 加的是**表结构数据**：本模块仍是"纯 DDL 常量 + 拼装"，没有函数、没有逻辑增长。
-#   收口方向：下次再要加表，按 `fish_git_schema` 的先例拆纯常量叶子模块（先例理由见
-#   该模块 docstring：它就是因为本窗口只剩 8 行而拆出去的），不要继续抬这个数。
+# 2026-11-25（113 W1b · 会话树）：**窗口还回 700，一行都没抬**。W1 曾把这里抬到 780，
+# 那正是被审查方点名批评的方向（本文件 :114-115「拆一次就降一次……方向只许降」）。
+# W1b 按 `fish_git_schema` 的先例把会话树 DDL 抽成纯常量叶子 `fish_lineage_schema`：
+# 75 行搬走、本文件只留 1 行 import，实测回到 **700**（= W1 之前，持平）。
+# 判据没变：下界守「搬漏了」，上界守「长回去了」。
 FISH_SCHEMA_LINES_MIN = 480
-FISH_SCHEMA_LINES_MAX = 780
+FISH_SCHEMA_LINES_MAX = 700
 # 2026-11-11 新模块 · 建表/补列/迁移辅助（20 个 ensure 函数 + 2 个数据常量）。
 # 注意 `migrate` **不在**这里：它是编排者，要调 KB 专属的 ensure，搬走会成上行依赖。
 # F-P1-10（2026-11-18 外部审查）：窗口数字不再写死在测试里，改从
@@ -223,11 +223,10 @@ FISH_DB_LINES_MIN = 520
 #     `append_event`，都是本模块自己的东西；放 fish.py 会把 God module 顶破 J4。
 #   · 净变化：fish.py 13,331 → 13,275（−56），fish_db 699 → 754（+55）。**合计 −1**。
 # 判据看的是单文件行数，所以搬家的两端必须同时改窗口——但方向是一个减一个增。
-# 2026-11-25（113 W1 · 会话树）：800 → **830**。`_ensure_lineage_tables`（建两张投影表
-# + 5 条索引）是本波唯一的结构新增，+19 行里大半是"为什么本波没有补列段 / 顺序纪律"
-# 的说明。施工前实测本文件 = **800 = 上限**（零余量），不抬这一格 W1 无法落地。
-# 它建的是**空表**（0 行），不参与任何既有路径——判据在 `test_lineage_schema.py`。
-FISH_DB_LINES_MAX = 830
+# 2026-11-25（113 W1b · 会话树）：**窗口还回 800，一行都没抬**。W1 的 +19 行
+# （`_ensure_lineage_tables` + 两行 import）整块搬到 `fish_lineage.ensure_tables`——
+# 建表与建索引共用叶子里的同一个常量，不属于「建表/补列函数族」。实测回到 **800**。
+FISH_DB_LINES_MAX = 800
 # 2026-11-11 新模块 · 主人画像（R1-1 槽位化；固定表 + 建议队列 + 注入分级）。
 # 域逻辑 + CLI 表现层同处一个模块（改画像的人只需打开一个文件）；
 # 因此窗口比纯领域模块大——它同时承担了 fish.py 里那 10 个命令的实现。
@@ -268,6 +267,11 @@ FISH_GIT_LINES_MIN = 250
 FISH_GIT_LINES_MAX = 550
 FISH_GIT_SCHEMA_LINES_MIN = 120
 FISH_GIT_SCHEMA_LINES_MAX = 320
+# 2026-11-25（113 W1b · 会话树）：从 `fish_schema` 抽出的纯 DDL 叶子（零 import、零函数）。
+# 当前 97 行 → 上界 200。照 `FISH_PUSH_RANK_LINES_MAX` 的先例给新叶子自己的上界：
+# 加表可以长，但「顺手加逻辑」不行——逻辑一进来它就不再是零依赖的叶子了。
+FISH_LINEAGE_SCHEMA_LINES_MIN = 60
+FISH_LINEAGE_SCHEMA_LINES_MAX = 200
 # Phase 3 拆出的写库层：当前 217 行 → 上界 380（还要容纳 Phase 4/5 的写入入口）
 FISH_GIT_STORE_LINES_MIN = 150
 FISH_GIT_STORE_LINES_MAX = 380
@@ -509,6 +513,14 @@ class SplitDependencyTest(unittest.TestCase):
                                 (FISH_GIT_SCHEMA, {"fish", "fish_kb", "fish_push",
                                                    "fish_trust", "fish_rebuild", "fish_profile",
                                                    "fish_schema", "fish_db", "fish_common"}),
+                                # 2026-11-25（113 W1b）：会话树 DDL 叶子。同 fish_git_schema：
+                                # 它必须在 fish_schema 之下才能被拼进 SCHEMA，所以谁都不许依赖它。
+                                (FISH_LINEAGE_SCHEMA, {"fish", "fish_kb", "fish_push",
+                                                       "fish_trust", "fish_rebuild",
+                                                       "fish_profile", "fish_activity",
+                                                       "fish_board", "fish_common",
+                                                       "fish_schema", "fish_db", "fish_lineage",
+                                                       "fish_cli", "mcp_server"}),
                                 # Phase 3 拆出的写库层：依赖 fish_git（向下）+ schema/db，
                                 # 但不许碰 fish 本体与任何上层。
                                 (FISH_GIT_STORE, {"fish", "fish_kb", "fish_push",
@@ -842,6 +854,9 @@ class SplitSizeTest(unittest.TestCase):
                 # 2026-11-20（fish 引入 git · Phase 2）：仓库身份层两个新模块
                 ("fish_git.py", FISH_GIT_LINES_MIN, FISH_GIT_LINES_MAX),
                 ("fish_git_schema.py", FISH_GIT_SCHEMA_LINES_MIN, FISH_GIT_SCHEMA_LINES_MAX),
+                # 2026-11-25（113 W1b）：会话树 DDL 叶子
+                ("fish_lineage_schema.py", FISH_LINEAGE_SCHEMA_LINES_MIN,
+                 FISH_LINEAGE_SCHEMA_LINES_MAX),
                 ("fish_git_store.py", FISH_GIT_STORE_LINES_MIN, FISH_GIT_STORE_LINES_MAX),
                 ("fish_git_link.py", FISH_GIT_LINK_LINES_MIN, FISH_GIT_LINK_LINES_MAX),
                 ("fish_purge.py", FISH_PURGE_LINES_MIN, FISH_PURGE_LINES_MAX),

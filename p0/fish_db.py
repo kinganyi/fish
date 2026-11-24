@@ -37,14 +37,13 @@ from fish_schema import (
     _BOARD_TABLE_DDLS, _CITIZENS_ARCHIVE_DDL, _CITIZENS_NEW_COLS, _IDENTITY_INDEXES,
     _IDENTITY_SCHEMA, _IDENTITY_TABLE_DDLS, _KB_ACCESS_DDL, _KB_ACCESS_INDEXES,
     _KB_PATH_STATS_COLUMNS, _KB_PATH_STATS_VIEW, _KB_SCHEMA, _KB_VAULT_COLS,
-    _KB_VAULT_DDL, _KB_VAULT_INDEXES, _LINEAGE_INDEXES, _LINKS_COLS, _LINKS_DDL,
+    _KB_VAULT_DDL, _KB_VAULT_INDEXES, _LINKS_COLS, _LINKS_DDL,
     _LINKS_INDEXES, _NAME_ALIASES_DDL, _NAME_SCHEMA, _PRESENCE_DDL,
     _BOARD_POSTS_NEW_COLS,
   _PRESENCE_NEW_COLS, _PRESENCE_PK_COLS, _PRESENCE_V2_COLS, _PRESENCE_V2_DDL,
     _PRESENCE_V3_COLS, _PROJECT_STINTS_DDL, _PUSH_LOG_COLS, _PUSH_LOG_DDL,
-    _PUSH_LOG_INDEXES, _PUSH_SCHEMA, _SESSION_IDENTITY_DDL, _SESSION_LINEAGE_DDL,
-    _SESSION_TOKENS_DDL, _STINT_OPEN_INDEX_COLS, _STINT_OPEN_INDEX_DDL,
-    _STINT_OPEN_INDEX_NAME, _TOOL_ACTIVITY_COLS, _TOOL_ACTIVITY_DDL,
+    _PUSH_LOG_INDEXES, _PUSH_SCHEMA, _SESSION_TOKENS_DDL, _STINT_OPEN_INDEX_COLS,
+    _STINT_OPEN_INDEX_DDL, _STINT_OPEN_INDEX_NAME, _TOOL_ACTIVITY_COLS, _TOOL_ACTIVITY_DDL,
     _WORKSPACE_MAP_DDL, _WORKSPACE_SCHEMA)
 
 
@@ -562,24 +561,6 @@ def _ensure_identity_tables(conn: sqlite3.Connection):
     # DROP 重建，不能靠清单里的幂等 CREATE（同名旧索引会让那条成为空操作）。
     _ensure_stint_open_index(conn)
     for stmt in _IDENTITY_INDEXES:
-        conn.execute(stmt)
-
-def _ensure_lineage_tables(conn: sqlite3.Connection):
-    """幂等：会话树两张投影表 + 5 条索引（本波**没有补列段**；113 §2.2 / §2.4）。
-
-    顺序纪律与 `_ensure_identity_tables` 完全相同：**先建表、后建索引**。索引引用表列，
-    反过来在旧库上就是 `no such column`，整个升级路径崩在启动时（citizens.is_owner 事故）。
-
-    为什么这次不写"PRAGMA 查列 + ALTER 补列"那一段：两张表是本轮**新建**的，
-    不存在"旧库同名缺列"（113 §2.3）。将来真要加列，照 `_PUSH_LOG_COLS` 的形态在这里
-    补一段即可；现在预置一段空转的 ALTER 循环，只会让"这一波有没有改结构"变得不可读。
-
-    **本波只做结构：不写任何行、不改任何既有查询**（113 §2.1）。表里 0 行本身就是
-    W1 的判据（J-W1-1），而"只建表"这件事也必须能被变异证明（见 `test_lineage_schema`）。
-    """
-    for ddl in (_SESSION_LINEAGE_DDL, _SESSION_IDENTITY_DDL):
-        conn.execute(ddl)                  # IF NOT EXISTS：已有的表原样不动
-    for stmt in _LINEAGE_INDEXES:
         conn.execute(stmt)
 
 def _ensure_workspace_table(conn: sqlite3.Connection):

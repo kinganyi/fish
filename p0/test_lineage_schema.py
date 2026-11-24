@@ -36,8 +36,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import fish          # noqa: E402
-import fish_db       # noqa: E402  —— 变异点要能打到消费方（拆包后常量/消费者两处）
+import fish_db       # noqa: E402  —— 建表函数族住这里（会话树的 ensure 已搬到 fish_lineage）
 import fish_lineage  # noqa: E402
+import fish_lineage_schema   # noqa: E402  —— W1b 抽出的纯 DDL 叶子
 import fish_schema   # noqa: E402
 
 #: 本波新建的两张表（**只建表、不写行**）
@@ -209,7 +210,7 @@ class LineageConstraintTest(_TempDb):
         收掉——否则 SQL 会报 `near ")"`，那是语法错不是约束缺席（实测过：第一次写
         就是这么红的）。
         """
-        kept = [ln for ln in fish_schema._SESSION_LINEAGE_DDL.split("\n")
+        kept = [ln for ln in fish_lineage_schema._SESSION_LINEAGE_DDL.split("\n")
                 if "origin <> 'main'" not in ln and "J-D4 做成" not in ln]
         return "\n".join(kept).replace("CHECK (depth >= 0),", "CHECK (depth >= 0)")
 
@@ -321,6 +322,9 @@ class LineageContractTest(_TempDb):
     def test_j_w1_6_indexes_and_column_contract(self):
         missing = [i for i in LINEAGE_INDEXES if i not in index_names(self.conn)]
         self.assertEqual(missing, [], f"缺索引：{missing}")
+        # W1b：`fish_schema` 里的名字必须与叶子**同一对象**（copy 一份就各走各的）
+        self.assertIs(fish_schema._LINEAGE_SCHEMA, fish_lineage_schema._LINEAGE_SCHEMA,
+                      "fish_schema 的别名与叶子不是同一对象——两份拷贝迟早漂开")
         cols = {r[1] for r in self.conn.execute("PRAGMA table_info(session_lineage)")}
         self.assertEqual(cols, set(fish_lineage.NODE_FIELDS) | {"retracted_at"},
                          "`NODE_FIELDS` 与 DDL 列集合不一致（两侧必须逐列对应）")
@@ -430,10 +434,20 @@ class LineageLayeringTest(unittest.TestCase):
                 mods.update(a.name.split(".")[0] for a in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
                 mods.add(node.module.split(".")[0])
-        upstream = sorted(m for m in mods if m.startswith("fish") and m != "fish_common")
+        # W1b：白名单里只许多出**更底层**的叶子（DDL 常量，零 import）。
+        allowed = {"fish_common", "fish_lineage_schema"}
+        upstream = sorted(m for m in mods if m.startswith("fish") and m not in allowed)
         self.assertEqual(upstream, [],
                          f"fish_lineage 依赖了上层模块 {upstream}（W2 起会成环）")
         self.assertTrue(mods & {"sqlite3", "json"}, "模块应当只用 stdlib（实测没看到）")
+        # 白名单不是后门：叶子必须**真的**零 import，否则这个例外就站不住
+        leaf = ast.parse((HERE / "fish_lineage_schema.py").read_text(encoding="utf-8"))
+        leaf_mods = {a.name.split(".")[0] for n in ast.walk(leaf)
+                     if isinstance(n, ast.Import) for a in n.names}
+        leaf_mods |= {n.module.split(".")[0] for n in ast.walk(leaf)
+                      if isinstance(n, ast.ImportFrom) and n.module}
+        self.assertEqual(sorted(leaf_mods), [],
+                         f"fish_lineage_schema 不是纯常量叶子，import 了 {sorted(leaf_mods)}")
 
 
 if __name__ == "__main__":

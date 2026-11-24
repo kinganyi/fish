@@ -39,6 +39,7 @@ from pathlib import Path
 # 所以 fish 从这里 import 并原样再导出（`fish.surface_hit` 等旧名字仍然可用）。
 import fish_activity
 import fish_git_store
+import fish_lineage
 import fish_naming
 import fish_surface
 from fish_surface import _path_inside, normalize_surface, surface_hit  # noqa: F401 —— 对外仍是 fish 的名字
@@ -76,7 +77,7 @@ from fish_common import BOARD_SCOPES, UNATTRIBUTED, board_relpath  # noqa: F401
 from fish_db import (    PresenceMigrationError, _CITIZENS_ALL_COLUMNS, _PRESENCE_SESSION_BACKFILL, _board_seen_backup,
     _citizens_all_view_ddl, _ensure_activity_table, _ensure_board_seen_session, _ensure_board_tables,
     _ensure_boards_home_paths, _ensure_citizens_all_view, _ensure_identity_tables,
-    _ensure_lineage_tables, _ensure_name_tables, _ensure_presence_session, _ensure_push_tables,
+    _ensure_name_tables, _ensure_presence_session, _ensure_push_tables,
     _ensure_stint_open_index, _ensure_workspace_table,
     _has_unique_index, _presence_backup, _presence_data_root, _presence_pk_cols,
     _presence_pk_cols_of, _presence_rebuild_ddl, _presence_session_counts, append_event,
@@ -568,10 +569,9 @@ def migrate(conn: sqlite3.Connection):
     #   · 动作流：tool_activity + 索引（结构）—— 加在结构段末尾，不改前人顺序
     _ensure_kb_tables(conn)
     _ensure_activity_table(conn)
-    # 会话树投影（113 W1 · §2.2）：两张空表 + 索引，**一行数据都不写**、既有查询一个不改。
-    # 位置有讲究：它属于"结构段"末（铁律：结构全做完，才允许数据迁移），所以排在下面
-    # 数据迁移段之前；`_ensure_lineage_tables` 的建表→建索引顺序纪律见 fish_db。
-    _ensure_lineage_tables(conn)
+    # 会话树投影（113 W1 · §2.2）：两张空表 + 索引，**一行数据都不写**、既有查询一个不改；
+    # 它属于"结构段"末（铁律：结构全做完才允许数据迁移），建表→建索引的顺序纪律见 fish_lineage。
+    fish_lineage.ensure_tables(conn)
     # ── 数据迁移段（必须排在所有结构升级之后）
     #   · 看板落点：改 boards.path 的值（相对 fish-home）
     #   · 强制忽略项回填既有行（改 kb_vault.ignore_globs 的值）

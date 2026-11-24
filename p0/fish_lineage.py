@@ -13,11 +13,11 @@ W1 只搭骨架：**一行数据都不写、一个既有查询都不改**（113 
 异常"，而 W2/W6 的判据（J-D1 深度重算、J-D3 环）正是靠"算出来的数不对"才会红。
 **空壳返回假值 = 把判据变成恒绿**。
 
-## 依赖方向：只许 stdlib
+## 依赖方向：stdlib + 一个常量叶子
 
-本模块**只 import 标准库**（`json` / `sqlite3` / `typing`）。理由不是洁癖：
+本模块**只 import 标准库 + 一个零 import 的常量叶子**（`fish_lineage_schema`）。理由不是洁癖：
 W2/W3 的宿主适配器（`fish_lineage_dsh` / `fish_lineage_wb`）会 import
-`fish_corpus_*`，而那些模块最终 import `fish`；只要本模块不反向依赖任何 fish 模块，
+`fish_corpus_*`，而那些模块最终 import `fish`；只要本模块不反向依赖任何业务模块，
 `fish_db`/`fish_schema` 将来要引用它也不会成环（113 §2.5 的叶子模块纪律，
 先例：`fish_git_schema` 同样是"只含字符串常量、谁都能安全依赖"的一层）。
 
@@ -36,6 +36,26 @@ from __future__ import annotations
 import json
 import sqlite3
 from typing import Any, Iterable, Protocol, runtime_checkable
+
+from fish_lineage_schema import _LINEAGE_SCHEMA   # 纯 DDL 叶子：建表/建索引的唯一来源
+
+
+def ensure_tables(conn: sqlite3.Connection) -> None:
+    """幂等：建会话树两张投影表 + 5 条索引（旧库升级路径；113 §2.2 / §2.5）。
+
+    为什么它在 `migrate()` 里、而不是只靠 `SCHEMA`：`CREATE TABLE IF NOT EXISTS` 对
+    **已存在**的旧库什么都不做，"升级"这件事只能由 migrate 负责——它是每条打开路径
+    （CLI 各命令 / MCP server / 测试装配）都会跑的那一步。
+
+    为什么一条 `executescript` 建表+建索引：DDL 与索引在同一个常量
+    （`fish_lineage_schema._LINEAGE_SCHEMA`）里，全新库与旧库升级执行的是**同一个对象**，
+    不会漂成两份拷贝；「先表后索引」的顺序纪律就写在那条常量的拼装顺序里。
+
+    **只做结构：不写任何行、不改任何既有查询**（113 §2.1）。表里 0 行本身就是 W1 的
+    判据（J-W1-1），而「只建表」这件事也必须能被变异证明（见 `test_lineage_schema`）。
+    """
+    conn.executescript(_LINEAGE_SCHEMA)
+
 
 #: `session_lineage` 的**列契约**：一行的全部字段（与 `_SESSION_LINEAGE_DDL` 逐列对应）。
 #:
