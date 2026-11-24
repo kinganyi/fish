@@ -87,6 +87,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
+import fish_common  # noqa: E402  可见性谓词 `_visibility_sql` / 主人解析 `resolve_owner` / `warn_ignored`
 import fish_naming  # noqa: E402  人类面取名唯一实现
 import fish_hosts   # noqa: E402  宿主接入层（只读探测：装没装/接没接/接的哪条通道）
 import fish_push_audit  # noqa: E402  推送面板数据面（只读诊断 + 窄写配置）
@@ -312,7 +313,7 @@ def open_conn(db_path: str) -> sqlite3.Connection:
         try:
             conn.execute(pragma)
         except sqlite3.Error:
-            pass
+            pass  # A档：连接级调优是性能旁路（失败退回默认，不影响正确性）；且 open_conn 每次请求都跑，出声会变成每请求一条噪声
     prove_read_only(conn, db_path)
     return conn
 
@@ -1582,12 +1583,25 @@ def collect_stats(conn: sqlite3.Connection, *, days: int, top: int) -> dict:
     titles = {}
     codes = {r["code"] for r in list(hot_window) + list(hot_all) if r["code"]}
     if codes:
+        # 热搜榜要**显示标题**，所以它是"可见读路径"，必须与其它读路径走同一条谓词：
+        # 复用 `fish_common._visibility_sql`（第 39 轮起可见性执行的唯一实现），
+        # 这里**不新写一套判定**——两份真相迟早漂移，而这份漂移是"安静泄露"。
+        #
+        # viewer = 主人 citizen：本读口是单用户本机仪表盘，读口面就是主人面；
+        # owner 由 `fish_common.resolve_owner` 解析（绝不硬编码 id）。解析不到时
+        # viewer 为空 → `_visibility_sql` 对 private 一律排除，方向是"少露"不是"多露"。
+        #
+        # 开关关着（`privacy.visibility_enforced` 默认 False）时它返回空片段，
+        # 查询与旧行为逐字节等价。
+        vis_sql, vis_params = fish_common._visibility_sql(
+            conn, fish_common.resolve_owner(conn))
         code_list = sorted(codes)
         for start in range(0, len(code_list), 500):
             chunk = code_list[start:start + 500]
             for r in conn.execute(
                     "SELECT code, title FROM code_index WHERE code IN ("
-                    + ",".join("?" * len(chunk)) + ")", chunk):
+                    + ",".join("?" * len(chunk)) + ")" + vis_sql,
+                    [*chunk, *vis_params]):
                 titles[r["code"]] = r["title"]
 
     def hot_item(r) -> dict:
@@ -2397,7 +2411,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_error(500, "internal_error", f"{type(exc).__name__}: {exc}",
                                  "看服务端 stderr 的那行 JSON 日志；这是读口的缺陷")
             except OSError:
-                pass
+                pass  # A档：客户端已断开（回写注定再失败一次），真正的错误已由上面的 log(request_error) 落盘
         finally:
             log("request", path=path, method="POST", status=status,
                 ms=round((time.perf_counter() - started) * 1000, 2))
@@ -2495,7 +2509,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_error(500, "internal_error", f"{type(exc).__name__}: {exc}",
                                  "看服务端 stderr 的那行 JSON 日志；这是读口的缺陷，不是你的输入问题")
             except OSError:
-                pass
+                pass  # A档：同上——客户端已断开，回写注定再失败一次；真错误已由 log(request_error) 落盘
         finally:
             log("request", path=path, status=status,
                 ms=round((time.perf_counter() - started) * 1000, 2))

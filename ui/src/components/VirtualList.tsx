@@ -11,6 +11,21 @@ import { useEffect, useRef, type ReactNode } from 'react'
  * 行高动态（折叠展开会变高）用 `measureElement` + `data-index` 让 react-virtual
  * 自己量：单行 56px 是**估算值**，实际高度以测量为准，滚动不跳位。
  */
+/**
+ * 虚拟滚动的**测试开关**：`?novirtual=1` 时全量渲染（不虚拟化）。
+ *
+ * 这是判据 A-11 的**变异探针**：验收脚本用同一个页面、同一个 DOM 探针，只换这一个参数，
+ * 「DOM 行节点数」必须从绿翻红——证明那条判据测的是**虚拟滚动本身**，而不是
+ * 「列表本来就短所以怎么都小于 200」。用户正常路径不会带这个参数（不带等价于关闭）。
+ *
+ * 为什么放在产品代码里而不是测试里替换组件：A-11 要验的是**真实页面**里的渲染路径，
+ * 在测试里另搭一个页面就变成了测测试。这个开关只有一行判断，且默认关闭。
+ */
+function noVirtualRequested(): boolean {
+  if (typeof window === 'undefined') return false
+  return new URLSearchParams(window.location.search).get('novirtual') === '1'
+}
+
 export function VirtualList({
   count,
   estimateSize,
@@ -54,14 +69,31 @@ export function VirtualList({
     node?.focus({ preventScroll: true })
   }, [focusIndex, count, virtualizer])
 
+  // `data-count` = 列表**持有**多少条（不是 DOM 里渲染了多少条）。A-11 拿它判
+  // 「DOM 行数 < 持有条数」——少了这个数，列表只载 40 条时「< 200」恒成立，判据就没有牙。
+  const containerProps = {
+    ref: parentRef,
+    onScroll: (event: React.UIEvent<HTMLDivElement>) => onScroll?.(event.currentTarget),
+    className: `overflow-y-auto overflow-x-hidden ${className || ''}`,
+    role: 'list',
+    'aria-label': '行为流水',
+    'data-count': count,
+  } as const
+
+  if (noVirtualRequested()) {
+    return (
+      <div {...containerProps} data-virtualized="off">
+        {Array.from({ length: count }, (_, index) => (
+          <div key={getKey ? getKey(index) : index} data-index={index} data-row="">
+            {renderRow(index)}
+          </div>
+        ))}
+      </div>
+    )
+  }
+
   return (
-    <div
-      ref={parentRef}
-      onScroll={(event) => onScroll?.(event.currentTarget)}
-      className={`overflow-y-auto overflow-x-hidden ${className || ''}`}
-      role="list"
-      aria-label="行为流水"
-    >
+    <div {...containerProps} data-virtualized="on">
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative', width: '100%' }}>
         {virtualizer.getVirtualItems().map((virtualRow) => (
           <div
