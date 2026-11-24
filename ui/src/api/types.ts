@@ -535,12 +535,106 @@ export interface PushOverviewData {
   diagnostics: PushDiagnostics
   topCodes: PushTopCode[]
   config: PushConfigItem[]
+  /**
+   * 「二级拆解」（内容源 / 态势源）。**可选**：读口是旧版（没有这一块）时不画图表，
+   * 而是明说「该区数据未接：缺 breakdown」——缺数据 ≠ 全 0（96 §七 的同一纪律）。
+   */
+  breakdown?: PushBreakdown
   /** 数据**算出来的时刻**（读口缓存命中时它仍是缓存构建时刻，不是「此刻」）。 */
   asOf: string
   /** 缓存构建时刻（与 `asOf` 同值；单独给一个名字是为了让界面说得出「缓存于 X」）。 */
   cachedAt?: string
   /** 这份数据已经放了多久（秒）。0 = 刚算的；≥1 时界面要显示「缓存于 …，N 秒前」。 */
   cacheAgeSec?: number
+}
+
+/**
+ * 二级拆解的一行。**每一行都是同一形状**（`topFiles` 除外：那是「文件」不是「分组」，
+ * 见 `PushKbTopFile`），所以各组可以共用同一个行组件，前端不必为不同的组判空不同字段。
+ *
+ * `share = total / 组 total`（0..1）。组 total 为 0 时没有行（后端返回 `[]`），
+ * 所以这里给 `number | null` 只是兜底：`null` 一行都不画，不拿 0 冒充「占比 0%」。
+ * 组的行数上限 8 + 一行 `__other__`：合并行也带 accepted/pending，
+ * 所以「其他（N 项）」不会把采纳/待判写成 0。
+ */
+export interface PushBreakdownRow {
+  key: string
+  label: string
+  total: number
+  accepted: number
+  ignored: number
+  pending: number
+  share: number | null
+}
+
+/** 记忆区：类型（`mem_type`，空=未分类）/ 项目（空=未归属）/ 通道 + 开放词表占比。 */
+export interface PushMemoryBreakdown {
+  total: number
+  byType: PushBreakdownRow[]
+  byProject: PushBreakdownRow[]
+  byChannel: PushBreakdownRow[]
+  openLoop: {
+    /** 与 `diagnostics.openLoop.pushes` 是**同一个数**（后端复用，不重算）。 */
+    pushes: number
+    codes: number
+    /** 分母是 `memory.total`（不是推送总数）。 */
+    share: number | null
+  }
+}
+
+/** 知识库 top 文件：`rel`（vault 内相对路径）与 `title` 至少一个可读。 */
+export interface PushKbTopFile {
+  code: string
+  rel: string
+  title: string
+  total: number
+  accepted: number
+  ignored: number
+  pending: number
+}
+
+export interface PushKbBreakdown {
+  total: number
+  /** `kb:<vault>:<rel>` 的 `rel.split('/')[0]`；无斜杠=根（key 空串 / label「（根）」）。 */
+  byFolder: PushBreakdownRow[]
+  byChannel: PushBreakdownRow[]
+  topFiles: PushKbTopFile[]
+}
+
+export interface PushBoardBreakdown {
+  total: number
+  /** 按 `push_log.project`（推送行自己的项目；空=未归属）。 */
+  byProject: PushBreakdownRow[]
+  /** 按 `code` 去掉 `board:` 前缀（key 保留原编码，label 是看板名）。 */
+  byLabel: PushBreakdownRow[]
+}
+
+export interface PushActivityBreakdown {
+  total: number
+  /** 按 `activity:<目录>` 去前缀（key/label 都是目录）。 */
+  byDir: PushBreakdownRow[]
+}
+
+export interface PushGitBreakdown {
+  total: number
+  /** 按 `git:<repo_id>`（label 取 `git_repo` 的 display_name/identity，没有就退回编码）。 */
+  byRepo: PushBreakdownRow[]
+}
+
+/** 语料：现场关闭也要如实说「关着」+「窗口内还有多少历史行」。 */
+export interface PushCorpusBreakdown {
+  enabled: boolean
+  total: number
+  note: string
+}
+
+export interface PushBreakdown {
+  memory: PushMemoryBreakdown
+  kb: PushKbBreakdown
+  board: PushBoardBreakdown
+  activity: PushActivityBreakdown
+  git: PushGitBreakdown
+  corpus: PushCorpusBreakdown
 }
 
 /** 一条推送事件。`reaction` 空串 = 待判（库里是 NULL），不是「拒绝」。 */

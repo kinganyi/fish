@@ -4,7 +4,7 @@
 
 ## 这份脚本回答什么
 
-`docs/109-推送面板-设计与验收-20261124.md` 的判据是 30 条（V-01~V-30），覆盖五件事：
+`docs/109-推送面板-设计与验收-20261124.md` 的判据是 33 条（V-01~V-33），覆盖六件事：
 
   A. **读口**（V-01~V-07）：`/api/meta.capabilities` 里有 `push`；`overview` 的
      `totals.total` 与库直查**相等**（口径只有一个来源）；`sum(channels.total)` 对得上；
@@ -16,8 +16,10 @@
      `resume` → 10/true/450（都从 GET 读回），预设审计行带 `preset` 字段。
   C. **变异自证 + 界面 + 数据安全**（V-14~V-20）：把白名单那一行换成「放行」的补丁版
      → 同一个请求必须从 400 变成 200（**判据必须有判别力**）；源码字节在跑完后**不变**；
-     生产库 sha256/行数不变、生产目录不出现 `_audit/push-config.jsonl`；
-     `?page=settings&sub=push` 的二级导航 2 项、推送页标题 + 六块 + 刷新 + 4 张指标卡 +
+     生产库 sha256 前后一致、**本次运行**没往生产目录写 `_audit/push-config.jsonl`
+     （本来没有 → 跑完也不能有；本来就有 → 大小/行数/sha256 一个字节不长）；
+     `?page=settings&sub=push` 的二级导航 2 项、推送页标题 + 工具栏 + 六块内容
+     （`breakdown` 那一块由 V-32 单独判）+ 刷新 + 4 张指标卡 +
      7 个可写项 + 6 个只读项；1280×720 `scrollWidth == clientWidth`；截图落盘。
   D. **QA 第 1 轮打回的两条根因**（V-21~V-25）：**F1** —— 窗口内某通道一行都没有时
      `overview` 仍须 200（空库 + 单通道缺失两种坏输入，`sum(channels.total)` 要对得上
@@ -32,8 +34,22 @@
      「空串=待判」这条路到不了后端；**V-28** 6 线程并发写同一键，审计链必须满足
      `old == 上一行 new`，去掉写口的串行闸必须断链；**V-29** `--host 0.0.0.0` 时两个
      写端点 403 `write_requires_loopback`（读端点 200、库一个字节不动、启动日志有警告），
-     加 `--allow-remote-write` 才 200 且真写进库；**V-30** 命中缓存时 `asOf` 仍是数据时刻、
+     加 `--allow-remote-write` 才 200 且真写进库；**V-30** 命中缓存时 `asOf` 仍是数据时刻
+     ——两次读必须是**同一个字符串**（`asOf` 与缓存戳共用一个 `built_ts`，构建跨整秒
+     也不漂；修前是「asOf 取构建开始、缓存戳取构建结束」，5 次里只绿 3 次）、
      `cacheAgeSec` 变大、信封 `asOf` 也不冒充「此刻」。
+  F. **二级拆解**（V-31~V-33）：**V-31** `breakdown` 的口径和——`memory.total` 同时等于
+     四路（`byType` / `byProject` / `byChannel` / `kinds` 里的记忆类）之和，`kb` 与
+     看板/动作流/git 的每组行和等于组 total，并且**每个 total 都用 SQL 直查对拍**
+     （不信 API 自述）；**摘要相加关系**——界面那五个数（记忆/知识库/看板/动作流/git）
+     相加必须等于窗口总数（两条独立分母：SQL 直查行数 + `totals.total`），而**语料不在
+     和里**（`conv:` 已含在 `memory`，再加一遍就多 18 条）；空库（`push_log` 清空）与
+     单通道缺失两种坏输入下同样 200 且全 0。
+     **V-32** DOM——`data-push-block="breakdown"` 在、**真的画出来了**（不是 `display:none`
+     / 高 0）、内容源/态势源两栏、记忆三组 + KB 两组 + 看板两组 + 动作流 + git 都有
+     `data-breakdown-key` 行、1280×720 不横向溢出。**V-33** 变异自证——把 `memory.total`
+     +1 → 同一把尺子（V-31）必须红；把产物副本里这一区加 `hidden` → V-32 必须红；
+     恢复成基线后两边都绿。
 
 ## 数据安全（硬约束）
 
@@ -41,9 +57,9 @@
   写测试、审计文件、预设全部落在副本目录里。
 - 跑完对生产库取 sha256 与 config 行数**对拍**（V-19）；生产目录出现
   `_audit/push-config.jsonl` 直接判红。
-- 变异会改**副本目录**里的一份 `fish_push_audit.py`（V-14/V-23/V-25/V-28）与一份
-  `ui/dist` 副本（V-26），绝不碰仓库源码与产物：跑前跑后对 `p0/fish_push_audit.py`
-  取 sha256（V-15）。
+- 变异会改**副本目录**里的一份 `fish_push_audit.py`（V-14/V-23/V-25/V-28/V-33）与**两份**
+  `ui/dist` 副本（V-26 的布局变异、V-33 的 hidden 变异），绝不碰仓库源码与产物：
+  跑前跑后对 `p0/fish_push_audit.py` 取 sha256（V-15）。
 
 ## 用法
 
@@ -155,6 +171,35 @@ CONC_KEY = "push.after_tool_every_n_calls"
 CONC_THREADS = 6
 CONC_ROUNDS = 3
 
+# ── V-31~V-33 的尺子与变异 ─────────────────────────────────────────────
+#: 判据侧的 kind 分组**独立写死**，不从 `fish_push_audit` import：判据要能判实现，
+#: 不能跟实现共用同一份常量（那边改错时两边会一起错，判据就废了）。
+MEMORY_KINDS = ("memory", "artifact", "episode", "fact", "rule", "lesson")
+SITUATION_KINDS = ("board", "activity", "git")
+#: 行纪律：每组最多 8 行 + 一行合并行（`__other__`，必须是最后一行）。
+BREAKDOWN_ROWS_MAX = 9
+#: V-32 必须「有 `data-breakdown-key` 行」的子组（记忆三组 / KB 两组 / 看板两组 / 动作流 / git）。
+BREAKDOWN_REQUIRED_GROUPS = (
+    "memory.byType", "memory.byProject", "memory.byChannel",
+    "kb.byFolder", "kb.byChannel",
+    "board.byProject", "board.byLabel",
+    "activity.byDir", "git.byRepo",
+)
+#: V-32 的 DOM 必须是这两栏（内容源 / 态势源）。
+BREAKDOWN_SIDES = ("content", "situation")
+#: V-33 的数据面变异：`memory.total` +1（口径和立刻不成立；改的是**副本模块**）。
+BREAKDOWN_DATA_MUTATION = (
+    '        "memory": {\n            "total": memory_total,\n',
+    '        "memory": {\n            "total": memory_total + 1,  '
+    '# MUTATION: 口径和立刻不成立\n',
+)
+#: V-33 的 DOM 变异：给「二级拆解」区加 `hidden`（React 落成 `display:none`），
+#: 让「区在**且真的画出来了**」这条判据必须红。锚点只在**产物副本**里唯一命中。
+BREAKDOWN_DIST_MUTATION = (
+    '"data-push-block":"breakdown"',
+    '"data-push-block":"breakdown","hidden":true',
+)
+
 RESULTS: list[tuple[str, str, str]] = []
 
 
@@ -183,6 +228,26 @@ def sha256(path: str) -> str | None:
             return digest.hexdigest()
     except OSError:
         return None
+
+
+def _file_snapshot(path: str) -> dict:
+    """文件快照（是否存在 / 字节数 / 行数 / sha256 / mtime）——「跑完有没有变」的判据。
+
+    为什么要行数：只看大小的话，「追加了等长的两行」看不出来；只看 sha256 又说不清
+    「变了多少」。三样一起给，读数自己会说话。
+    """
+    if not os.path.exists(path):
+        return {"exists": False, "bytes": None, "lines": None,
+                "sha256": None, "mtime": None}
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            lines = sum(1 for _ in handle)
+    except OSError:
+        lines = None
+    return {"exists": True, "bytes": os.path.getsize(path), "lines": lines,
+            "sha256": sha256(path),
+            "mtime": datetime.fromtimestamp(os.path.getmtime(path), timezone.utc)
+            .strftime("%Y-%m-%dT%H:%M:%SZ")}
 
 
 # ── HTTP（带 status；写测试要看 400/405 的确切码）──────────────────────
@@ -316,13 +381,12 @@ def build_mutation(src_path: str, dest_dir: str, db_path: str, port: int) -> dic
 
 
 # ── V-26 的坏布局变异：改的是**打包产物副本**，不是源码 ────────────────
-def _mutate_dist(src_dir: str, dest_dir: str) -> dict:
-    """拷一份 `ui/dist` 到 `dest_dir`，把本轮两处布局修法一起还原成修前写法。
+def _mutate_dist(src_dir: str, dest_dir: str, mutations=DIST_MUTATIONS) -> dict:
+    """拷一份 `ui/dist` 到 `dest_dir`，把 `mutations` 里的每条锚点换成新片段。
 
-    为什么要从**产物**下手：布局是 CSS 类名决定的，判据要证明「这些类名真的在起作用」。
-    改源码就得整仓重建一次（还会把 `dist` 时间戳推后、连带所有截图变旧），改副本没有
-    这些副作用，且这里会用「每条锚点唯一命中」自证补丁真的打上了——补丁没打上时
-    变异会「看起来没有判别力」，而实际是判据在测一棵没被改过的树。
+    **默认是 V-26 的两处布局变异**（把本轮修法一起还原成修前写法）；V-33 另外传它自己的
+    那一条（给二级拆解区加 `hidden`）。每条锚点必须**唯一命中**，命中数不是 1 直接抛：
+    补丁没打上时变异会「看起来没有判别力」，而实际是判据在测一棵没被改过的树。
     """
     if not os.path.isdir(src_dir):
         raise RuntimeError(f"缺构建产物：{src_dir}（先 cd ui && npm run build）")
@@ -332,7 +396,7 @@ def _mutate_dist(src_dir: str, dest_dir: str) -> dict:
                 if name.endswith(".js")] if os.path.isdir(assets) else []
     hits: dict[str, int] = {}
     patched_files: list[str] = []
-    for old, new in DIST_MUTATIONS:
+    for old, new in mutations:
         found: list[str] = []
         for path in js_files:
             with open(path, encoding="utf-8") as handle:
@@ -352,7 +416,7 @@ def _mutate_dist(src_dir: str, dest_dir: str) -> dict:
         raise RuntimeError(
             "dist 里这些锚点命中数不是 1："
             + "；".join(f"{old!r} → {hits[old]}" for old in missing)
-            + "。类名改过就该同步改 DIST_MUTATIONS。")
+            + "。类名/属性改过就该同步改变异锚点。")
     return {"dir": dest_dir, "hits": hits, "files": patched_files}
 
 
@@ -539,6 +603,20 @@ DOM_PROBES = {
     "presetButtons": "document.querySelectorAll('[data-push-preset]').length",
     "eventRows": "document.querySelectorAll('[data-push-event]').length",
     "channelRows": "document.querySelectorAll('[data-push-channel]').length",
+    # ── V-32 的读数：二级拆解区（存在 + **真的画出来了** + 两栏 + 每个子组几行）──
+    "breakdownBlock": "document.querySelectorAll('[data-push-block=\"breakdown\"]').length",
+    # 为什么要量 `getBoundingClientRect().height` 与 `display`：只数 DOM 节点的话，
+    # 给这一区加个 `hidden` 也照样「存在」——V-33 的 DOM 变异就是为了证明这条判据有牙齿。
+    "breakdownBox": "(function(){var b=document.querySelector("
+                    "'[data-push-block=\"breakdown\"]');if(!b)return null;"
+                    "var r=b.getBoundingClientRect();"
+                    "return {w:Math.round(r.width),h:Math.round(r.height),"
+                    "display:getComputedStyle(b).display,visible:b.offsetParent!==null}})()",
+    "breakdownSides": "Array.from(document.querySelectorAll('[data-breakdown-side]'))"
+                      ".map(function(n){return n.getAttribute('data-breakdown-side')})",
+    "breakdownGroups": "Array.from(document.querySelectorAll('[data-breakdown-group]'))"
+                       ".map(function(g){return {group:g.getAttribute('data-breakdown-group'),"
+                       "rows:g.querySelectorAll('[data-breakdown-key]').length}})",
     "text": "document.body ? document.body.innerText : ''",
     "scrollWidth": "document.documentElement.scrollWidth",
     "clientWidth": "document.documentElement.clientWidth",
@@ -623,6 +701,170 @@ def _agent_layout_ok(probe: dict | None) -> tuple[bool, dict]:
                 "canScroll": can_scroll, "reach": reach, "refresh": refresh}
 
 
+def _config_flag(db_path: str, key: str):
+    """库里那个配置位的真假；读不到给 `None`（判不到，**不是** `False`）。"""
+    raw = _config_value(db_path, key)
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _breakdown_sql_counts(db_path: str, since: str) -> dict:
+    """**直接 SQL 数一遍**（V-31 的独立尺子：不信 breakdown 自己的任何字段）。
+
+    `memory` 用 `total - kb - board - activity - git` 反推：`conv:` 按既有契约归 memory，
+    所以这条减法与实现里的「记忆 = 非态势类」是同一口径的**两条独立路径**——两路对不上
+    就说明有一路错了（这正是 V-31 要的判别力）。
+    """
+    def count(extra: str = "") -> int:
+        return count_rows(db_path,
+                          "SELECT COUNT(*) FROM push_log WHERE pushed_at >= ?" + extra,
+                          (since,))
+
+    total = count()
+    kb = count(" AND code LIKE 'kb:%'")
+    board = count(" AND code LIKE 'board:%'")
+    activity = count(" AND code LIKE 'activity:%'")
+    git = count(" AND code LIKE 'git:%'")
+    conv = count(" AND code LIKE 'conv:%'")
+    return {"total": total, "kb": kb, "board": board, "activity": activity,
+            "git": git, "conv": conv,
+            "memory": total - kb - board - activity - git,
+            "corpusEnabled": _config_flag(db_path, "push.corpus_enabled")}
+
+
+def _breakdown_checks(data: dict | None, sql: dict) -> tuple[bool, dict]:
+    """V-31 的尺子：口径和 + 每行纪律 + 每组与 SQL 直查相等（基线与变异共用）。
+
+    `data` = `/api/push/overview` 的 `data`；`sql` = `_breakdown_sql_counts(...)`。
+    空库也用它判：0 行时所有和都成立、所有组都是空列表——**不另写一把空库专用的尺子**，
+    否则「空库通过」不能证明线上那条路径没坏。
+    """
+    data = data or {}
+    bd = data.get("breakdown") or {}
+    memory = bd.get("memory") or {}
+    kb = bd.get("kb") or {}
+    board = bd.get("board") or {}
+    activity = bd.get("activity") or {}
+    git = bd.get("git") or {}
+    corpus = bd.get("corpus") or {}
+    kinds = {item.get("kind"): int(item.get("total") or 0)
+             for item in (data.get("kinds") or [])}
+
+    def total_of(node) -> int:
+        return int((node or {}).get("total") or 0)
+
+    def sum_rows(rows) -> int:
+        return sum(int(row.get("total") or 0) for row in (rows or []))
+
+    groups = {
+        "memory.byType": memory.get("byType") or [],
+        "memory.byProject": memory.get("byProject") or [],
+        "memory.byChannel": memory.get("byChannel") or [],
+        "kb.byFolder": kb.get("byFolder") or [],
+        "kb.byChannel": kb.get("byChannel") or [],
+        "board.byProject": board.get("byProject") or [],
+        "board.byLabel": board.get("byLabel") or [],
+        "activity.byDir": activity.get("byDir") or [],
+        "git.byRepo": git.get("byRepo") or [],
+    }
+    row_problems: list[str] = []
+    for name, rows in groups.items():
+        if len(rows) > BREAKDOWN_ROWS_MAX:
+            row_problems.append(f"{name}: {len(rows)} 行 > {BREAKDOWN_ROWS_MAX}")
+        keys = [row.get("key") for row in rows]
+        if "__other__" in keys and keys[-1] != "__other__":
+            row_problems.append(f"{name}: __other__ 不在最后一行")
+        for row in rows:
+            if int(row.get("total") or 0) < 0:
+                row_problems.append(f"{name}: {row.get('key')} total<0")
+            share = row.get("share")
+            if not isinstance(share, (int, float)) or not (0.0 <= float(share) <= 1.0 + 1e-9):
+                row_problems.append(f"{name}: {row.get('key')} share={share!r}")
+            if not row.get("label"):
+                row_problems.append(f"{name}: {row.get('key')} 没有 label")
+
+    # 摘要五个数之和（不含 corpus：它已含在 memory 里）与窗口总数的两个来源。
+    sum5 = (total_of(memory) + total_of(kb) + total_of(board)
+            + total_of(activity) + total_of(git))
+    total_api = int((data.get("totals") or {}).get("total") or 0)
+
+    checks = {
+        "breakdownPresent": bool(bd),
+        "memorySql": total_of(memory) == sql.get("memory"),
+        "memoryKinds": total_of(memory) == sum(kinds.get(kind, 0) for kind in MEMORY_KINDS),
+        "memoryTypeSum": sum_rows(groups["memory.byType"]) == total_of(memory),
+        "memoryProjectSum": sum_rows(groups["memory.byProject"]) == total_of(memory),
+        "memoryChannelSum": sum_rows(groups["memory.byChannel"]) == total_of(memory),
+        "kbSql": total_of(kb) == sql.get("kb"),
+        "kbFolderSum": sum_rows(groups["kb.byFolder"]) == total_of(kb),
+        "kbChannelSum": sum_rows(groups["kb.byChannel"]) == total_of(kb),
+        "boardSql": total_of(board) == sql.get("board"),
+        "boardProjectSum": sum_rows(groups["board.byProject"]) == total_of(board),
+        "boardLabelSum": sum_rows(groups["board.byLabel"]) == total_of(board),
+        "activitySql": total_of(activity) == sql.get("activity"),
+        "activityDirSum": sum_rows(groups["activity.byDir"]) == total_of(activity),
+        "gitSql": total_of(git) == sql.get("git"),
+        "gitRepoSum": sum_rows(groups["git.byRepo"]) == total_of(git),
+        "situationKinds": (total_of(board) + total_of(activity) + total_of(git)
+                           == sum(kinds.get(kind, 0) for kind in SITUATION_KINDS)),
+        "corpusSql": total_of(corpus) == sql.get("conv"),
+        # 语料这块**不写死 `enabled=false`**：判的是「与库里的 push.corpus_enabled 一致」。
+        # 写死 false 的判据会在有人打开语料时变红——那是数据变了，不是代码坏了。
+        "corpusEnabledMatchesDb": (sql.get("corpusEnabled") is not None
+                                   and corpus.get("enabled") == sql.get("corpusEnabled")),
+        "corpusNote": "corpus_enabled" in str(corpus.get("note") or ""),
+        # **摘要相加关系**（QA 🟡②）：界面上那五个数（记忆/知识库/看板/动作流/git）相加必须
+        # 等于窗口总数——两条独立路径各给一次分母：① `push_log` SQL 直查的行数、
+        # ② `totals.total`（`fish.push_stats` 算的另一个数）。
+        # **语料不在和里**：`conv:` 按既有契约归 `memory`（本库 18 条，落在 byType「未分类」），
+        # 再加一遍就会比总数多 18。所以 `sum5 + corpus` 只有在 corpus 为 0 时才等于总数。
+        "summaryAddsUp": (sum5 == int(sql.get("total") or 0) == total_api),
+        "corpusInsideMemory": total_of(corpus) <= total_of(memory),
+        "rowsOk": not row_problems,
+    }
+    return all(checks.values()), {
+        **checks,
+        "rowProblems": row_problems,
+        "summary": {"sum5": sum5, "totalApi": total_api, "totalSql": int(sql.get("total") or 0),
+                    "corpusIncludedInMemory": total_of(corpus)},
+        "totals": {"memory": total_of(memory), "kb": total_of(kb),
+                   "board": total_of(board), "activity": total_of(activity),
+                   "git": total_of(git), "corpus": total_of(corpus)},
+        "groupCounts": {name: len(rows) for name, rows in groups.items()},
+        "kinds": kinds,
+        "sql": sql,
+    }
+
+
+def _breakdown_dom_ok(probe: dict | None) -> tuple[bool, dict]:
+    """V-32 的尺子：区在 → **真的画出来了** → 两栏 → 9 个子组各有 `data-breakdown-key` 行。
+
+    「存在」与「看得见」是两件事：`hidden` 的 section 照样能被 `querySelector` 选中，
+    所以这里量 `getBoundingClientRect().height > 20`、`display != 'none'`、
+    `offsetParent !== null` 三样（V-33 的 DOM 变异证明这一条有牙齿）。
+    """
+    probe = probe or {}
+    box = probe.get("breakdownBox") or {}
+    sides = sorted(probe.get("breakdownSides") or [])
+    groups = {str(item.get("group")): int(item.get("rows") or 0)
+              for item in (probe.get("breakdownGroups") or [])
+              if isinstance(item, dict)}
+    missing = [name for name in BREAKDOWN_REQUIRED_GROUPS if groups.get(name, 0) < 1]
+    visible = (isinstance(box.get("h"), int) and box["h"] > 20
+               and box.get("display") != "none" and box.get("visible") is True)
+    ok = (probe.get("breakdownBlock") == 1
+          and sides == sorted(BREAKDOWN_SIDES)
+          and visible
+          and not missing)
+    return ok, {"block": probe.get("breakdownBlock"), "sides": sides, "box": box,
+                "groups": groups, "missingGroups": missing, "visible": visible}
+
+
 def _port_is_free(port: int) -> bool:
     """端口是不是真的**空**（不只看能不能 bind：Windows 上 0.0.0.0 与 127.0.0.1 会「共存」，
     请求却只发给 127.0.0.1 的那个 —— 实测踩过一次假绿，所以这里两头都试）。"""
@@ -672,7 +914,7 @@ def _ids_of(envelope: dict | None) -> list:
 def main() -> int:
     run_started = time.time()          # V-20 用它判「截图是本次运行之后写的」
     parser = argparse.ArgumentParser(
-        description="设置页「推送」面板验收（V-01~V-30；只写临时库副本）")
+        description="设置页「推送」面板验收（V-01~V-33；只写临时库副本）")
     parser.add_argument("--db", default=DEFAULT_DB, help="生产库（只读拷贝它，绝不写它）")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--keep", action="store_true", help="保留临时目录备查")
@@ -690,6 +932,11 @@ def main() -> int:
 
     prod_sha = sha256(prod_db)
     prod_audit = os.path.join(os.path.dirname(prod_db), "_audit", "push-config.jsonl")
+    # 生产目录里的审计文件**可能在本次运行之前就已经存在**（别的会话在推送页上点过保存/预设）。
+    # 那种情况下「文件不存在」不是一个能成立的前提——判据要问的是「**这一次**有没有往生产写」，
+    # 所以先拍一张快照（大小 + 行数 + sha256 + mtime），跑完对拍「一个字节都没长」。
+    # 环境本来是干净的，就仍然判「跑完也不该出现这个文件」（原判据的字面口径不放宽）。
+    prod_audit_before = _file_snapshot(prod_audit)
     src_sha = sha256(api_src)
     print(f"# 判定时刻 {iso_now()}")
     print(f"# 生产库 {prod_db}")
@@ -1227,6 +1474,10 @@ def main() -> int:
             conn.close()
 
         # ── DOM 面（1280 不溢出 + 六块 + 截图）────────────────────────
+        # `probe` 在这里先置 None：skip-dom / 没 dist / 浏览器起不来时，后面 V-32/V-33
+        # 要用同一个变量判「没验界面」，不能让 `probe` 处在「没定义」的状态（NameError 会被
+        # 外层当程序崩溃，而不是判 SKIP）。
+        probe = None
         if args.skip_dom:
             for cid in ("V-16", "V-17", "V-18", "V-26"):
                 record(cid, "SKIP", "--skip-dom：本次没验界面")
@@ -1369,6 +1620,10 @@ def main() -> int:
             return out
 
         empty_srv = one_srv = mut_srv = None
+        # V-31 要用这两个读数（空库 / 单通道的 breakdown 和）：先给空 dict 兜底，
+        # 起不来时它 `[30]` 会 ValueError/KeyError → V-31 记 SKIP，而不是 NameError 崩脚本。
+        empty_windows: dict = {}
+        one_windows: dict = {}
         try:
             empty_port = _free_port()
             empty_base = f"http://127.0.0.1:{empty_port}"
@@ -1568,6 +1823,134 @@ def main() -> int:
                                    "patchedDir": f2_patch}, ensure_ascii=False))
             except RuntimeError as exc:
                 record("V-25 F2 变异自证", "SKIP", f"变异服务起不来：{exc}")
+
+        # ── F. 二级拆解（V-31~V-33）──────────────────────────────────────
+        # V-31 三条独立路径对拍：① API 自述的 breakdown、② 组内行和、③ SQL 直查
+        # （`_breakdown_sql_counts` 自己数一遍——任务书要求「不许只信 API 自述」）。
+        v31_ok = False
+        v31_detail: dict = {}
+        try:
+            st31, env31 = http_json(f"{base}/api/push/overview?days=30")
+            v31_data = (env31 or {}).get("data") or {}
+            since31 = (v31_data.get("window") or {}).get("since") or ""
+            sql31 = _breakdown_sql_counts(copy_path, since31)
+            bd_ok, v31_detail = _breakdown_checks(v31_data, sql31)
+
+            empty_since = ((empty_windows[30]["data"].get("window") or {}).get("since") or "")
+            empty_ok, empty_detail = _breakdown_checks(
+                empty_windows[30]["data"], _breakdown_sql_counts(f1_empty, empty_since))
+            one_since = ((one_windows[30]["data"].get("window") or {}).get("since") or "")
+            one_ok, one_detail = _breakdown_checks(
+                one_windows[30]["data"], _breakdown_sql_counts(f1_one, one_since))
+            # 空库还要**显式**全 0：「checks 全过」在 0 行时是必然，不足以证明入口没坏掉。
+            empty_zeros = (all(int(value) == 0 for value in empty_detail["totals"].values())
+                           and all(count == 0
+                                   for count in empty_detail["groupCounts"].values()))
+            # 单通道也要显式「还有量」：否则在空库上跑也会绿（同一个道理的另一半）。
+            one_nonzero = (one_detail["totals"]["memory"] > 0
+                           or one_detail["totals"]["kb"] > 0)
+            v31_ok = (st31 == 200
+                      and empty_windows[30]["status"] == 200
+                      and one_windows[30]["status"] == 200
+                      and isinstance(v31_data.get("breakdown"), dict)
+                      and bd_ok and empty_ok and empty_zeros and one_ok and one_nonzero)
+            record("V-31 breakdown 口径和：memory==byType/byProject/byChannel/kinds 四路之和、"
+                   "每组行和==组 total、每个 total 都 SQL 直查对拍、摘要五数相加==窗口总数"
+                   "（语料已在记忆里，不重复相加）（空库/单通道同样 200 且全 0）",
+                   v31_ok,
+                   json.dumps({"status": st31, "since": since31,
+                               "checks": {name: value for name, value in v31_detail.items()
+                                          if isinstance(value, bool)},
+                               "totals": v31_detail.get("totals"),
+                               "summary": v31_detail.get("summary"),
+                               "groupCounts": v31_detail.get("groupCounts"),
+                               "rowProblems": v31_detail.get("rowProblems"),
+                               "sql": sql31,
+                               "empty": {"status": empty_windows[30]["status"],
+                                         "checksPass": empty_ok, "zeros": empty_zeros,
+                                         "totals": empty_detail["totals"],
+                                         "groupCounts": empty_detail["groupCounts"]},
+                               "oneChannel": {"status": one_windows[30]["status"],
+                                              "checksPass": one_ok, "nonzero": one_nonzero,
+                                              "totals": one_detail["totals"]}},
+                              ensure_ascii=False))
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            record("V-31 breakdown 口径和", "SKIP", f"读数不完整，判不了：{exc!r}")
+
+        # V-32 的 DOM 读数来自上面那次 1280×720 渲染（`probe`；`--skip-dom` 时为 None）。
+        v32_ok = False
+        if probe is None:
+            record("V-32 DOM：二级拆解区可见 + 两栏 + 9 个子组都有 data-breakdown-key",
+                   "SKIP", "--skip-dom / 缺 dist / 浏览器起不来：本次没验界面")
+        else:
+            dom_ok, dom_detail = _breakdown_dom_ok(probe)
+            sw, cw = probe.get("scrollWidth"), probe.get("clientWidth")
+            overflow_ok = isinstance(sw, int) and isinstance(cw, int) and sw == cw
+            shot = ({"path": SHOT_PATH, "bytes": os.path.getsize(SHOT_PATH),
+                     "mtime": datetime.fromtimestamp(os.path.getmtime(SHOT_PATH),
+                                                     timezone.utc)
+                     .strftime("%Y-%m-%dT%H:%M:%SZ")} if os.path.exists(SHOT_PATH) else None)
+            v32_ok = dom_ok and overflow_ok
+            record("V-32 DOM：二级拆解区在且不 hidden + 内容源/态势源两栏 + 记忆三组/KB 两组/"
+                   "看板两组/动作流/git 都有 data-breakdown-key 行 + 1280×720 不横向溢出",
+                   v32_ok,
+                   json.dumps({"dom": dom_detail,
+                               "overflow": {"scrollWidth": sw, "clientWidth": cw},
+                               "shot": shot}, ensure_ascii=False))
+
+        # V-33 变异自证：数据面（memory.total +1）→ V-31 的尺子必红；
+        # DOM 面（给这一区加 hidden）→ V-32 的尺子必红。基线（v31_ok / v32_ok）是绿的，
+        # 所以「恢复后绿」这一半由它们自己证明，不靠一句口头的「已经改回来了」。
+        if probe is None or not v31_ok:
+            record("V-33 变异自证：memory.total+1 → V-31 必红；DOM 加 hidden → V-32 必红",
+                   "SKIP", "基线没绿 / 没验界面：变异没有对照组，判不了（没验 ≠ 通过）")
+        else:
+            v33_dir = os.path.join(work, "v33-data")
+            v33_dist = os.path.join(work, "v33-dist")
+            os.makedirs(v33_dir, exist_ok=True)
+            data_srv = dom_srv = None
+            try:
+                # ① 数据面变异：`memory.total` +1 的**副本模块**（仓库源码一个字节不动）
+                v33_port = _free_port()
+                data_meta = _patch_module(api_src, v33_dir, copy_path, v33_port,
+                                          [BREAKDOWN_DATA_MUTATION])
+                data_srv = start_api(copy_path, v33_port, boot_dir=v33_dir)
+                st33, env33 = http_json(
+                    f"http://127.0.0.1:{v33_port}/api/push/overview?days=30")
+                mut_data = (env33 or {}).get("data") or {}
+                mut_since = (mut_data.get("window") or {}).get("since") or ""
+                mut_ok, mut_detail = _breakdown_checks(
+                    mut_data, _breakdown_sql_counts(copy_path, mut_since))
+                # ② DOM 面变异：产物副本里给二级拆解区加 `hidden`（React → display:none）
+                dist_meta = _mutate_dist(DIST_DIR, v33_dist,
+                                         mutations=(BREAKDOWN_DIST_MUTATION,))
+                dom_port = _free_port()
+                dom_srv = start_api(copy_path, dom_port, dist=v33_dist)
+                mut_probe = render(f"http://127.0.0.1:{dom_port}/?page=settings&sub=push",
+                                   DOM_PROBES, width=1280, height=720, wait_ms=8000)
+                mut_dom_ok, mut_dom_detail = _breakdown_dom_ok(mut_probe)
+                v33_ok = (not mut_ok) and (not mut_dom_ok)
+                record("V-33 变异自证：memory.total+1 → V-31 必红；DOM 加 hidden → V-32 必红"
+                       "（基线与恢复后都是绿的）",
+                       v33_ok,
+                       json.dumps({"baseline": {"v31": v31_ok, "v32": v32_ok},
+                                   "dataMutation": {
+                                       "status": st33, "checksPass": mut_ok,
+                                       "failing": [name for name, value in mut_detail.items()
+                                                   if isinstance(value, bool) and not value],
+                                       "totals": mut_detail.get("totals"),
+                                       "anchorHits": data_meta["hits"][0]},
+                                   "domMutation": {"checksPass": mut_dom_ok,
+                                                   "detail": mut_dom_detail,
+                                                   "anchorHits": dist_meta["hits"]},
+                                   "patched": {"module": v33_dir, "dist": v33_dist}},
+                                  ensure_ascii=False))
+            except RuntimeError as exc:
+                record("V-33 变异自证", "SKIP", f"变异服务起不来：{exc}")
+            finally:
+                for _proc in (data_srv, dom_srv):
+                    if _proc is not None:
+                        ACC._kill_tree(_proc)
     finally:
         for proc in [server, mutate_server, *extra_servers]:
             if proc is not None:
@@ -1575,10 +1958,19 @@ def main() -> int:
 
     # ── 生产库对拍 + 截图（V-19/V-20）────────────────────────────────
     prod_sha_after = sha256(prod_db)
-    record("V-19 生产库未被写：sha256 前后一致 + 生产目录没有 _audit/push-config.jsonl",
-           prod_sha_after == prod_sha and not os.path.exists(prod_audit),
+    prod_audit_after = _file_snapshot(prod_audit)
+    # ① 库 sha256 前后一致；② 审计文件**这一次**没被动过：
+    #    本来没有 → 跑完也不能有；本来就有（别的会话写过）→ 大小/行数/sha256 一个字节不变。
+    audit_ok = (prod_audit_after == prod_audit_before
+                if prod_audit_before["exists"]
+                else prod_audit_after["exists"] is False)
+    record("V-19 生产库未被写：sha256 前后一致 + 本次运行没往生产目录写 "
+           "_audit/push-config.jsonl（本来没有 → 跑完也没有）",
+           prod_sha_after == prod_sha and audit_ok,
            json.dumps({"shaBefore": prod_sha, "shaAfter": prod_sha_after,
-                       "prodAuditExists": os.path.exists(prod_audit),
+                       "prodAuditBefore": prod_audit_before,
+                       "prodAuditAfter": prod_audit_after,
+                       "prodAuditPreExisting": prod_audit_before["exists"],
                        "auditPathInCopy": _audit_path(copy_path)}, ensure_ascii=False))
     # V-20 加一条「**本次运行之后**写的」：只看大小会把上一次跑留下的旧图当成证据
     # （S6 判的是「晚于 dist」，而 dist 可能是几分钟前建好的）。

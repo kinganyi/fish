@@ -143,12 +143,12 @@ node scripts/smoke.mjs      # S6 这一条就是它：任一张 png 比 dist 旧
 `Agent 接入`（原宿主页，逻辑原样，左列表 260→220）与 `推送`（新）。
 深链 `?page=settings&sub=push` 刷新后仍在推送页；回写只动 `sub` 这一个键（`?api=` 里的冒号原样）。
 
-推送页四个端点（数据面 `p0/fish_push_audit.py`，验收 `p0/tools/verify_push_panel.py` **30 条**
-V-01~V-30）：
+推送页四个端点（数据面 `p0/fish_push_audit.py`，验收 `p0/tools/verify_push_panel.py` **33 条**
+V-01~V-33）：
 
 | 端点 | 读写 | 说明 |
 |---|---|---|
-| `GET /api/push/overview?days=7\|30` | 读 | 诊断概览；`totals` **复用** `fish.push_stats`，不重算；`asOf` 是**数据时刻**（命中 15 s 缓存时另给 `cachedAt` + `cacheAgeSec`），不拿「此刻」冒充 |
+| `GET /api/push/overview?days=7\|30` | 读 | 诊断概览；`totals` **复用** `fish.push_stats`，不重算；`asOf` 是**数据时刻**（命中 15 s 缓存时另给 `cachedAt` + `cacheAgeSec`），不拿「此刻」冒充；`asOf` 与缓存戳共用**同一个** `built_ts`，所以同一次缓存里连读两次是**同一个字符串**（构建 0.3–0.8 s，跨整秒也不漂） |
 | `GET /api/push/events?limit&channel&reaction` | 读 | 最近推送（id 倒序）；`reaction` 不传=不过滤，**`pending`=只要待判**（空串不是契约：`parse_qs` 会丢空值，那条路到不了后端） |
 | `POST /api/push/config` | **写** | 单个白名单键（7 个）+ 类型/范围校验 + 审计；**非回环监听时默认 403 `write_requires_loopback`** |
 | `POST /api/push/preset` | **写** | `pause` / `resume` 两个预设（同上，另一个粒度的动作） |
@@ -165,6 +165,43 @@ V-01~V-30）：
 （**Agent 接入**页 1280×720：详情区可滚、刷新按钮 `bottom≤720` 且命中，判据 V-26；
 把两处布局修法还原成修前写法的产物副本必须红）。设计/口径/未验项见
 `docs/109-推送面板-设计与验收-20261124.md`。
+
+### 推送页的「二级拆解」（2026-11-24 第二轮，`data.breakdown`）
+
+`GET /api/push/overview` 的 `data.breakdown` 是**同一批推送行的第二层拆解**，界面在
+「通道」之后、「Top offenders」之前加了一块 `section[data-push-block="breakdown"]`：
+
+- **内容源**（左）：记忆（`byType` / `byProject` / `byChannel` / `openLoop`）→ 知识库
+  （`byFolder` / `byChannel` / `topFiles`）→ 语料（`enabled` + `total` + 说明）；
+- **态势源**（右）：看板（`byProject` / `byLabel`）→ 动作流（`byDir`）→ git（`byRepo`）。
+
+字段纪律（前端不再算第二份）：
+
+| 字段 | 含义 |
+|---|---|
+| `memory.total` / `kb.total` / `board.total` / `activity.total` / `git.total` | 组 total；**等于该组每一行 `total` 之和**（截断成「前 8 行 + 其他（N 项）」之后也成立） |
+| 行 `{key,label,total,accepted,ignored,pending,share}` | 每行同一形状；`share = total / 组 total`（0..1） |
+| `memory.openLoop` | `pushes`/`codes` 与 `diagnostics.openLoop` 是**同一个数**（复用不重算），`share` 分母是 `memory.total` |
+| `kb.topFiles` | 按次数前 5，`{code,rel,title,total,accepted,ignored,pending}`；`rel` 与 `title` 至少一个可读 |
+| `corpus` | `{enabled,total,note}`；`enabled` 读 `push.corpus_enabled`，`total` 是窗口内 `conv:` 行数（关闭前推过多少就写多少） |
+
+**相加纪律（别把语料加两遍）**：`conv:` 按既有契约归 `memory`（`classify_kind` 把它算进
+「记忆」，`byType` 里显示成「未分类」18 条）。所以界面写「记忆 5 177（其中语料历史 18）·
+知识库 882 · 语料：关闭（18 条历史行，已计入记忆）」，语料卡再写一句「这 18 条已计入上面
+『记忆』的未分类，不与记忆/知识库重复相加」。**判据钉的是数据面**：界面上那五个数相加
+`memory + kb + board + activity + git` 必须等于窗口总数（V-31 的 `summaryAddsUp`，两条独立
+分母：SQL 直查行数 + `totals.total`）——**`corpus` 不在和里**，加进去就比总数多 18。
+
+`breakdown` 是**可选块**：读口是旧版时界面写「该区数据未接：缺 breakdown」，不画空图；
+组 total 为 0 时写「本窗口没有可拆的推送」，不画一排 0。判据 V-31（口径和 + 摘要相加关系 +
+SQL 直查对拍，含空库/单通道两种坏输入）、V-32（DOM 可见 + 两栏 + 9 个子组有行 + 1280 不溢出）、
+V-33（两个变异各自必红：`memory.total` +1 → V-31 红；产物副本给这一区加 `hidden` → V-32 红）。
+
+**两条如实读的边界**（不是功能坏了）：① `board.byProject` 只有一行「未归属」——库里的
+看板推送行 `push_log.project` 全为 NULL（`board:` 伪编码不落项目），看板的区分度在
+`byLabel`（3 个看板：81 / 41 / 38）；界面 hint 已写明。② `classify_kind` 是「`mem_type`
+优先、前缀兜底」——将来若有 `kb:`/`board:` 编码在 `code_index` 里带记忆类 `mem_type`，
+它会同时落进「记忆」和前缀组（双算），V-31 的相加关系会红；本库当前 0 条。
 
 ### 翻页的窗口起点：`wsince`（R-01 残留）
 

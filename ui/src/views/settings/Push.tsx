@@ -7,9 +7,12 @@ import {
   postPushPreset,
 } from '../../api/endpoints'
 import type {
+  PushBreakdown,
+  PushBreakdownRow,
   PushChannel,
   PushConfigItem,
   PushEvent,
+  PushKbTopFile,
   PushOverviewData,
   PushPreset,
   PushTopCode,
@@ -21,7 +24,7 @@ import type { LoadState } from '../../store/workbench'
 /**
  * 设置 · 推送 —— **「推送到底有没有用、为什么没用、想调哪里」的唯一界面**。
  *
- * 这一屏把三件事分开摆，因为它们的错法不同：
+ * 这一屏把四件事分开摆，因为它们的错法不同：
  *
  *  1. **收益侧**（采纳率/盲区消除率）与**成本侧**（违规率）**分栏**：合成一个「总分」会让
  *     「不说话」看起来最安全（沉默永远没有误报）。所以四张指标卡各自带口径小字，
@@ -33,6 +36,16 @@ import type { LoadState } from '../../store/workbench'
  *     `factors/rrf/mmr/rerank/corpus` **只读**并在页面上说明为什么：`push.enabled=false`
  *     会连 `tool_activity` 采集一起停（`fish_push_hook.py:138`），那是「把仪表盘关掉」
  *     而不是「调安静」——想止血请用「止血预设」（它只动那三个口味键）。
+ *  4. **二级拆解**回答「这些推送是什么东西」：左「内容源」= 记忆（类型/项目/通道/开放词表）
+ *     → 知识库（目录/通道/top 文件）→ 语料（现场关闭说明）；右「态势源」= 看板（项目/看板）
+ *     → 动作流（目录）→ git（仓库）。**每组最多 8 行 + 一行「其他（N 项）」**，
+ *     合并行也带采纳/待判（后端算好，前端不重算）；组 total 为 0 时写一句「本窗口没有
+ *     可拆的推送」而不是画一排 0——0 是读数，缺是状态，两者文案必须不同（96 §七）。
+ *     `breakdown` 缺失（读口是旧版）时明说「该区数据未接：缺 breakdown」，不画空图。
+ *     **相加纪律**：语料（`conv:` 前缀）按既有契约落在 `memory` 桶里（`classify_kind`
+ *     把它归 memory，`byType` 显示成「未分类」18 条），所以汇总行写「记忆 X（其中语料
+ *     历史 Y…）」、语料卡写「已计入记忆，不重复相加」——**不许**让三个数字看起来可以
+ *     相加成总数（V-31 有一条判据钉 `memory+kb+board+activity+git == totals.total`）。
  *
  * 写口纪律：所有写操作都要 `window.confirm` 二次确认，成功后 **重新拉一次 overview**
  * （不拿本地值假装已生效）；失败把后端原文贴出来（`bad_key` / `bad_value` 的后半句
@@ -176,6 +189,95 @@ function TopRow({ item, index }: { item: PushTopCode; index: number }) {
           {item.title}
         </p>
       ) : null}
+    </li>
+  )
+}
+
+function BreakdownRow({ item }: { item: PushBreakdownRow }) {
+  // 条宽按**组内占比**（`share`）而不是「本组最大行」：`share` 是后端给的同一把尺子，
+  // 前端不再算一遍（算两遍就会漂）。`null` = 组 total 为 0，那时压根没有行。
+  const width = item.share === null ? 0 : Math.round(Math.max(0, Math.min(1, item.share)) * 100)
+  return (
+    <li data-breakdown-key={item.key} className="border-b border-n3/40 py-1">
+      <div className="flex min-w-0 items-baseline gap-2">
+        <span className="min-w-0 flex-1 truncate text-meta text-n7" title={item.label}>
+          {item.label}
+        </span>
+        <span className="w-14 shrink-0 text-right font-mono text-meta tabular-nums text-n7">
+          {num(item.total)}
+        </span>
+        <span className="w-12 shrink-0 text-right font-mono text-meta tabular-nums text-n6">
+          {percent(item.share)}
+        </span>
+      </div>
+      <div className="mt-1 flex min-w-0 items-center gap-2">
+        <span className="block h-1 min-w-0 flex-1 overflow-hidden rounded bg-n2">
+          <span
+            className="block h-full rounded bg-accent"
+            style={{ width: `${width}%` }}
+            aria-hidden="true"
+          />
+        </span>
+        <span className="shrink-0 font-mono text-meta tabular-nums text-n6">
+          采纳 {num(item.accepted)} · 待判 {num(item.pending)}
+        </span>
+      </div>
+    </li>
+  )
+}
+
+/** 一个子组：一行小标题 + 若干 `BreakdownRow`；空组写一句话而不是画 0。 */
+function BreakdownGroup({
+  group,
+  title,
+  hint,
+  rows,
+  empty = '本窗口没有可拆的推送',
+}: {
+  group: string
+  title: string
+  hint: string
+  rows: PushBreakdownRow[]
+  empty?: string
+}) {
+  return (
+    <div data-breakdown-group={group} className="mt-2 min-w-0 first:mt-0">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <p className="font-name text-meta text-n7">{title}</p>
+        <span className="min-w-0 truncate text-meta text-n6" title={hint}>
+          {hint}
+        </span>
+      </div>
+      {rows.length === 0 ? (
+        <p className="py-0.5 text-meta text-n6">{empty}</p>
+      ) : (
+        <ul className="mt-0.5">
+          {rows.map((item) => (
+            <BreakdownRow key={item.key} item={item} />
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
+
+/** 知识库 top 文件：`rel`（vault 内相对路径）与 `title` 至少一个可读。 */
+function TopFileRow({ item }: { item: PushKbTopFile }) {
+  const label = item.rel || item.title
+  return (
+    <li data-breakdown-key={item.code} className="border-b border-n3/40 py-1">
+      <div className="flex min-w-0 items-baseline gap-2">
+        <span className="min-w-0 flex-1 truncate font-mono text-meta text-n7" title={item.code}>
+          {label}
+        </span>
+        <span className="w-14 shrink-0 text-right font-mono text-meta tabular-nums text-n7">
+          {num(item.total)}
+        </span>
+      </div>
+      <p className="mt-0.5 font-mono text-meta tabular-nums text-n6">
+        采纳 {num(item.accepted)} · 待判 {num(item.pending)}
+        {item.title ? ` · ${item.title}` : ''}
+      </p>
     </li>
   )
 }
@@ -423,6 +525,8 @@ export function Push() {
 
   const totals = overview?.totals
   const diag = overview?.diagnostics
+  // `breakdown` 是**可选块**（旧读口没有）：`undefined` 时画「数据未接」，不画空图。
+  const breakdown: PushBreakdown | null = overview?.breakdown ?? null
   const writable = overview?.config.filter((item) => item.writable) ?? []
   const readonly = overview?.config.filter((item) => !item.writable) ?? []
   const maxChannel = Math.max(0, ...(overview?.channels ?? []).map((item) => item.total))
@@ -574,7 +678,212 @@ export function Push() {
                 </ul>
               </section>
 
-              {/* ③ Top offenders */}
+              {/* ③ 二级拆解：内容源（记忆/知识库/语料）+ 态势源（看板/动作流/git）。
+                  两组「同一个窗口、同一批推送行」，左右分开是为了不让 5183 条记忆的
+                  类型分布淹掉那 2 条 git 推送——它们的量级差三个数量级，但回答的是
+                  两个不同的问题（推了什么内容 / 推送被哪些态势面触发的）。 */}
+              <section data-push-block="breakdown" aria-label="二级拆解">
+                <SectionTitle
+                  title="二级拆解"
+                  hint="内容源按类型/项目/通道，态势源按作用域/目录/仓库"
+                />
+                {breakdown ? (
+                  <div
+                    className="grid gap-4"
+                    style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))' }}
+                  >
+                    {/* 左：内容源 */}
+                    <div data-breakdown-side="content" className="min-w-0 space-y-3">
+                      <p className="flex flex-wrap items-baseline gap-2">
+                        <span className="font-name text-sub text-n7">内容源</span>
+                        {/* 语料（`conv:`）按既有契约落在 memory 桶里，**已含在**记忆那个数里
+                            （byType 显示成「未分类」），所以这里写「其中」+「已计入记忆」，
+                            而不是把三个数字并列——并列会让人相加成总数（V-31 钉了相加关系）。 */}
+                        <span className="text-meta text-n6">
+                          记忆 {num(breakdown.memory.total)}（其中语料历史{' '}
+                          {num(breakdown.corpus.total)}）· 知识库 {num(breakdown.kb.total)} ·
+                          语料：{breakdown.corpus.enabled ? '现场开着' : '关闭'}（
+                          {num(breakdown.corpus.total)} 条历史行，已计入记忆）
+                        </span>
+                      </p>
+
+                      <div className="min-w-0 rounded border border-n3 bg-n0 px-3 py-2">
+                        <p className="mb-1 flex flex-wrap items-baseline gap-2">
+                          <span className="font-name text-sub text-n7">记忆</span>
+                          <span className="text-meta text-n6">
+                            {num(breakdown.memory.total)} 次 · 类型 / 项目 / 通道 / 开放词表
+                          </span>
+                        </p>
+                        <BreakdownGroup
+                          group="memory.byType"
+                          title="类型"
+                          hint="ci.mem_type（认不出 → 未分类）"
+                          rows={breakdown.memory.byType}
+                        />
+                        <BreakdownGroup
+                          group="memory.byProject"
+                          title="项目"
+                          hint="ci.project（空 → 未归属）"
+                          rows={breakdown.memory.byProject}
+                        />
+                        <BreakdownGroup
+                          group="memory.byChannel"
+                          title="通道"
+                          hint="inject / prompt / tool_after"
+                          rows={breakdown.memory.byChannel}
+                        />
+                        <div data-breakdown-group="memory.openLoop" className="mt-2 min-w-0">
+                          <div className="flex flex-wrap items-baseline gap-2">
+                            <p className="font-name text-meta text-n7">开放词表</p>
+                            <span className="min-w-0 truncate text-meta text-n6">
+                              标题命中未闭合词（下一步/待办/待确认…）
+                            </span>
+                          </div>
+                          <p className="mt-1 flex min-w-0 items-baseline gap-2">
+                            <span className="w-14 shrink-0 text-right font-mono text-meta tabular-nums text-n7">
+                              {num(breakdown.memory.openLoop.pushes)}
+                            </span>
+                            <span className="w-12 shrink-0 text-right font-mono text-meta tabular-nums text-n6">
+                              {percent(breakdown.memory.openLoop.share)}
+                            </span>
+                            <span className="min-w-0 flex-1 truncate text-meta text-n6">
+                              来自 {num(breakdown.memory.openLoop.codes)} 个编码 · 占记忆推送
+                            </span>
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="min-w-0 rounded border border-n3 bg-n0 px-3 py-2">
+                        <p className="mb-1 flex flex-wrap items-baseline gap-2">
+                          <span className="font-name text-sub text-n7">知识库</span>
+                          <span className="text-meta text-n6">
+                            {num(breakdown.kb.total)} 次 · 目录 / 通道 / top 文件
+                          </span>
+                        </p>
+                        <BreakdownGroup
+                          group="kb.byFolder"
+                          title="目录"
+                          hint="vault 内顶层目录（无斜杠 = 根）"
+                          rows={breakdown.kb.byFolder}
+                        />
+                        <BreakdownGroup
+                          group="kb.byChannel"
+                          title="通道"
+                          hint="inject / prompt / tool_after"
+                          rows={breakdown.kb.byChannel}
+                        />
+                        <div data-breakdown-group="kb.topFiles" className="mt-2 min-w-0">
+                          <div className="flex flex-wrap items-baseline gap-2">
+                            <p className="font-name text-meta text-n7">Top 文件</p>
+                            <span className="text-meta text-n6">按次数前 5</span>
+                          </div>
+                          {breakdown.kb.topFiles.length === 0 ? (
+                            <p className="py-0.5 text-meta text-n6">本窗口没有可拆的推送</p>
+                          ) : (
+                            <ul className="mt-0.5">
+                              {breakdown.kb.topFiles.map((item) => (
+                                <TopFileRow key={item.code} item={item} />
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      </div>
+
+                      <div
+                        data-breakdown-group="corpus"
+                        className="min-w-0 rounded border border-n3 bg-n0 px-3 py-2"
+                      >
+                        <p className="flex flex-wrap items-baseline gap-2">
+                          <span className="font-name text-sub text-n7">语料</span>
+                          <span className="text-meta text-n6">
+                            {breakdown.corpus.enabled ? '现场开着' : '现场关闭'}
+                          </span>
+                        </p>
+                        {/* 「关闭」是状态，「窗口内 18 次」是关闭前的历史读数——两件事都写出来 */}
+                        <p className="mt-0.5 break-words text-meta leading-4 text-n6">
+                          {breakdown.corpus.note}
+                        </p>
+                        <p className="mt-0.5 font-mono text-meta tabular-nums text-n6">
+                          窗口内 {num(breakdown.corpus.total)} 次语料推送
+                        </p>
+                        {/* 这三行在「记忆」那个数里已经有了（`conv:` 落 memory 的「未分类」），
+                            写清楚是为了不让读者把语料再加一遍（QA 🟡：相加不等于总数）。 */}
+                        <p className="mt-0.5 break-words text-meta leading-4 text-n6">
+                          这 {num(breakdown.corpus.total)} 条已计入上面「记忆」的未分类，不与记忆/知识库重复相加
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* 右：态势源 */}
+                    <div data-breakdown-side="situation" className="min-w-0 space-y-3">
+                      <p className="flex flex-wrap items-baseline gap-2">
+                        <span className="font-name text-sub text-n7">态势源</span>
+                        <span className="text-meta text-n6">
+                          看板 {num(breakdown.board.total)} · 动作流 {num(breakdown.activity.total)} ·
+                          git {num(breakdown.git.total)}
+                        </span>
+                      </p>
+
+                      <div className="min-w-0 rounded border border-n3 bg-n0 px-3 py-2">
+                        <p className="mb-1 flex flex-wrap items-baseline gap-2">
+                          <span className="font-name text-sub text-n7">看板</span>
+                          <span className="text-meta text-n6">
+                            {num(breakdown.board.total)} 次 · 项目 / 看板
+                          </span>
+                        </p>
+                        <BreakdownGroup
+                          group="board.byProject"
+                          title="项目"
+                          hint="推送行自己的项目（空 → 未归属）；本库看板行全为空，区分度在「看板」那组"
+                          rows={breakdown.board.byProject}
+                        />
+                        <BreakdownGroup
+                          group="board.byLabel"
+                          title="看板"
+                          hint="去 board: 前缀（空 → 根看板）"
+                          rows={breakdown.board.byLabel}
+                        />
+                      </div>
+
+                      <div className="min-w-0 rounded border border-n3 bg-n0 px-3 py-2">
+                        <p className="mb-1 flex flex-wrap items-baseline gap-2">
+                          <span className="font-name text-sub text-n7">动作流</span>
+                          <span className="text-meta text-n6">
+                            {num(breakdown.activity.total)} 次 · 按目录
+                          </span>
+                        </p>
+                        <BreakdownGroup
+                          group="activity.byDir"
+                          title="目录"
+                          hint="去 activity: 前缀"
+                          rows={breakdown.activity.byDir}
+                        />
+                      </div>
+
+                      <div className="min-w-0 rounded border border-n3 bg-n0 px-3 py-2">
+                        <p className="mb-1 flex flex-wrap items-baseline gap-2">
+                          <span className="font-name text-sub text-n7">git</span>
+                          <span className="text-meta text-n6">
+                            {num(breakdown.git.total)} 次 · 按仓库
+                          </span>
+                        </p>
+                        <BreakdownGroup
+                          group="git.byRepo"
+                          title="仓库"
+                          hint="仓库名取 git_repo（缺就退回编码）"
+                          rows={breakdown.git.byRepo}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sub text-n6">
+                    该区数据未接：缺 breakdown（读口是旧版，或这次读回的载荷里没有这一块）。
+                  </p>
+                )}
+              </section>
+
+              {/* ④ Top offenders */}
               <section data-push-block="top" aria-label="Top offenders">
                 <SectionTitle
                   title="Top offenders"
@@ -591,7 +900,7 @@ export function Push() {
                 )}
               </section>
 
-              {/* ④ 调整：只开放白名单 7 项 + 两个预设 */}
+              {/* ⑤ 调整：只开放白名单 7 项 + 两个预设 */}
               <section data-push-block="adjust" aria-label="调整">
                 <SectionTitle
                   title="调整"
@@ -661,7 +970,7 @@ export function Push() {
                 </div>
               </section>
 
-              {/* ⑤ 最近推送 */}
+              {/* ⑥ 最近推送 */}
               <section data-push-block="events" aria-label="最近推送">
                 <div className="mb-2 flex flex-wrap items-baseline gap-2">
                   <h3 className="text-sub font-name text-n7">最近推送</h3>
@@ -696,7 +1005,7 @@ export function Push() {
                 </Block>
               </section>
 
-              {/* ⑥ 口径 */}
+              {/* ⑦ 口径 */}
               <section data-push-block="notes" aria-label="口径">
                 <SectionTitle title="口径" hint="这几个数各自回答什么、不回答什么" />
                 <ul className="space-y-1 text-meta leading-5 text-n6">

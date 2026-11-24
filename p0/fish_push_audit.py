@@ -41,6 +41,29 @@
 - `(none)` 归 `memory`：实测本库 `code_index.mem_type` 里**没有** `memory` 这个值
   （记忆条目一律是被推内容之外的默认类别），所以「认不出类型」的行就是普通记忆推送。
 
+## 二级拆解（`breakdown`，2026-11-24 第二轮）
+
+`overview.data.breakdown` 回答「这些推送到底是些什么东西」，按**两条腿**拆：
+
+- **内容源** = 记忆（按类型 / 项目 / 通道 / 开放词表占比）+ 知识库（按顶层目录 / 通道 /
+  top 文件）+ 语料（`push.corpus_enabled` 现场关闭；`total` 是窗口内 `conv:` 历史行数）；
+- **态势源** = 看板（按 `push_log.project` / 看板 label）+ 动作流（按目录）+ git（按仓库）。
+
+口径四条（写在这里，别处不许另算一份）：
+
+1. **分组和必须等于组 total**：每组按 `total` 降序取前 8 行，其余合成一行
+   `{"key":"__other__","label":"其他（N 项）"}` —— 合并行也带 accepted/ignored/pending，
+   所以 `sum(rows.total) == 组 total` 在截断之后仍然成立（判据 V-31 查的就是这个）。
+2. **记忆 = `kinds` 里 memory/artifact/episode/fact/rule/lesson**（即非 board/kb/activity/git）；
+   `byType` 用 `ci.mem_type`（空/认不出 → `unknown`/未分类），`byProject` 用 `ci.project`
+   （空 → 未归属），`byChannel` 三通道。`conv:` 前缀按既有契约归 memory（本库 18 条）。
+3. **开放词表占比** 的 `pushes`/`codes` **复用** `diagnostics.openLoop`（同一个数不重算），
+   只有分母换成 `memory.total`。
+4. **语料是「现场关闭 + 历史行单列」**：`enabled` 读 `push.corpus_enabled`，`total` 是窗口内
+   `conv:` 行数（关闭前推过多少就显示多少，**不拿 0 冒充「没有」**）。
+
+`share` = 行 total / 组 total（0..1）；组 total 为 0 时没有行（空组返回 `[]`，不是 500）。
+
 ## 缓存
 
 `overview` 30 天要跑一遍 `push_stats`（实测 0.24 s / 6 195 行）+ 若干聚合，同一屏里
@@ -49,6 +72,17 @@
 
 **这份缓存不是为了给轮询看**：推送页**没有自动轮询**（它是「看一眼、调一下」的面，
 见 `docs/109` §六.5），缓存只为吃掉同一秒里连续的重复读。
+
+**`asOf` 与缓存时间戳必须是同一个时刻（`built_ts`）**：构建前取一次 `time.time()`，
+`_build_overview` 的 `now` 由它派生，`asOf` / `cachedAt` 都写成它、`cacheAgeSec=0`，
+并用 `_cache_put(..., built_ts=built_ts)` 把它一起存进缓存；命中时 `asOf` / `cachedAt`
+仍取它，只有 `cacheAgeSec` 随真实时间变大。
+
+为什么强调「同一个时刻」：之前这里是两个时刻——`asOf` 取构建**开始**（`now`），缓存戳取
+构建**结束**（`_cache_put` 里的 `time.time()`）。构建实测 0.32–0.78 s，跨整秒时同一个
+进程里连读两次会看到 `asOf` 从 `12:16:22Z` 跳到 `12:16:23Z`（`cacheAgeSec` 0.0 → 1.3），
+即「数据没变、时刻却变了」。这不是显示问题：V-30 的判据正是「命中缓存时 asOf 不变」，
+两个时刻让它在 33 条验收里 5 次只绿 3 次（靠运气）。
 
 命中缓存时 `asOf` **仍是缓存构建时刻**（另给 `cachedAt` 同值 + `cacheAgeSec` 表示这份
 数据放了多久）。之前这里是 `payload["asOf"] = _iso(now)`——拿「此刻」冒充数据时刻，
@@ -98,6 +132,15 @@ KINDS = ("memory", "artifact", "episode", "fact", "rule", "lesson",
          "board", "kb", "activity", "git")
 #: 没有 `code_index` 行时，按这些前缀归类（其余前缀一律归 memory）。
 CODE_PREFIX_KINDS = ("board", "kb", "activity", "git")
+
+#: 「二级拆解」每组最多显示几行；超过就取前 8 行、其余合成一行 `__other__`。
+#: 为什么是 8：1280 宽下两列各约 480 px，8 行是一个子组不滚一屏看得完的上限。
+BREAKDOWN_TOP = 8
+#: 「态势源」三类（看板 / 动作流 / git）。其余 kind 都是「内容源」。
+SITUATION_KINDS = ("board", "activity", "git")
+#: 「内容源 · 记忆」的 kind（`memory` 是「认不出类型」的兜底桶；`conv:` 也落在这里）。
+#: 从 `KINDS` 派生而不是另抄一遍：`KINDS` 加一类时这里自动跟着走。
+MEMORY_KINDS = tuple(kind for kind in KINDS if kind not in ("kb",) + SITUATION_KINDS)
 
 AUDIT_DIRNAME = "_audit"
 AUDIT_FILENAME = "push-config.jsonl"
@@ -214,9 +257,14 @@ def _cache_get(key: tuple):
     return hit
 
 
-def _cache_put(key: tuple, value: dict) -> None:
+def _cache_put(key: tuple, value: dict, *, built_ts: float | None = None) -> None:
+    """登记缓存。`built_ts` = 这份载荷的**构建时刻**（缺省取现在，兼容旧调用）。
+
+    调用方必须把「构建开始前那一次 `time.time()`」传进来：`asOf` 与缓存时间戳要是同一个
+    时刻，否则构建跨整秒时命中缓存会看到 `asOf` 自己往后跳 1 s（QA V-30 / 文件头「缓存」）。
+    """
     with _CACHE_LOCK:
-        _CACHE[key] = (time.time(), value)
+        _CACHE[key] = (time.time() if built_ts is None else float(built_ts), value)
 
 
 # ── 连接 ────────────────────────────────────────────────────────────────
@@ -434,26 +482,90 @@ def _rate(accepted: int, ignored: int):
     return (accepted / decided) if decided else None
 
 
+# ── 二级拆解的分组小工具（只有这一处实现）──────────────────────────────
+def _blank_row(key: str, label: str) -> dict:
+    return {"key": key, "label": label, "total": 0, "accepted": 0,
+            "ignored": 0, "pending": 0}
+
+
+def _add_row(bucket: dict, key: str, label: str, row) -> None:
+    """把一条 `(total, accepted, ignored, pending)` 灌进桶里（桶 = `{key: row}`）。"""
+    item = bucket.get(key)
+    if item is None:
+        item = bucket[key] = _blank_row(key, label)
+    item["total"] += int(row["total"] or 0)
+    item["accepted"] += int(row["accepted"] or 0)
+    item["ignored"] += int(row["ignored"] or 0)
+    item["pending"] += int(row["pending"] or 0)
+
+
+def _rows_of(bucket: dict, *, group_total: int) -> list[dict]:
+    """桶 → 降序行；超过 `BREAKDOWN_TOP` 行就取前 N 行 + 一行 `__other__`。
+
+    **合并行也要带 accepted/ignored/pending**：只合成 total 的话
+    `sum(rows.total)` 虽然还对，但 UI 里「其他（N 项）」那一行的采纳/待判会凭空变 0
+    —— 那是把「没显示」写成「没有」。`share` 统一按**组** total 算（不是按最大行）。
+    """
+    rows = sorted(bucket.values(), key=lambda item: (-item["total"], item["key"]))
+    if len(rows) > BREAKDOWN_TOP:
+        head, rest = rows[:BREAKDOWN_TOP], rows[BREAKDOWN_TOP:]
+        merged = {"key": "__other__", "label": f"其他（{len(rest)} 项）"}
+        for field in ("total", "accepted", "ignored", "pending"):
+            merged[field] = sum(int(item[field] or 0) for item in rest)
+        rows = head + [merged]
+    out: list[dict] = []
+    for item in rows:
+        row = dict(item)          # 副本：缓存里那份会被下一次读到，别让调用方改它
+        row["share"] = (row["total"] / group_total) if group_total else None
+        out.append(row)
+    return out
+
+
+def _kb_vault_rel(code: str) -> tuple[str, str]:
+    """`kb:<vault>:<rel>` → `(vault, rel)`；不是这个形状时 `rel` 给空串（不猜）。"""
+    parts = (code or "").split(":", 2)
+    if len(parts) < 3:
+        return ((parts[1] if len(parts) == 2 else ""), "")
+    return parts[1], parts[2]
+
+
+def _kb_folder(rel: str) -> tuple[str, str]:
+    """`rel` 的**顶层目录**；没有斜杠 = 根（键给空串，label 给「（根）」）。"""
+    text = (rel or "").strip()
+    if not text:
+        return ("", "（根）")
+    head = text.split("/", 1)[0]
+    if head == text:
+        return ("", "（根）")
+    return (head, head)
+
+
 # ── 只读：概览 ──────────────────────────────────────────────────────────
 def overview(db_path: str, days: int = DEFAULT_DAYS) -> dict:
     """推送面板的整页数据（契约见 `docs/109-推送面板-设计与验收-20261124.md`）。
 
-    `asOf` = **这份数据算出来的时刻**；命中缓存时它仍是缓存构建时刻，另给
+    `asOf` = **这份数据算出来的时刻**；命中缓存时它仍是那个构建时刻，另给
     `cachedAt`（同值）与 `cacheAgeSec`（放了多久）。**不许**用当前时刻冒充数据时刻。
+
+    `asOf` 与缓存时间戳共用一个 `built_ts`（构建**开始前**取一次）：构建本身要 0.3–0.8 s，
+    拿「构建结束」当缓存戳会让命中缓存时的 `asOf` 比刚算出来的那份晚 1 s（跨整秒），
+    同一份数据在两次读之间自己换时刻（QA V-30）。
     """
     days = check_days(days)
-    now = now_utc()
     cache_key = ("overview", os.path.abspath(db_path), days)
     cached = _cache_get(cache_key)
     if cached is not None:
         built_ts, cached_payload = cached
         payload = dict(cached_payload)
         built_dt = datetime.fromtimestamp(built_ts, timezone.utc)
-        payload["asOf"] = _iso(built_dt)            # 数据时刻 = 缓存构建时刻（不是 now）
+        payload["asOf"] = _iso(built_dt)            # 数据时刻 = 缓存登记的那个构建时刻（不是 now）
         payload["cachedAt"] = payload["asOf"]
         payload["cacheAgeSec"] = round(max(0.0, time.time() - built_ts), 1)
         return payload
 
+    # 这一个时刻同时是「查询窗口的锚」「asOf」「缓存戳」：三个只能有一个来源。
+    built_ts = time.time()
+    now = datetime.fromtimestamp(built_ts, timezone.utc)
     conn = _read_conn(db_path)
     try:
         problem = _guard_tables(conn, ("push_log", "code_index", "session_context",
@@ -463,7 +575,11 @@ def overview(db_path: str, days: int = DEFAULT_DAYS) -> dict:
         payload = _build_overview(conn, days=days, now=now)
     finally:
         conn.close()
-    _cache_put(cache_key, payload)
+    # 构建期间时间在走：`asOf` 只认 `built_ts`，不认「构建结束」，否则跨整秒就漂 1 s。
+    payload["asOf"] = _iso(now)
+    payload["cachedAt"] = payload["asOf"]
+    payload["cacheAgeSec"] = 0.0
+    _cache_put(cache_key, payload, built_ts=built_ts)
     # 返回**副本**：API 层会 `pop("sources")` 把它提到信封里，别把缓存里的那份挖空。
     return dict(payload)
 
@@ -625,6 +741,13 @@ def _build_overview(conn: sqlite3.Connection, *, days: int, now: datetime) -> di
     # `code_index` 的 `rows` 是**这张表的行数**（原来这里写的是 `len(top_codes)`，
     # 那是「Top offenders 的条数」，不属于 code_index——两个数都真，但名字对不上就是假证据）。
     code_index_rows = int(conn.execute("SELECT COUNT(*) FROM code_index").fetchone()[0])
+
+    # ── ⑧ 二级拆解（内容源 / 态势源两条腿；口径见文件头）─────────────────
+    # 放在最后算：它复用 ⑤ 的 `open_loop`（开放词表的 pushes/codes 不重算），
+    # 并且**不新增 sources 行**——它读的还是 push_log / code_index（已在 sources 里），
+    # `git_repo` 只用来取仓库名（缺表时退回编码），那一列不是判据。
+    breakdown = _build_breakdown(conn, since=since, open_loop=open_loop)
+
     return {
         "window": {"days": days, "since": since},
         "totals": {
@@ -650,9 +773,13 @@ def _build_overview(conn: sqlite3.Connection, *, days: int, now: datetime) -> di
             "duplicates": duplicates,
         },
         "topCodes": top_codes,
+        # 「这些推送是什么东西」：内容源（记忆/知识库/语料）+ 态势源（看板/动作流/git）。
+        # 每组的 `sum(rows.total) == 组 total`（截断成「前 8 行 + 其他（N 项）」之后也成立）。
+        "breakdown": breakdown,
         "config": config_view(conn),
         "asOf": _iso(now),
         # 刚算出来的这份：`cachedAt` 与 `asOf` 同值、年龄 0；命中缓存时由 `overview()` 改写。
+        # `now` 由 `overview()` 的 `built_ts` 派生（同一个时刻），所以这里与缓存戳天然同秒。
         "cachedAt": _iso(now),
         "cacheAgeSec": 0.0,
         "sources": [
@@ -665,6 +792,187 @@ def _build_overview(conn: sqlite3.Connection, *, days: int, now: datetime) -> di
             {"source": "tool_activity", "ok": True, "rows": activity_rows, "error": None,
              "ms": elapsed_ms},
         ],
+    }
+
+
+def _build_breakdown(conn: sqlite3.Connection, *, since: str, open_loop: dict) -> dict:
+    """「内容源 / 态势源」两条腿的二级拆解（口径见文件头「二级拆解」）。
+
+    四件事写清楚：
+
+    1. **每条腿最多 5 条聚合 SQL**（记忆一条同时喂三个维度、知识库一条喂目录/通道/top 文件），
+       都走 `since` 同一个时间窗、复用同一条只读连接——**不逐行查、不另开连接**。
+    2. **组 total 与分组和是同一批行**：`memory.total = sum(byType)` 是构造出来的，
+       所以截断成「前 8 行 + 其他（N 项）」之后仍然 `sum(rows.total) == total`。
+       和 `kinds` 的相等关系是**另一条独立路径**，交给判据去对（V-31），不在这里靠赋值保证。
+    3. 每一行都是同一形状 `{key,label,total,accepted,ignored,pending,share}`
+       （`topFiles` 例外：它是「文件」不是「分组」，按 code/rel/title 给），
+       前端不用为不同的组写不同的字段判空。
+    4. **空库 / 单通道不抛**：所有桶为空时各组返回 `[]`、total 为 0；`git_repo` 缺表时
+       仓库名退回编码本身（那一列不是判据，读不到就不猜）。
+    """
+    # ── 内容源 ① 记忆：一条 SQL 同时喂 type / project / channel ──────────
+    by_type: dict = {}
+    by_project: dict = {}
+    by_channel: dict = {}
+    for row in conn.execute(
+            "SELECT COALESCE(ci.mem_type,'') AS mem_type, "
+            f"{_prefix_sql('pl.code')} AS prefix, "
+            "COALESCE(ci.project,'') AS proj, "
+            "COALESCE(pl.channel,'') AS chan, "
+            "COUNT(*) AS total, "
+            "SUM(CASE WHEN pl.reaction='accepted' THEN 1 ELSE 0 END) AS accepted, "
+            "SUM(CASE WHEN pl.reaction='ignored' THEN 1 ELSE 0 END) AS ignored, "
+            "SUM(CASE WHEN pl.reaction IS NULL THEN 1 ELSE 0 END) AS pending "
+            "FROM push_log pl LEFT JOIN code_index ci ON ci.code = pl.code "
+            "WHERE pl.pushed_at >= ? "
+            # 别名必须换个名字：`pl.project` 与 `ci.project` 同名，`GROUP BY project`
+            # 在 SQLite 里是**歧义列**（实测 `ambiguous column name: project` → 500）。
+            "GROUP BY mem_type, prefix, proj, chan", (since,)):
+        # 与 `kinds` 走**同一个** `classify_kind`：两处的「记忆」才是同一批行。
+        kind = classify_kind(f"{row['prefix']}:" if row["prefix"] else "",
+                             row["mem_type"] or None)
+        if kind not in MEMORY_KINDS:
+            continue
+        mem_type = (row["mem_type"] or "").strip()
+        _add_row(by_type, mem_type or "unknown", mem_type or "未分类", row)
+        project = (row["proj"] or "").strip()
+        _add_row(by_project, project or "未归属", project or "未归属", row)
+        channel = (row["chan"] or "").strip()
+        _add_row(by_channel, channel or "（空）", channel or "（空）", row)
+    memory_total = sum(int(item["total"]) for item in by_type.values())
+
+    # ── 内容源 ② 知识库：目录 / 通道 / top 文件（一条 SQL）────────────────
+    kb_by_folder: dict = {}
+    kb_by_channel: dict = {}
+    kb_files: dict = {}
+    for row in conn.execute(
+            "SELECT pl.code AS code, COALESCE(pl.channel,'') AS chan, "
+            "COALESCE(ci.title,'') AS title, "
+            "COUNT(*) AS total, "
+            "SUM(CASE WHEN pl.reaction='accepted' THEN 1 ELSE 0 END) AS accepted, "
+            "SUM(CASE WHEN pl.reaction='ignored' THEN 1 ELSE 0 END) AS ignored, "
+            "SUM(CASE WHEN pl.reaction IS NULL THEN 1 ELSE 0 END) AS pending "
+            "FROM push_log pl LEFT JOIN code_index ci ON ci.code = pl.code "
+            "WHERE pl.pushed_at >= ? AND pl.code LIKE 'kb:%' "
+            "GROUP BY pl.code, chan, ci.title", (since,)):
+        code = row["code"] or ""
+        _vault, rel = _kb_vault_rel(code)
+        folder_key, folder_label = _kb_folder(rel)
+        _add_row(kb_by_folder, folder_key, folder_label, row)
+        channel = (row["chan"] or "").strip()
+        _add_row(kb_by_channel, channel or "（空）", channel or "（空）", row)
+        item = kb_files.get(code)
+        if item is None:
+            item = kb_files[code] = {"code": code, "rel": rel,
+                                     "title": (row["title"] or "").strip(),
+                                     "total": 0, "accepted": 0, "ignored": 0, "pending": 0}
+        for field in ("total", "accepted", "ignored", "pending"):
+            item[field] += int(row[field] or 0)
+    kb_total = sum(int(item["total"]) for item in kb_files.values())
+    top_files = sorted(kb_files.values(), key=lambda item: (-item["total"], item["code"]))[:5]
+    for item in top_files:
+        # `rel` 与 `title` **至少一个可读**：两个都空时退回编码本身（空白比编码更难查）。
+        if not item["rel"] and not item["title"]:
+            item["rel"] = item["code"]
+
+    # ── 态势源 ① 看板：project / 看板 label ───────────────────────────────
+    board_by_project: dict = {}
+    board_by_label: dict = {}
+    for row in conn.execute(
+            "SELECT pl.code AS code, COALESCE(pl.project,'') AS project, "
+            "COUNT(*) AS total, "
+            "SUM(CASE WHEN pl.reaction='accepted' THEN 1 ELSE 0 END) AS accepted, "
+            "SUM(CASE WHEN pl.reaction='ignored' THEN 1 ELSE 0 END) AS ignored, "
+            "SUM(CASE WHEN pl.reaction IS NULL THEN 1 ELSE 0 END) AS pending "
+            "FROM push_log pl WHERE pl.pushed_at >= ? AND pl.code LIKE 'board:%' "
+            "GROUP BY pl.code, project", (since,)):
+        code = row["code"] or ""
+        label = code.split(":", 1)[1].strip() if ":" in code else code.strip()
+        _add_row(board_by_label, code, label or "根看板", row)
+        project = (row["project"] or "").strip()
+        _add_row(board_by_project, project or "未归属", project or "未归属", row)
+    board_total = sum(int(item["total"]) for item in board_by_label.values())
+
+    # ── 态势源 ② 动作流：按目录 ─────────────────────────────────────────
+    activity_by_dir: dict = {}
+    for row in conn.execute(
+            "SELECT pl.code AS code, COUNT(*) AS total, "
+            "SUM(CASE WHEN pl.reaction='accepted' THEN 1 ELSE 0 END) AS accepted, "
+            "SUM(CASE WHEN pl.reaction='ignored' THEN 1 ELSE 0 END) AS ignored, "
+            "SUM(CASE WHEN pl.reaction IS NULL THEN 1 ELSE 0 END) AS pending "
+            "FROM push_log pl WHERE pl.pushed_at >= ? AND pl.code LIKE 'activity:%' "
+            "GROUP BY pl.code", (since,)):
+        code = row["code"] or ""
+        dirname = code.split(":", 1)[1].strip() if ":" in code else code.strip()
+        _add_row(activity_by_dir, dirname or "（空）", dirname or "（空）", row)
+    activity_total = sum(int(item["total"]) for item in activity_by_dir.values())
+
+    # ── 态势源 ③ git：按仓库（名字取 git_repo 的 display_name/identity）────
+    repo_names: dict[int, str] = {}
+    if _table_exists(conn, "git_repo"):
+        for row in conn.execute("SELECT repo_id, display_name, identity FROM git_repo"):
+            repo_names[int(row["repo_id"])] = (
+                (row["display_name"] or "").strip() or (row["identity"] or "").strip())
+    git_by_repo: dict = {}
+    for row in conn.execute(
+            "SELECT pl.code AS code, COUNT(*) AS total, "
+            "SUM(CASE WHEN pl.reaction='accepted' THEN 1 ELSE 0 END) AS accepted, "
+            "SUM(CASE WHEN pl.reaction='ignored' THEN 1 ELSE 0 END) AS ignored, "
+            "SUM(CASE WHEN pl.reaction IS NULL THEN 1 ELSE 0 END) AS pending "
+            "FROM push_log pl WHERE pl.pushed_at >= ? AND pl.code LIKE 'git:%' "
+            "GROUP BY pl.code", (since,)):
+        code = row["code"] or ""
+        repo_id = code.split(":", 1)[1].strip() if ":" in code else ""
+        name = repo_names.get(int(repo_id)) if repo_id.isdigit() else None
+        # 没有 display_name/identity 时 label 退回**编码本身**（含 repo_id）——不猜仓库名。
+        _add_row(git_by_repo, code, name or code, row)
+    git_total = sum(int(item["total"]) for item in git_by_repo.values())
+
+    # ── 内容源 ③ 语料：现场关闭也要如实说「关着」+「历史行多少」──────────
+    enabled = bool(fish_common.get_config(conn, "push.corpus_enabled"))
+    corpus_total = int(conn.execute(
+        "SELECT COUNT(*) FROM push_log WHERE pushed_at >= ? AND code LIKE 'conv:%'",
+        (since,)).fetchone()[0] or 0)
+    note = ("push.corpus_enabled=true（现场开着）" if enabled
+            else "push.corpus_enabled=false（现场关闭）")
+    if corpus_total:
+        note += f"；窗口内 {corpus_total} 次是关闭前的历史行"
+
+    open_pushes = int(open_loop.get("pushes") or 0)
+    return {
+        "memory": {
+            "total": memory_total,
+            "byType": _rows_of(by_type, group_total=memory_total),
+            "byProject": _rows_of(by_project, group_total=memory_total),
+            "byChannel": _rows_of(by_channel, group_total=memory_total),
+            "openLoop": {
+                # pushes/codes 是 `diagnostics.openLoop` 的**同一个数**，不重算；只有分母不同。
+                "pushes": open_pushes,
+                "codes": int(open_loop.get("codes") or 0),
+                "share": (open_pushes / memory_total) if memory_total else None,
+            },
+        },
+        "kb": {
+            "total": kb_total,
+            "byFolder": _rows_of(kb_by_folder, group_total=kb_total),
+            "byChannel": _rows_of(kb_by_channel, group_total=kb_total),
+            "topFiles": top_files,
+        },
+        "board": {
+            "total": board_total,
+            "byProject": _rows_of(board_by_project, group_total=board_total),
+            "byLabel": _rows_of(board_by_label, group_total=board_total),
+        },
+        "activity": {
+            "total": activity_total,
+            "byDir": _rows_of(activity_by_dir, group_total=activity_total),
+        },
+        "git": {
+            "total": git_total,
+            "byRepo": _rows_of(git_by_repo, group_total=git_total),
+        },
+        "corpus": {"enabled": enabled, "total": corpus_total, "note": note},
     }
 
 
@@ -873,6 +1181,23 @@ def _selftest(db_path: str) -> int:
     out["kinds"] = [k for k in data["kinds"] if k["total"]]
     out["diagnostics"] = data["diagnostics"]
     out["topCodes"] = [(c["code"], c["count"]) for c in data["topCodes"][:3]]
+    # 二级拆解：只打各段 total 与行数（人眼对拍用；细节看 API）
+    bd = data["breakdown"]
+    out["breakdown"] = {
+        "memory": {"total": bd["memory"]["total"],
+                   "rows": {k: len(bd["memory"][k])
+                            for k in ("byType", "byProject", "byChannel")},
+                   "openLoop": bd["memory"]["openLoop"]},
+        "kb": {"total": bd["kb"]["total"],
+               "rows": {k: len(bd["kb"][k])
+                        for k in ("byFolder", "byChannel", "topFiles")}},
+        "board": {"total": bd["board"]["total"],
+                  "rows": {k: len(bd["board"][k]) for k in ("byProject", "byLabel")}},
+        "activity": {"total": bd["activity"]["total"],
+                     "rows": {"byDir": len(bd["activity"]["byDir"])}},
+        "git": {"total": bd["git"]["total"], "rows": {"byRepo": len(bd["git"]["byRepo"])}},
+        "corpus": bd["corpus"],
+    }
     out["config"] = [(c["key"], c["value"], c["writable"]) for c in data["config"]]
     out["events"] = len(events(db_path, limit=5)["items"])
     out["auditPath"] = audit_path(db_path)
