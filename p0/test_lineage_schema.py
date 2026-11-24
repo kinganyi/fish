@@ -388,13 +388,26 @@ class UpsertNodeTest(_TempDb):
 
 
 class ShellTest(unittest.TestCase):
-    """W1 的"空壳"必须是**响的**：返回假值的空壳会把 W2/W6 的判据变成恒绿。"""
+    """W1 的"空壳"必须是**响的**：返回假值的空壳会把 W2/W6 的判据变成恒绿。
+
+    W2 落地 `recompute_depth`（113 §3.3）之后，**空壳名单只剩 `detect_cycles`（W6）
+    与两个宿主适配器**——所以这里把"必须还响"的断言收窄到它们，并新增一条**反向**护栏：
+    `recompute_depth` 必须真能跑（在空库上返回 0 行 0 改动）。少了这条反向断言，有人把它
+    改回 `raise` 时 J-D1（四层链 0/1/2/3）会整条变绿，而本文件不会有任何反应。
+    """
 
     def test_shells_fail_loudly(self):
-        for fn, args in ((fish_lineage.recompute_depth, (None, "dsh")),
-                         (fish_lineage.detect_cycles, (None, "dsh"))):
-            with self.assertRaises(NotImplementedError):
-                fn(*args)
+        with self.assertRaises(NotImplementedError):
+            fish_lineage.detect_cycles(None, "dsh")
+        # 反向护栏：W2 已填，它**不许**再是空壳
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.executescript(fish.SCHEMA)
+            stats = fish_lineage.recompute_depth(conn, "dsh")
+        finally:
+            conn.close()
+        self.assertEqual((stats["rows"], stats["updated"], stats["conflicts"]), (0, 0, 0),
+                         "空库上的重算应当报 0 行 / 0 改动 / 0 冲突")
         self.assertEqual(sorted(fish_lineage.ADAPTERS), ["dsh", "workbuddy"])
         for host, adapter in fish_lineage.ADAPTERS.items():
             self.assertEqual(adapter.host, host, "适配器的 host 与注册表键不一致")
