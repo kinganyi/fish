@@ -33,6 +33,7 @@
 ```
 ⚠️ hook 配置在宿主**启动时**装配 ⇒ 改完必须重启桌面端才生效。
 """
+import functools
 import json
 import os
 import sys
@@ -49,32 +50,15 @@ import hook_fastpath  # noqa: E402 —— P0-⑥ 快通道（关闭态秒退/冷
 DATA = Path(os.environ.get("FISH_DATA") or (HERE / "data"))
 
 
-def _dbg(msg: str) -> None:
-    """诊断输出（仅 FISH_HOOK_DEBUG=1）。默认静默——生产环境不许往 stderr 写噪音。"""
-    if os.environ.get("FISH_HOOK_DEBUG"):
-        try:
-            sys.stderr.write("[fish_push_hook] " + msg + "\n")
-            sys.stderr.flush()
-        except Exception:      # noqa: BLE001
-            pass
+#: 本 hook 的缺省宿主（历史值：DSH 的 PostToolUse 推送入口）。命令行总是显式带 `--host`。
+DEFAULT_HOST = "dsh"
+#: 诊断输出：实现在 `hook_io.dbg`（全仓唯一一份）；这里只绑 tag。
+_dbg = functools.partial(hook_io.dbg, "fish_push_hook")
 
 
 def _emit(text: str) -> None:
     """输出 additionalContext（追加，不替换工具结果）。委托统一出口。"""
     hook_io.emit("PostToolUse", text)
-
-
-def _argv_value(argv, flag, default=None):
-    for i, arg in enumerate(argv):
-        if arg == flag and i + 1 < len(argv):
-            return argv[i + 1]
-        if arg.startswith(flag + "="):
-            return arg.split("=", 1)[1]
-    return default
-
-
-def _host_from_argv(argv) -> str:
-    return (_argv_value(argv, "--host", "dsh") or "dsh").strip().lower()
 
 
 def collect_activity(payload, host):
@@ -131,7 +115,7 @@ def main(argv=None):
 
 def _run(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    host = _host_from_argv(argv)
+    host = hook_io.host_from_argv(argv, DEFAULT_HOST)
     collect = "--no-collect-activity" not in argv
     # P0-⑥（外部审查 🔴3）：关闭态秒退 + 冷却——在 import fish / 读 stdin / 起子进程之前。
     # 这是"旁路不该有权阻塞主流程"的收口：关掉的功能必须**秒**退，不能拖着等 10s。

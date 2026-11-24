@@ -43,6 +43,7 @@ CLI）与两个 hook（Pre/Post）都调这里——不在任何一处再写第�
 """
 from __future__ import annotations
 from fish_common import now_utc as utc_now, parse_utc, warn_ignored  # 时间原语与报警出口全仓只有一份实现
+from fish_common import _presence_has_session  # 列探测也只有一份（112 W-A · B5：旧"hook 不许 import"理由用错了层级）
 
 import datetime
 import hashlib
@@ -52,6 +53,7 @@ import re
 import sqlite3
 from pathlib import Path
 
+import fish_atomic
 import fish_hosts_vocab
 import fish_naming
 import fish_surface
@@ -628,20 +630,6 @@ def record(conn, *, host, session_key, citizen_id, classification, seen_at=None)
 # ------------------------------------------------------------------ 聚合 / 缓存
 
 
-def _presence_has_session(conn) -> bool:
-    """`presence.session_key` 列在不在（读侧兜底的总开关）。
-
-    为什么要探而不是假定：迁移可能因"备份写不进"而**故意不升级**（设计 45 §2.2 步 5），
-    此时库还是两列形态，`SELECT p.session_key` 会 `no such column`。
-    hook 侧不许 import fish，所以这份探测必须在 `fish_activity` 里自己有一份。
-    """
-    try:
-        cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(presence)")}
-    except sqlite3.Error:
-        return False
-    return "session_key" in cols
-
-
 def _surfaces_query(project, cutoff, *, by_session: bool):
     """窗口内写动作按「目录 / 文件」聚合的唯一 SQL（两条聚合共用同一形状）。
 
@@ -955,13 +943,16 @@ def _read_state(state_path):
 
 
 def _write_state(state_path, payload):
-    """原子写一份小状态文件（tmp + os.replace）；失败静默返回 False。"""
+    """原子写一份小状态文件；失败静默返回 False。
+
+    原子性走 `fish_atomic.write_text_atomic`（全仓唯一正解：同目录 tmp + fsync +
+    `os.replace`）。2026-11-24（112 W-A · N-6）之前这里是手搓的 tmp+replace——
+    少了 fsync，"名字换了、内容没落盘"的零长度文件就有一线机会。
+    """
     path = Path(state_path)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, path)
+        fish_atomic.write_text_atomic(
+            path, json.dumps(payload, ensure_ascii=False))
         return True
     except OSError:
         return False
@@ -1259,12 +1250,10 @@ def build_snapshot(conn, *, out_path, window_min=90, now=None, project=None) -> 
     }
     path = Path(out_path)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=1), encoding="utf-8")
-        os.replace(tmp, path)       # 原子替换：读侧永远看不到半写的文件
+        fish_atomic.write_text_atomic(
+            path, json.dumps(snapshot, ensure_ascii=False, indent=1))
     except OSError as exc:
-        warn_ignored('fish_activity.py:1133 module', exc)
+        warn_ignored('fish_activity.py build_snapshot 快照写', exc)
     return snapshot
 
 

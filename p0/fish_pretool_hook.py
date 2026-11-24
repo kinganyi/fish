@@ -31,6 +31,7 @@
 没有它，"撞车误报"只能靠感觉。
 """
 from fish_common import warn_ignored
+import functools
 import json
 import os
 import sys
@@ -50,28 +51,15 @@ SNAPSHOT_PATH = DATA / fish_activity.SNAPSHOT_RELPATH
 ASKS_PATH = DATA / fish_activity.ASKS_RELPATH
 
 
-def _dbg(msg: str) -> None:
-    """诊断输出（仅 FISH_HOOK_DEBUG=1）。默认静默。"""
-    if os.environ.get("FISH_HOOK_DEBUG"):
-        try:
-            sys.stderr.write("[fish_pretool_hook] " + msg + "\n")
-            sys.stderr.flush()
-        except Exception:      # noqa: BLE001
-            pass
+#: 本 hook 的缺省宿主（历史值：DSH 的 PreToolUse 入口）。命令行总是显式带 `--host`。
+DEFAULT_HOST = "dsh"
+#: 诊断输出：实现在 `hook_io.dbg`（全仓唯一一份）；这里只绑 tag。
+_dbg = functools.partial(hook_io.dbg, "fish_pretool_hook")
 
 
 def _emit_decision(reason: str) -> None:
     """输出 `ask` 决策（委托统一出口：协议与编码只在一处决定）。"""
     hook_io.emit_decision("PreToolUse", "ask", reason)
-
-
-def _host_from_argv(argv) -> str:
-    for i, arg in enumerate(argv):
-        if arg == "--host" and i + 1 < len(argv):
-            return (argv[i + 1] or "").strip().lower() or "dsh"
-        if arg.startswith("--host="):
-            return (arg.split("=", 1)[1] or "").strip().lower() or "dsh"
-    return "dsh"
 
 
 def describe_hits(hits, target_abs, *, limit: int = 2, question: bool = True) -> str:
@@ -254,7 +242,7 @@ def main(argv=None) -> int:
 
 def _run(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    host = _host_from_argv(argv)
+    host = hook_io.host_from_argv(argv, DEFAULT_HOST)
     # P0-⑥（外部审查 🔴3）：关闭态秒退 + 冷却（与 posttool 同一口径）。
     if not hook_fastpath.enabled(DATA, "push.enabled", True):
         return 0

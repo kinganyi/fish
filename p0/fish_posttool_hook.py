@@ -65,6 +65,7 @@ PostToolUse hook，再加"采集"和"推送"两个进程，就等于每次工具
 
 协议依据：PostToolUse 支持 `additionalContext`（追加，不替换原结果）。
 """
+import functools
 import hashlib
 import json
 import os
@@ -120,23 +121,12 @@ _SAFE_COMMANDS = frozenset({
 _EXE_SUFFIX = ".exe"
 
 
-def _dbg(msg: str) -> None:
-    """诊断输出（仅 FISH_HOOK_DEBUG=1）。默认静默。"""
-    if os.environ.get("FISH_HOOK_DEBUG"):
-        try:
-            sys.stderr.write("[fish_posttool_hook] " + msg + "\n")
-            sys.stderr.flush()
-        except Exception:      # noqa: BLE001
-            pass
-
-
-def _host_from_argv(argv) -> str:
-    for i, arg in enumerate(argv):
-        if arg == "--host" and i + 1 < len(argv):
-            return (argv[i + 1] or "").strip().lower() or "workbuddy"
-        if arg.startswith("--host="):
-            return (arg.split("=", 1)[1] or "").strip().lower() or "workbuddy"
-    return "workbuddy"
+#: 本 hook 的缺省宿主（**历史值**：WorkBuddy 的 PostToolUse 入口）。
+#: 宿主命令行总是显式带 `--host`，所以这是兜底；但兜底必须保历史值（112 §三 B3）——
+#: 同一事件两个 hook 在无 `--host` 时记成两个宿主身份，会话键与在场记录会分叉。
+DEFAULT_HOST = "workbuddy"
+#: 诊断输出：实现在 `hook_io.dbg`（全仓唯一一份）；这里只绑 tag（旧四份只差这一件事）。
+_dbg = functools.partial(hook_io.dbg, "fish_posttool_hook")
 
 
 def notify_once(session_id: str) -> bool:
@@ -368,7 +358,7 @@ def maybe_push(req, host) -> None:
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
-    host = _host_from_argv(argv)
+    host = hook_io.host_from_argv(argv, DEFAULT_HOST)
     try:
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     except Exception:      # noqa: BLE001

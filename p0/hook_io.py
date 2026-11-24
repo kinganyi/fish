@@ -100,6 +100,54 @@ HERE = Path(__file__).resolve().parent
 DATA = Path(os.environ.get("FISH_DATA") or (HERE / "data"))
 
 
+# ---------------------------------------------------------------- hook 共用原语
+#
+# 2026-11-24（112 W-A · B3/B4）：`--host` 解析与诊断输出原来是**四份副本**。
+# 四份 `_host_from_argv` 逐行相同、只有缺省值不同；四份 `_dbg` 只有前缀不同。
+# 它们和 2026-10-25 收掉的那四份 `json.dumps` 是同一类残留：同一个决定各实现一遍。
+#
+# 合并后机制只在这里，**缺省值由调用点显式传**（`host_from_argv(argv, DEFAULT_HOST)`）。
+# 不在这里给隐式缺省：隐式缺省正是行为分叉最容易藏进来的地方——112 §七对 C-A2 的
+# 自评就是"把四个默认值统一成 dsh，再用四个都等于 dsh 当断言"会全绿的假绿。
+
+
+def host_from_argv(argv, default: str) -> str:
+    """从 hook 命令行取 `--host` 的值（去空白 + 小写）；没有/空值 → 调用点给的 `default`。
+
+    `default` **必须由调用点显式传**，而且要用该 hook 的**历史缺省值**：
+
+      · `fish_posttool_hook` → `workbuddy`（WorkBuddy 的 PostToolUse 入口）；
+      · `fish_pretool_hook` / `fish_prompt_hook` / `fish_push_hook` → `dsh`。
+
+    四个宿主命令行都显式带 `--host`（`fish_hosts.HOSTS` 的 hooks 配置逐条写着），
+    所以默认只是兜底。但兜底也要保历史值：同一事件（PostToolUse）两个 hook 在
+    无 `--host` 时若记成两个宿主身份，会话键与在场记录会分叉成两份（112 §三 B3）。
+    """
+    args = list(argv or ())
+    for i, arg in enumerate(args):
+        if arg == "--host" and i + 1 < len(args):
+            return (args[i + 1] or "").strip().lower() or default
+        if arg.startswith("--host="):
+            return (arg.split("=", 1)[1] or "").strip().lower() or default
+    return default
+
+
+def dbg(tag: str, msg: str) -> None:
+    """诊断输出（仅 `FISH_HOOK_DEBUG` 有值时）；默认静默——生产不许往 stderr 写噪音。
+
+    `tag` 是四个 hook 之间**唯一**的差异（旧的四份 `_dbg` 只有这个前缀不同）。
+    调用点用 `functools.partial(hook_io.dbg, "<hook 名>")` 绑一次，
+    tag 就只剩一处定义，而 23 个调用点的字节一个都不用动。
+    """
+    if not os.environ.get("FISH_HOOK_DEBUG"):
+        return
+    try:
+        sys.stderr.write("[" + tag + "] " + msg + "\n")
+        sys.stderr.flush()
+    except Exception:      # noqa: BLE001 —— 诊断绝不能影响主流程
+        pass
+
+
 def log_child_stderr(tag, text):
     """子进程 stderr 落盘（hook 里 stdout 是契约面，不能污染；但也不能丢）。"""
     if not (text or "").strip():

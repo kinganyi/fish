@@ -13,10 +13,11 @@ hook 每轮都要**起一个 Python 进程**，所以"启动成本"就是它的�
     + `import fish`                      + 130–430 ms（随负载波动）
 
 所以本模块**只保留必要依赖**：`json` / `sqlite3` / `time` / `pathlib` 四个 stdlib，
-外加 `fish_common` 的报警出口。它**不是**纯 stdlib 模块——但它的两个调用方
+外加 `fish_common` 的报警出口与 `fish_atomic` 的原子写（两者都是**纯叶子**：
+零 fish import）。它**不是**纯 stdlib 模块——但它的两个调用方
 （`fish_pretool_hook` / `fish_push_hook`）本来就都要 `fish_activity`，而那条链
 一定先加载 `fish_common`，所以这里的 import 是**零边际成本**；为了"纯 stdlib"
-再造一份 `warn_ignored` 只会在本模块里多一份要同步维护的副本。
+再造一份 `warn_ignored`/原子写只会在本模块里多一份要同步维护的副本。
 
 真正的预算节省来自**不 import `fish`**（差 130–430 ms，十倍以上），而不是省掉
 一个 24 ms 的共用层。
@@ -36,6 +37,7 @@ hook 每轮都要**起一个 Python 进程**，所以"启动成本"就是它的�
 状态文件写不进去 → 只是少一层冷却，**不影响正确性**（不抛错、不打印）。
 """
 from fish_common import warn_ignored
+import fish_atomic          # 原子写正解（纯叶子：零 fish import，~1ms）
 import json
 import sqlite3
 import time
@@ -56,16 +58,21 @@ def _read_state(path: Path) -> dict:
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8")) or {}
     except (OSError, ValueError) as exc:
-        warn_ignored('hook_fastpath.py:45 _read_state', exc)
+        warn_ignored('hook_fastpath.py _read_state 冷却状态', exc)
     return {}
 
 
 def _write_state(path: Path, state: dict) -> None:
+    """原子写冷却状态（`fish_atomic`：同目录 tmp + fsync + replace）；失败只告警。
+
+    2026-11-24（112 W-A · N-6）：原来是**直接 `write_text`**。对冷却状态来说，
+    写到一半被杀会让"连续超时"计数归零 → 静默 fail-open（每轮都重走慢路径）。
+    `fish_atomic` 是纯叶子（零 fish import），不违反本模块的性能契约。
+    """
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+        fish_atomic.write_text_atomic(path, json.dumps(state, ensure_ascii=False))
     except OSError as exc:
-        warn_ignored('hook_fastpath.py:54 _write_state', exc)
+        warn_ignored('hook_fastpath.py _write_state 冷却状态', exc)
 
 
 def enabled(data_dir, key: str, default: bool = True) -> bool:

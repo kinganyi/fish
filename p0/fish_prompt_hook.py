@@ -29,6 +29,7 @@ fish 侧仍然生效（双保险，不是二选一）。
 """
 from fish_common import warn_ignored
 from hook_io import log_child_stderr  # noqa: F401
+import functools
 import hashlib
 import json
 import os
@@ -41,6 +42,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import hook_io  # noqa: E402 —— 统一 stdout 出口（编码只在一处决定）
 import fish_activity  # noqa: E402 —— 采集/配置/心跳的共享核心（不 import fish）
+import fish_atomic  # noqa: E402 —— 原子写正解（纯叶子：零 fish 依赖，不违反 hook 预算）
 import hook_fastpath  # noqa: E402 —— 冷却的唯一实现（🔴3，2026-11-11 去重）
 
 FISH = HERE / "fish.py"
@@ -49,28 +51,15 @@ DATA = Path(os.environ.get("FISH_DATA") or (HERE / "data"))
 MIN_PROMPT_CHARS = 4
 
 
-def _dbg(msg: str) -> None:
-    """诊断输出（仅 FISH_HOOK_DEBUG=1）。默认静默——生产不许往 stderr 写噪音。"""
-    if os.environ.get("FISH_HOOK_DEBUG"):
-        try:
-            sys.stderr.write("[fish_prompt_hook] " + msg + "\n")
-            sys.stderr.flush()
-        except Exception:      # noqa: BLE001 —— 诊断绝不能影响主流程
-            pass
+#: 本 hook 的缺省宿主（历史值：DSH 的 UserPromptSubmit 入口）。命令行总是显式带 `--host`。
+DEFAULT_HOST = "dsh"
+#: 诊断输出：实现在 `hook_io.dbg`（全仓唯一一份）；这里只绑 tag。
+_dbg = functools.partial(hook_io.dbg, "fish_prompt_hook")
 
 
 def _emit(text: str) -> None:
     """输出 additionalContext（委托统一出口：编码与协议只在一处决定）。"""
     hook_io.emit("UserPromptSubmit", text)
-
-
-def _host_from_argv(argv) -> str:
-    for i, arg in enumerate(argv):
-        if arg == "--host" and i + 1 < len(argv):
-            return (argv[i + 1] or "").strip().lower() or "dsh"
-        if arg.startswith("--host="):
-            return (arg.split("=", 1)[1] or "").strip().lower() or "dsh"
-    return "dsh"
 
 
 def _session_hash(session_id: str) -> str:
@@ -110,13 +99,10 @@ def prompt_gate(session_id: str, prompt: str, data_dir=None, *, now=None) -> dic
     if isinstance(last, (int, float)) and interval > 0 and (stamp - float(last)) < interval:
         return {"pass": False, "reason": f"距上次推送不到 {int(interval)}s"}
     try:
-        state_dir.mkdir(parents=True, exist_ok=True)
         state.update({"last_hash": digest, "last_ts": stamp})
-        tmp = state_path.with_name(state_path.name + ".tmp")
-        tmp.write_text(json.dumps(state), encoding="utf-8")
-        os.replace(tmp, state_path)
+        fish_atomic.write_text_atomic(state_path, json.dumps(state))
     except OSError as exc:
-        warn_ignored('fish_prompt_hook.py:115 prompt_gate', exc)
+        warn_ignored('fish_prompt_hook.py prompt_gate 状态写', exc)
     return {"pass": True, "reason": "ok", "digest": digest}
 
 
@@ -208,7 +194,7 @@ def _prompt_enabled(data_dir=None) -> bool:
 
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    host = _host_from_argv(argv)
+    host = hook_io.host_from_argv(argv, DEFAULT_HOST)
     try:
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     except Exception:      # noqa: BLE001 —— 老 Python / 非标准流时保持默认
