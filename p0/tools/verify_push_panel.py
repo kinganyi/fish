@@ -159,9 +159,9 @@ F2_MUTANT = "        if False:  # MUTATION: 去掉 F2 的同值短路\n"
 # ── V-28 的变异（🟡-1）：把写口的串行闸去掉 ─────────────────────────────
 #: 锚点必须带上 `new = _check_range(...)` 那一行：`write_config` 与 `apply_preset`
 #: 都以 `with _WRITE_LOCK:` + `conn = _write_conn(...)` + `try:` 开头，光用那三行会命中 2 处。
-LOCK_ANCHOR = ("    new = _check_range(key, _coerce(key, value), spec)\n\n"
+LOCK_ANCHOR = ("    new = _check_range(key, _coerce_config(key, value), spec)\n\n"
                "    with _WRITE_LOCK:\n")
-LOCK_MUTANT = ("    new = _check_range(key, _coerce(key, value), spec)\n\n"
+LOCK_MUTANT = ("    new = _check_range(key, _coerce_config(key, value), spec)\n\n"
                "    if True:  # MUTATION: 去掉写口的串行闸（评审 🟡-1）\n")
 
 #: V-28 并发写用到的键（白名单里的整数键，范围 1..9999）。
