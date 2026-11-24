@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""fish 工作台读口（只读）— p0/fish_workbench_api.py
+"""fish 工作台读口（默认只读；唯一写口是 /api/push/*）— p0/fish_workbench_api.py
 
 ## 这个文件解决的问题
 
@@ -16,16 +16,30 @@ fish 工作台首屏要一条**真实**的五源合流时间线：工具动作�
     GET /api/entry    右栏页签二：单条详情 + 公民档案 + 该公民最近动作/事件
     GET /api/hosts    设置页：宿主接入层投影（装没装 / 接没接 / 接的哪条通道）
     GET /api/hosts/<id>           单个宿主详情（每次现探）
-    POST /api/hosts/<id>/refresh  重探一次（**不写盘**：唯一的写语义，且没有副作用）
+    POST /api/hosts/<id>/refresh  重探一次（**不写盘**：只重读文件与库，没有副作用）
+
+设置页的「推送」二级页另加四个端点（数据面在 `fish_push_audit.py`）：
+
+    GET  /api/push/overview       诊断概览（总量/采纳/违规/通道/口径 + 配置现场值）
+    GET  /api/push/events         最近推送事件（按 id 倒序）
+    POST /api/push/config         写**一个**白名单配置键（白名单 + 类型/范围 + 审计）
+    POST /api/push/preset         止血 / 恢复 两个预设（同上，另一个粒度的动作）
 
 ## 三条硬纪律（与 fish_ui.py 同构，不另立一套）
 
-1. **只读**：连接走 `fish_ui.open_readonly()`（`mode=ro` + `PRAGMA query_only=1`），
-   每次开连接都由本文件的 `prove_read_only()` **真试一次写**：被拒时把
-   `sqlite3.OperationalError: attempt to write a readonly database` 原文打成一行
+1. **默认只读**：读连接的每一处都走 `fish_ui.open_readonly()`（`mode=ro` +
+   `PRAGMA query_only=1`），每次开连接都由本文件的 `prove_read_only()` **真试一次写**：
+   被拒时把 `sqlite3.OperationalError: attempt to write a readonly database` 原文打成一行
    `readonly_proven` JSON（证据，不是声明）；万一真能写就删表并**拒绝启动**。
-   本文件**不执行任何写语句**，也不改库。
-2. **只绑回环**：默认 `127.0.0.1:8790`，不监听 0.0.0.0。这是本机仪表盘，不是服务。
+   **唯一的写口**是 `POST /api/push/config` 与 `POST /api/push/preset`（以及
+   `POST /api/hosts/<id>/refresh` —— 那条不写盘）。写口**不在**本文件开写连接：它开在
+   `fish_push_audit.write_config / apply_preset` 内部的一条独立连接上，且只允许白名单键，
+   每次成功写入都追加一行审计到 `<data>/_audit/push-config.jsonl`。GET 永远走只读连接。
+2. **只绑回环**：默认 `127.0.0.1:8790`。这是本机仪表盘，不是服务。
+   **写口默认只在回环上开**：`--host` 不是 127.0.0.1 / localhost / ::1 时，两个推送写端点
+   一律 **403 `write_requires_loopback`**（读端点照常），启动时另打一行大声警告；
+   真要在一个非回环地址上写，必须显式加 `--allow-remote-write`（缺省没有这个能力）。
+   判据见 `verify_push_panel.py` V-29（`--host 0.0.0.0` 无 flag → 403；加 flag → 200）。
 3. **不猜**：查不到给 null / `availability.state="missing"` + 原因；**绝不拿假数据填**。
 
 ## 复用（禁止第二份实现）
@@ -75,6 +89,7 @@ if _HERE not in sys.path:
 
 import fish_naming  # noqa: E402  人类面取名唯一实现
 import fish_hosts   # noqa: E402  宿主接入层（只读探测：装没装/接没接/接的哪条通道）
+import fish_push_audit  # noqa: E402  推送面板数据面（只读诊断 + 窄写配置）
 import fish_ui      # noqa: E402  只读连接纪律 + 会话短标识兜底
 
 SCHEMA = "fish-workbench/1"
@@ -82,9 +97,20 @@ SCHEMA = "fish-workbench/1"
 #: 口径：页签名叫「现场」，数据契约名沿用 `workbench`（改名要连带改测试，契约锚点不动）。
 #: `hosts` = 设置页的宿主投影（`GET /api/hosts`、`GET /api/hosts/<id>`、
 #: `POST /api/hosts/<id>/refresh`）；它**只读**，唯一的 POST 也不写盘（重探一次）。
-API_CAPABILITIES = ("entry", "facets", "health", "hosts", "meta", "stats", "stream")
+#: `push` = 设置页的推送面板（`/api/push/overview|events` 只读，`/api/push/config|preset`
+#: 是**唯一两个真写口**：白名单 + 类型/范围 + 审计，见 `fish_push_audit.py`）。
+API_CAPABILITIES = ("entry", "facets", "health", "hosts", "meta", "push", "stats", "stream")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8790
+#: 回环地址白名单。**写口只在这些地址上默认开放**（本机仪表盘不是服务）：
+#: 绑到别的地址（`0.0.0.0` / 局域网 IP）时，`POST /api/push/config|preset` 回
+#: 403 `write_requires_loopback`，除非显式 `--allow-remote-write`。
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1", "[::1]")
+
+
+def is_loopback(host: str | None) -> bool:
+    """这个监听地址是不是回环（写口默认开放的那一类）。"""
+    return (host or "").strip().lower() in LOOPBACK_HOSTS
 
 # 库位置：实测 fish 数据在 <fish-data>/data/index.sqlite；`p0/data` 是指过去的 junction，
 # 而 `fish_ui.DEFAULT_DB` 指向的 `<fish root>/data` 在本机不存在——不能沿用它。
@@ -2027,6 +2053,118 @@ def api_host(db_path: str, host_id: str) -> dict | None:
     )
 
 
+# ── 推送面板（设置页第二项）：只读诊断 + 两个窄写动作 ────────────────────
+#: 写口的两条路径（白名单/范围判定在 `fish_push_audit` 里，HTTP 只做映射）。
+PUSH_CONFIG_PATH = "/api/push/config"
+PUSH_PRESET_PATH = "/api/push/preset"
+#: 请求体上限（与宿主 refresh 那条同一个数：配置写入不该超过 64 KB）。
+BODY_MAX_BYTES = 65536
+
+
+def push_envelope(data: dict, *, as_of: str, sources: list) -> dict:
+    """推送端点的信封：在只读信封之上多一个 `pid`（写口要能自证「这个进程改的」）。"""
+    return {
+        "schema": SCHEMA,
+        "asOf": as_of,
+        "availability": {"state": "ok", "detail": None},
+        "data": data,
+        "sources": sources,
+        "pid": os.getpid(),
+    }
+
+
+def api_push_overview(db_path: str, days: int) -> dict:
+    """`GET /api/push/overview`：诊断概览（`totals` 来自 `fish.push_stats`，不重算）。"""
+    data = fish_push_audit.overview(db_path, days=days)
+    sources = data.pop("sources", [])
+    return push_envelope(data, as_of=data.get("asOf") or iso(now_dt()), sources=sources)
+
+
+def api_push_events(db_path: str, *, limit: int, channel: str | None,
+                    reaction: str | None) -> dict:
+    """`GET /api/push/events`：最近推送事件（按 id 倒序，可按通道/结果过滤）。"""
+    data = fish_push_audit.events(db_path, limit=limit, channel=channel, reaction=reaction)
+    sources = data.pop("sources", [])
+    return push_envelope(data, as_of=data.get("asOf") or iso(now_dt()), sources=sources)
+
+
+def push_audit_source(audit_at, changed: bool, *, rows: int = 1,
+                      unchanged_detail: str = "值未变化，未写库、未写审计") -> dict:
+    """写口回执里「审计」那一项：**没改 ≠ 失败**，三种情形必须分开。
+
+    判据只能是 `changed`，不能是 `auditAt is not None`——后者把两件事压成了一个 null：
+
+      · `changed=True` 且审计有值   → `ok=true`（证据齐）；
+      · `changed=True` 但审计没写成 → `ok=false`（配置已生效、证据缺一行，要出声）；
+      · `changed=False`（同值短路） → **什么都没写，也就不需要审计** → `ok=true`。
+
+    第三种给的是 `rows=0`（真没写进审计的 0 行，不是 1）+ `detail` 一句人话；
+    前两种 `detail=None`（原因在 `error` 里）。前端据此区分「没变」与「失败」。
+    """
+    if not changed:
+        return {"source": "push-config-audit", "ok": True, "rows": 0, "error": None,
+                "ms": None, "detail": unchanged_detail}
+    if audit_at:
+        return {"source": "push-config-audit", "ok": True, "rows": rows, "error": None,
+                "ms": None, "detail": None}
+    return {"source": "push-config-audit", "ok": False, "rows": rows,
+            "error": "审计写失败（配置已生效；看服务端 stderr）", "ms": None,
+            "detail": None}
+
+
+def api_push_write_config(db_path: str, key, value) -> dict:
+    """`POST /api/push/config`：写**一个**白名单键（审计落在 `_audit/push-config.jsonl`）。"""
+    data = fish_push_audit.write_config(db_path, key, value)
+    log("push_config_written", key=data["key"], old=data["old"], new=data["new"],
+        changed=data["changed"], audit=data["auditAt"])
+    return push_envelope(data, as_of=iso(now_dt()), sources=[
+        {"source": "config", "ok": True, "rows": 1 if data["changed"] else 0,
+         "error": None, "ms": None},
+        push_audit_source(data["auditAt"], data["changed"]),
+    ])
+
+
+def api_push_apply_preset(db_path: str, preset) -> dict:
+    """`POST /api/push/preset`：止血 / 恢复（一次开一个连接，逐键校验与审计）。"""
+    data = fish_push_audit.apply_preset(db_path, preset)
+    log("push_preset_applied", preset=data["preset"], changed=data["changedCount"],
+        audit=data["auditAt"])
+    return push_envelope(data, as_of=iso(now_dt()), sources=[
+        {"source": "config", "ok": True, "rows": data["changedCount"], "error": None,
+         "ms": None},
+        # 重复应用同一个预设（如连点两次「恢复」）→ `changedCount=0` → 没写库也没写审计，
+        # 那是「已经就是这样」，不是审计失败。
+        push_audit_source(data["auditAt"], data["changedCount"] > 0,
+                          rows=data["changedCount"],
+                          unchanged_detail="值未变化，未写库、未写审计"
+                                           "（本次预设的键现场值已经就是这样）"),
+    ])
+
+
+def _read_json_body(handler: "Handler") -> dict:
+    """读请求体并解析成 JSON object；非 JSON / 非 object 一律 `ValueError`。
+
+    为什么在这里做而不是在各自的动作里：两条写口的要求一字不差（Content-Length ≤ 64 KB、
+    body 必须是 JSON object），拆成两份就迟早只改一处。
+    """
+    try:
+        length = int(handler.headers.get("Content-Length") or 0)
+    except ValueError as exc:
+        raise ValueError("Content-Length 不是数字") from exc
+    if length > BODY_MAX_BYTES:
+        raise OverflowError(f"请求体 {length} 字节，超过 {BODY_MAX_BYTES} 字节上限")
+    raw = handler.rfile.read(length) if length else b""
+    if not raw:
+        raise ValueError("请求体是空的：要一个 JSON object")
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"请求体不是 UTF-8 JSON：{exc}") from exc
+    if not isinstance(body, dict):
+        raise ValueError("请求体必须是 JSON object，例如 {\"key\":…,\"value\":…}")
+    return body
+
+
 def warm_up(db_path: str) -> None:
     """启动后后台预热：把 stats（含 `import fish` 的固定成本）与 facets 先算一遍。
 
@@ -2090,6 +2228,10 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "fish-workbench/1"
     db_path = ""
     dist_dir: str | None = None
+    #: 写口开不开：`main()` 按「绑的地址是不是回环 / 有没有 --allow-remote-write」定一次。
+    write_allowed = True
+    #: 本进程绑的地址（409 文案要说清「绑的是什么」，不靠请求里的 Host 猜）。
+    bind_host = DEFAULT_HOST
     semaphore = threading.BoundedSemaphore(8)
 
     # 安静一点：只走我们自己的结构化日志（一行 JSON 到 stderr）
@@ -2162,22 +2304,32 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _reject_non_get(self):  # noqa: N802
-        """除 `POST /api/hosts/<id>/refresh` 外**一律拒写**（PUT/PATCH/DELETE 仍只有这条出路）。"""
+        """除三条 POST 外**一律拒写**（PUT/PATCH/DELETE 没有出路，将来也不加）。
+
+        三条 POST 的语义各不相同，都不是「通用写口」：
+          · `POST /api/hosts/<id>/refresh` —— 重探一次，**不写盘**；
+          · `POST /api/push/config`        —— 写一个白名单配置键（审计）；
+          · `POST /api/push/preset`        —— 止血/恢复（同上，另一个粒度）。
+        """
         self._send_error(405, "method_not_allowed",
-                         "这个读口只读：GET 读，唯一的写语义是 POST /api/hosts/<id>/refresh"
-                         "（重探一次，**不写盘**）",
-                         "改用 GET；要重新探测宿主就 POST /api/hosts/<id>/refresh")
+                         "这个读口默认只读：GET 读，写只有 POST /api/push/config 与 "
+                         "POST /api/push/preset（白名单 + 审计），以及不写盘的 "
+                         "POST /api/hosts/<id>/refresh",
+                         "改用 GET；写配置用 POST /api/push/config 或 /api/push/preset")
 
     do_PUT = _reject_non_get       # noqa: N815
     do_PATCH = _reject_non_get     # noqa: N815
     do_DELETE = _reject_non_get    # noqa: N815
 
     def do_POST(self):  # noqa: N802
-        """**唯一的 POST**：`POST /api/hosts/<id>/refresh`（重探一次，**不写盘**）。
+        """三条 POST：宿主重探（不写盘）+ 推送配置的窄写口（白名单 + 审计）。
 
-        为什么留一个 POST：设置页的「刷新」是一个**允许发生的动作**，用 GET 表达会让人以为
-        刷几次都一样；用 POST 把「这次是新证据」写进 HTTP 语义里。它没有副作用：不写宿主配置、
-        不写库、不 spawn 宿主——只重读一次文件与库，返回同一份结构。
+        为什么「刷新宿主」也走 POST：设置页的「刷新」是一个**允许发生的动作**，用 GET
+        表达会让人以为刷几次都一样；用 POST 把「这次是新证据」写进 HTTP 语义里。
+
+        为什么写配置也走 POST 而不是 PUT/PATCH：本读口**默认只读**，写是一个例外；
+        例外越少越好。两条写口都在 `fish_push_audit` 里做白名单/范围/审计，HTTP 层只做
+        错误映射（`BadKey`→400 bad_key、`BadValue`→400 bad_value、其余→500）。
         """
         started = time.perf_counter()
         parsed = urlparse(self.path)
@@ -2190,6 +2342,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_error(403, "origin_rejected",
                                  "只接受来自 http://127.0.0.1 或 http://localhost 的请求",
                                  "从本机页面或 curl 访问；Origin: null 会被拒绝")
+                return
+            if path in (PUSH_CONFIG_PATH, PUSH_PRESET_PATH):
+                # 写口只认回环（或显式 --allow-remote-write）：绑在 0.0.0.0 上还让人远程写配置，
+                # 等于把这台机器的推送行为交给整个局域网（评审 🟡-3）。
+                if not self.write_allowed:
+                    status = 403
+                    self._send_error(
+                        403, "write_requires_loopback",
+                        f"写口只在回环上开放（127.0.0.1 / localhost / ::1）；"
+                        f"本进程绑的是 {self.bind_host}，且没有 --allow-remote-write",
+                        "读端点照常可用；真要从别的地址写，重启读口时加 --allow-remote-write")
+                    return
+                status = self._post_push(path, origin)
                 return
             match = REFRESH_PATH_RE.fullmatch(path)
             if not match:
@@ -2236,6 +2401,70 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             log("request", path=path, method="POST", status=status,
                 ms=round((time.perf_counter() - started) * 1000, 2))
+
+    def _post_push(self, path: str, origin: str) -> int:
+        """两条推送写口的公共前半段：读 body → 取参数 → 调数据面 → 映射错误。
+
+        错误映射写死在这里（与任务书一致）：未知/不可写键 → 400 `bad_key`；值非法/越界 →
+        400 `bad_value`；库写失败 → 500 `internal_error`；body 不是 JSON object →
+        400 `bad_json`；body 超过 64 KB → 413。
+        """
+        try:
+            body = _read_json_body(self)
+        except OverflowError as exc:
+            self._send_error(413, "payload_too_large", str(exc),
+                             "配置写入的请求体只该有一个键值对")
+            return 413
+        except ValueError as exc:
+            self._send_error(400, "bad_json", str(exc),
+                             'body 形如 {"key":"push.open_budget_tokens","value":600} '
+                             '或 {"preset":"pause"}')
+            return 400
+
+        if not self.semaphore.acquire(blocking=False):
+            self._send_error(503, "busy", "并发连接已满（上限 8）", "等一秒再重试")
+            return 503
+        try:
+            if path == PUSH_CONFIG_PATH:
+                if "key" not in body:
+                    self._send_error(400, "bad_key", "缺 key：要写哪个配置项？",
+                                     f"可写：{', '.join(fish_push_audit.WRITABLE_KEYS)}")
+                    return 400
+                if "value" not in body:
+                    self._send_error(400, "bad_value", "缺 value：要写成什么？",
+                                     'body 形如 {"key":"…","value":20}')
+                    return 400
+                payload = api_push_write_config(self.db_path, body["key"], body["value"])
+            else:
+                if "preset" not in body:
+                    self._send_error(400, "bad_value", "缺 preset：要哪一个？",
+                                     'body 形如 {"preset":"pause"}')
+                    return 400
+                payload = api_push_apply_preset(self.db_path, body["preset"])
+        except fish_push_audit.BadKey as exc:
+            self._send_error(400, "bad_key", str(exc),
+                             f"可写：{', '.join(fish_push_audit.WRITABLE_KEYS)}")
+            return 400
+        except fish_push_audit.BadValue as exc:
+            self._send_error(400, "bad_value", str(exc),
+                             "看 GET /api/push/overview 的 config[].type/min/max")
+            return 400
+        except ValueError as exc:
+            # 兜底：数据面里其它 ValueError 也都是「你的输入不对」，不是 500。
+            self._send_error(400, "bad_value", str(exc),
+                             "看 GET /api/push/overview 的 config[].type/min/max")
+            return 400
+        except (sqlite3.Error, OSError) as exc:
+            log("push_write_failed", path=path, error=f"{type(exc).__name__}: {exc}")
+            self._send_error(500, "internal_error", f"{type(exc).__name__}: {exc}",
+                             "看服务端 stderr；库可能被别的进程长时间占着")
+            return 500
+        finally:
+            # 写口与读口共用同一个并发闸（上限 8）：**不释放**就等于每写一次漏一个槽，
+            # 连写 8 次之后所有请求都 503 —— 那是「用着用着整屏坏了」。
+            self.semaphore.release()
+        self._send_json(200, payload, allow_origin=origin)
+        return 200
 
     def do_GET(self):  # noqa: N802
         started = time.perf_counter()
@@ -2410,9 +2639,53 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, payload, allow_origin=origin)
             return 200
 
+        # ── 推送面板（设置页第二项）：读两个，写两个（写只认 POST）──────────
+        if path == "/api/push/overview":
+            try:
+                days = parse_int(query, "days", fish_push_audit.DEFAULT_DAYS,
+                                 fish_push_audit.DAYS_MIN, fish_push_audit.DAYS_MAX)
+            except ValueError as exc:
+                self._send_error(400, "bad_param", str(exc), "days=7|30")
+                return 400
+            self._send_json(200, api_push_overview(self.db_path, days), allow_origin=origin)
+            return 200
+
+        if path == "/api/push/events":
+            try:
+                limit = parse_int(query, "limit", fish_push_audit.EVENTS_LIMIT_DEFAULT, 1,
+                                  fish_push_audit.EVENTS_LIMIT_MAX)
+                channel = fish_push_audit.check_channel((query.get("channel") or [""])[0])
+                # `reaction` **不传 = 不过滤**；`reaction=pending` = 只要「待判」（库里是 NULL）。
+                # **空串不是契约**：`parse_qs` 默认把 `reaction=` 丢成「没有这个参数」，
+                # 所以这个读口的「待判」过滤用显式哨兵 `pending`（评审 🟠-2）。
+                raw_reaction = (query.get("reaction") or [None])[0]
+                reaction = (None if raw_reaction is None
+                            else fish_push_audit.check_reaction(raw_reaction))
+            except ValueError as exc:
+                self._send_error(400, "bad_param", str(exc),
+                                 "limit≤100；channel=inject|prompt|tool_after；"
+                                 "reaction=pending|accepted|ignored；不传=不过滤")
+                return 400
+            payload = api_push_events(self.db_path, limit=limit, channel=channel,
+                                      reaction=reaction)
+            self._send_json(200, payload, allow_origin=origin)
+            return 200
+
+        if path in (PUSH_CONFIG_PATH, PUSH_PRESET_PATH):
+            # 写口**只认 POST**：GET 上给一个明确的 405，而不是 404——
+            # 404 会让人以为"端点不存在"，于是去猜另一个路径名。
+            self._send_error(405, "method_not_allowed",
+                             "写配置要用 POST（GET 只读，不该有「改一个值」的语义）",
+                             f"POST {path}  body={{\"key\":\"…\",\"value\":…}}"
+                             if path == PUSH_CONFIG_PATH else
+                             f"POST {path}  body={{\"preset\":\"pause\"|\"resume\"}}")
+            return 405
+
         self._send_error(404, "not_found", f"没有这个端点：{path}",
                          "可用：/api/facets /api/stream /api/stats /api/entry /api/meta "
-                         "/api/hosts /api/hosts/<id> /api/health")
+                         "/api/hosts /api/hosts/<id> /api/health "
+                         "/api/push/overview /api/push/events（写：POST /api/push/config、"
+                         "/api/push/preset）")
         return 404
 
     # ── 静态 ────────────────────────────────────────────────────
@@ -2505,9 +2778,13 @@ def main(argv: list[str] | None = None) -> int:
         description="fish 工作台只读读口：五源合流 + 切片器 + 判断面（不给假数据）",
     )
     parser.add_argument("--db", default=None, help="主库路径（默认自动探测）")
-    parser.add_argument("--host", default=DEFAULT_HOST, help="监听地址（默认只绑回环）")
+    parser.add_argument("--host", default=DEFAULT_HOST,
+                        help="监听地址（默认只绑回环；非回环时写口默认关闭）")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="端口（默认 8790）")
     parser.add_argument("--dist", default=None, help="前端产物目录（如 ui/dist）；不给就只发 API")
+    parser.add_argument("--allow-remote-write", action="store_true",
+                        dest="allow_remote_write",
+                        help="在非回环地址上也开放两个推送写端点（默认不开放：非回环时写口 403）")
     parser.add_argument("--selftest", action="store_true", help="不启服务，跑四个端点打印读数")
     args = parser.parse_args(argv)
 
@@ -2524,6 +2801,9 @@ def main(argv: list[str] | None = None) -> int:
     _CURRENT_DB = db_path
     Handler.db_path = db_path
     Handler.dist_dir = os.path.abspath(args.dist) if args.dist else None
+    Handler.bind_host = args.host
+    # 写口闸：回环上默认开；非回环必须显式 --allow-remote-write（评审 🟡-3）。
+    Handler.write_allowed = is_loopback(args.host) or args.allow_remote_write
 
     conn = open_conn(db_path)   # 启动即证明「只读」成立（写被拒绝）
     try:
@@ -2537,10 +2817,36 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         conn.close()
     log("started", host=args.host, port=args.port, db=db_path,
-        dist=Handler.dist_dir,
+        dist=Handler.dist_dir, writeAllowed=Handler.write_allowed,
         fold={"sec": FOLD_SEC, "min": FOLD_MIN,
               "push": {"enabled": FOLD_PUSH, "gapSec": FOLD_PUSH_SEC}},
         cursorPushdown=CURSOR_PUSHDOWN, eventProject=EVENT_PROJECT_MODE, counts=counts)
+    if not is_loopback(args.host):
+        # **大声警告**：这不是"顺便提醒"，是"你现在暴露了什么"。写成多行是为了在
+        # 满屏 JSON 日志里也一眼能被看到（一行 JSON 会被当成普通请求日志跳过）。
+        if Handler.write_allowed:
+            print(
+                "\n"
+                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+                f"!! 警告：读口绑在 {args.host}:{args.port}（**非回环**），而且带了\n"
+                "!!       --allow-remote-write：任何能访问这个地址的人都可以改\n"
+                "!!       push.* 配置（白名单 + 类型/范围仍生效，审计照写）。\n"
+                "!!       只在本来就可信的内网/隧道里这么用；用完就停。\n"
+                "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n",
+                file=sys.stderr)
+            log("remote_write_open", host=args.host, port=args.port,
+                note="write endpoints open to non-loopback clients (--allow-remote-write)")
+        else:
+            print(
+                "\n"
+                "------------------------------------------------------------------------\n"
+                f"!! 提示：读口绑在 {args.host}:{args.port}（**非回环**），写口已关闭：\n"
+                "!!       POST /api/push/config|preset 一律 403 write_requires_loopback。\n"
+                "!!       读端点（overview / events / hosts / stream …）照常可用。\n"
+                "!!       真要远程写：重启时加 --allow-remote-write（且确认网络可信）。\n"
+                "------------------------------------------------------------------------\n",
+                file=sys.stderr)
+            log("write_requires_loopback", host=args.host, port=args.port)
 
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     # 预热放后台线程：它花的是进程启动成本，不该让用户读屏时等（见 warm_up 的 docstring）。

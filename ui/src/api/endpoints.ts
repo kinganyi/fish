@@ -1,5 +1,19 @@
-import { getJson, postJson, requestJson } from './client'
-import type { EntryData, FacetsData, HostStatus, HostsData, MetaData, StatsData, StreamData, Win } from './types'
+import { getJson, postJson, postJsonBody, requestJson } from './client'
+import type {
+  EntryData,
+  FacetsData,
+  HostStatus,
+  HostsData,
+  MetaData,
+  PushEventsData,
+  PushOverviewData,
+  PushPreset,
+  PushPresetResult,
+  PushWriteResult,
+  StatsData,
+  StreamData,
+  Win,
+} from './types'
 
 /**
  * 四个端点的薄封装（参数名与读口契约一致，`97 §C`）。
@@ -65,4 +79,51 @@ export function fetchHost(id: string, signal?: AbortSignal) {
 
 export function refreshHost(id: string, signal?: AbortSignal) {
   return postJson<HostStatus>(`/api/hosts/${encodeURIComponent(id)}/refresh`, signal)
+}
+
+/**
+ * 设置页 · 推送（诊断只读 + 两个窄写动作）。
+ *
+ * 四个端点的分工：
+ *   · `overview`：整页数据（`totals` 来自后端 `fish.push_stats`，前端**不重算**）；
+ *   · `events`：最近推送（按 id 倒序；`reaction` 不传=不过滤，`pending`=只要待判）；
+ *   · `config`：写**一个**白名单键（后端判白名单/类型/范围，审计落 `_audit/`）；
+ *   · `preset`：止血 `pause` / 恢复 `resume`。
+ *
+ * 写失败时后端回 400 `bad_key` / `bad_value`，前端把 `ApiError.hint` 原文贴出来
+ * （**不翻译、不吞**：配置改错的后果比一句难看的话严重）。
+ */
+export function fetchPushOverview(days: number, signal?: AbortSignal) {
+  return getJson<PushOverviewData>('/api/push/overview', { days }, signal)
+}
+
+export interface PushEventsQuery {
+  limit?: number
+  /** 空 = 不过滤；`inject` / `prompt` / `tool_after` 收窄到一个通道。 */
+  channel?: string
+  /**
+   * 不传 = 不过滤；`pending` = 只要「待判」（库里 `reaction IS NULL`）；`accepted` / `ignored` 原样。
+   *
+   * **空串不是契约**（评审 🟠-2）：`buildUrl` 会跳过空串参数，后端 `parse_qs` 默认也丢空值，
+   * 于是「空串=待判」这条契约在两端都到不了。改用显式哨兵 `pending`，两边都不用改
+   * 「空值=不传」的全局语义。
+   */
+  reaction?: string
+  signal?: AbortSignal
+}
+
+export function fetchPushEvents({ limit = 20, channel, reaction, signal }: PushEventsQuery = {}) {
+  return getJson<PushEventsData>(
+    '/api/push/events',
+    { limit, channel, reaction },
+    signal,
+  )
+}
+
+export function postPushConfig(key: string, value: string | number | boolean, signal?: AbortSignal) {
+  return postJsonBody<PushWriteResult>('/api/push/config', { key, value }, signal)
+}
+
+export function postPushPreset(preset: PushPreset, signal?: AbortSignal) {
+  return postJsonBody<PushPresetResult>('/api/push/preset', { preset }, signal)
 }

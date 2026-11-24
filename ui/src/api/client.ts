@@ -1,7 +1,7 @@
 import type { Envelope } from './types'
 
 /**
- * 只读读口的 HTTP 客户端。
+ * 读口与写口的 HTTP 客户端。
  *
  * **基址可配置**（F-2：交付拓扑是「UI 静态托管 + API 独立进程」，前端不能假设同源）。
  * 优先级从高到低：
@@ -9,6 +9,12 @@ import type { Envelope } from './types'
  *   2. 构建期 `VITE_FISH_API_BASE`（`npm run build` 时定死，适合打包给宿主壳层）；
  *   3. 同源相对路径——读口 `--dist` 同源发静态、或 Vite dev 的 `/api` proxy（天然满足）。
  * 空串 = 同源。**非 http(s) 的写法一律忽略**（不把地址栏里随便一段字符串当 URL 用）。
+ *
+ * **读口默认只读；唯一的写口是 `/api/push/*`**（白名单 + 类型/范围 + 审计，见
+ * `p0/fish_push_audit.py`），以及不写盘的 `POST /api/hosts/<id>/refresh`。所以这里只有
+ * 三个出口：`getJson` / `requestJson`（读）、`postJson`（重探宿主）、`postJsonBody`
+ * （写一个白名单配置项 / 应用预设）。**没有通用 `request(method, body)`**——铺开成通用方法，
+ * 下一个人就会顺手加一个「什么都能写」的 POST。
  *
  * 两类失败必须分开（97 §D5：前端**不推断**状态，但"读口没起来"只能由网络层判）：
  *   · `NetworkError` —— 连接都没建立（读口未起 / 端口不对）→ 整屏「读口未起」；
@@ -84,6 +90,9 @@ function buildUrl(path: string, params?: Query): string {
   const url = new URL(path, window.location.origin)
   if (params) {
     for (const [key, value] of Object.entries(params)) {
+      // 空串 = 不传（`?channel=` 与「没有这个参数」在后端是两种语义，但这一层只表达「不传」）。
+      // 需要有语义的「空」时用**显式哨兵**（如 `reaction=pending`），别指望空串能过网关：
+      // 后端 `parse_qs` 默认也丢空值，两头都到不了（评审 🟠-2）。
       if (value === null || value === undefined || value === '') continue
       url.searchParams.set(key, String(value))
     }
@@ -96,14 +105,28 @@ export async function getJson<T>(path: string, params?: Query, signal?: AbortSig
 }
 
 /**
- * 唯一的 POST 语义：`POST /api/hosts/<id>/refresh`（**重探一次，不写盘**）。
+ * POST **重探一次**：`POST /api/hosts/<id>/refresh`（不写盘）。
  *
- * 为什么单独一个函数而不是给 `getJson` 加 `method` 参数：这个读口只允许两个动作——
- * 读（GET）与「重探宿主」（POST）。把 method 铺开成通用参数，下一个人就会顺手加一个
- * 「写配置」的 POST——那正是本期明确不做的事（见 `ui/README.md` 与 `fish_hosts.py` 文件头）。
+ * 为什么单独一个函数而不是给 `getJson` 加 `method` 参数：读与动作是两种语义，
+ * 混成一个函数之后没人分得清哪次调用会改东西。写配置请用 `postJsonBody`。
  */
 export async function postJson<T>(path: string, signal?: AbortSignal): Promise<Envelope<T>> {
   return (await requestPayload(path, undefined, signal, 'POST')) as Envelope<T>
+}
+
+/**
+ * POST **带 JSON body**：`/api/push/config`（单键）与 `/api/push/preset`（止血/恢复）。
+ *
+ * 这是全前端**唯一**写配置的出口。白名单/类型/范围/审计都在后端判：
+ * 前端把 `key` 与用户填的 `value` 原样发过去，收到 400 就贴后端原文（`ApiError.hint`），
+ * **不在前端自己判可写**——两处判据必然漂开，而写错配置是会立刻影响行为的。
+ */
+export async function postJsonBody<T>(
+  path: string,
+  body: unknown,
+  signal?: AbortSignal,
+): Promise<Envelope<T>> {
+  return (await requestPayload(path, undefined, signal, 'POST', body)) as Envelope<T>
 }
 
 /**
@@ -121,13 +144,17 @@ async function requestPayload(
   params?: Query,
   signal?: AbortSignal,
   method: 'GET' | 'POST' = 'GET',
+  body?: unknown,
 ): Promise<unknown> {
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  if (body !== undefined) headers['Content-Type'] = 'application/json'
   let response: Response
   try {
     response = await fetch(buildUrl(path, params), {
       method,
-      headers: { Accept: 'application/json' },
+      headers,
       signal,
+      body: body === undefined ? undefined : JSON.stringify(body),
       // 只读快照面：不缓存，避免 2 秒轮询读到上一轮
       cache: 'no-store',
     })

@@ -421,3 +421,181 @@ export interface HostsData {
   generatedAt: string
   consistency: { ok: boolean; warnings: string[]; checked: Record<string, unknown> }
 }
+
+/**
+ * 推送面板（`/api/push/*`，数据面在 `p0/fish_push_audit.py`）。
+ *
+ * 一条纪律与别处一致：**率一律 `number | null`**——`null` 表示「没有已判样本，算不出」，
+ * 不是 0。0% 的采纳率是「推了没人理」，`null` 是「还没推过」，两者文案必须不同。
+ *
+ * 写口只有两个：`POST /api/push/config`（单键）与 `POST /api/push/preset`（止血/恢复）。
+ * 白名单、类型/范围、审计都在后端；前端**不自己判**哪一项可写（`writable` 由后端给）。
+ */
+export interface PushWindow {
+  days: number
+  since: string
+}
+
+export interface PushTotals {
+  total: number
+  accepted: number
+  ignored: number
+  pending: number
+  decided: number
+  acceptRate: number | null
+  gapClearRate: number | null
+  violationRate: number | null
+  sessionStdev: number | null
+  gapCleared: number
+  toolAfterTotal: number
+}
+
+export interface PushChannel {
+  channel: string
+  total: number
+  accepted: number
+  ignored: number
+  pending: number
+  acceptRate: number | null
+}
+
+export interface PushKind {
+  kind: string
+  total: number
+  accepted: number
+  ignored: number
+  pending: number
+}
+
+/** 一项配置的现场值。`source` = `db`（现场有行）/ `default`（吃了登记默认值）。 */
+export interface PushConfigItem {
+  key: string
+  label: string
+  value: string | number | boolean
+  default: string | number | boolean
+  type: 'int' | 'float' | 'bool' | 'enum' | 'string'
+  source: 'db' | 'default'
+  writable: boolean
+  min: number | null
+  max: number | null
+  help: string
+  updatedAt: string | null
+}
+
+export interface PushReceiverDiag {
+  sessions: number
+  unknownSessions: number
+  unknownRate: number | null
+  activityUnknownRate: number | null
+  workspaceMapRows: number | null
+}
+
+export interface PushOpenLoopDiag {
+  pushes: number
+  codes: number
+  share: number | null
+  keywords: string[]
+}
+
+export interface PushArtifactDiag {
+  pushes: number
+  accepted: number
+}
+
+export interface PushDuplicateDiag {
+  sessionCodeDayGroups: number
+  maxPerSessionDay: number
+  maxCode: string | null
+  maxDetail: string | null
+}
+
+export interface PushDiagnostics {
+  receiver: PushReceiverDiag
+  openLoop: PushOpenLoopDiag
+  artifact: PushArtifactDiag
+  duplicates: PushDuplicateDiag
+}
+
+export interface PushTopCode {
+  code: string
+  title: string
+  project: string | null
+  kind: string
+  count: number
+  accepted: number
+  ignored: number
+  lastAt: string | null
+}
+
+export interface PushOverviewData {
+  window: PushWindow
+  totals: PushTotals
+  channels: PushChannel[]
+  kinds: PushKind[]
+  diagnostics: PushDiagnostics
+  topCodes: PushTopCode[]
+  config: PushConfigItem[]
+  /** 数据**算出来的时刻**（读口缓存命中时它仍是缓存构建时刻，不是「此刻」）。 */
+  asOf: string
+  /** 缓存构建时刻（与 `asOf` 同值；单独给一个名字是为了让界面说得出「缓存于 X」）。 */
+  cachedAt?: string
+  /** 这份数据已经放了多久（秒）。0 = 刚算的；≥1 时界面要显示「缓存于 …，N 秒前」。 */
+  cacheAgeSec?: number
+}
+
+/** 一条推送事件。`reaction` 空串 = 待判（库里是 NULL），不是「拒绝」。 */
+export interface PushEvent {
+  id: number
+  channel: string
+  code: string
+  title: string
+  project: string | null
+  kind: string
+  pushedAt: string
+  reaction: '' | 'accepted' | 'ignored'
+  latencySec: number | null
+}
+
+export interface PushEventsData {
+  items: PushEvent[]
+  /**
+   * `reaction` 过滤：`null` = 不过滤；`pending` = 只要「待判」（库里 reaction IS NULL）；
+   * `accepted` / `ignored` 原样。**空串不是契约**（`parse_qs` 会丢掉空值，空串到不了后端）。
+   */
+  filter: { limit: number; channel: string | null; reaction: string | null }
+  asOf: string
+}
+
+/**
+ * 单键写入的回执（`old`/`new` 是**写前/写后**的现场值，不是用户输入回显）。
+ *
+ * `changed=false` = 现场值就是你要写的那个值 → **没写库、也没写审计**（`auditAt` 因此是
+ * `null`）。所以判「审计是否成功」只能用 `changed && auditAt`，单看 `auditAt` 会把
+ * 「没改」误报成「审计写失败」。
+ */
+export interface PushWriteResult {
+  key: string
+  old: string | number | boolean
+  new: string | number | boolean
+  source: 'workbench'
+  changed: boolean
+  auditAt: string | null
+}
+
+export type PushPreset = 'pause' | 'resume'
+
+export interface PushPresetChange {
+  key: string
+  old: string | number | boolean
+  new: string | number | boolean
+  changed: boolean
+}
+
+export interface PushPresetResult {
+  preset: PushPreset
+  label: string
+  changes: PushPresetChange[]
+  changedCount: number
+  source: 'workbench'
+  auditAt: string | null
+}

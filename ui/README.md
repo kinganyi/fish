@@ -134,8 +134,37 @@ node scripts/smoke.mjs      # S6 这一条就是它：任一张 png 比 dist 旧
 错误信封 `{ok:false, code, hint, action}`。`/api/meta` 是**唯一不套信封**的端点（它是自述，
 套一层 `data` 只会让外部脚本多剥一层）。
 
-**`/api/meta` 的 `capabilities` 是"已实现"，不是"计划"**：`entry/facets/health/meta/stats/stream`。
+**`/api/meta` 的 `capabilities` 是"已实现"，不是"计划"**：`entry/facets/health/hosts/meta/push/stats/stream`（8 条）。
 它非空本身就是判据（`verify_v4.py` 的 V1），所以别在这里写将来的端点。
+
+### 设置页的二级导航 + 推送页（2026-11-24）
+
+设置页不再是一整屏宿主 master-detail，而是 **200px 二级导航 + 内容**：
+`Agent 接入`（原宿主页，逻辑原样，左列表 260→220）与 `推送`（新）。
+深链 `?page=settings&sub=push` 刷新后仍在推送页；回写只动 `sub` 这一个键（`?api=` 里的冒号原样）。
+
+推送页四个端点（数据面 `p0/fish_push_audit.py`，验收 `p0/tools/verify_push_panel.py` **30 条**
+V-01~V-30）：
+
+| 端点 | 读写 | 说明 |
+|---|---|---|
+| `GET /api/push/overview?days=7\|30` | 读 | 诊断概览；`totals` **复用** `fish.push_stats`，不重算；`asOf` 是**数据时刻**（命中 15 s 缓存时另给 `cachedAt` + `cacheAgeSec`），不拿「此刻」冒充 |
+| `GET /api/push/events?limit&channel&reaction` | 读 | 最近推送（id 倒序）；`reaction` 不传=不过滤，**`pending`=只要待判**（空串不是契约：`parse_qs` 会丢空值，那条路到不了后端） |
+| `POST /api/push/config` | **写** | 单个白名单键（7 个）+ 类型/范围校验 + 审计；**非回环监听时默认 403 `write_requires_loopback`** |
+| `POST /api/push/preset` | **写** | `pause` / `resume` 两个预设（同上，另一个粒度的动作） |
+
+**读口默认只读，写只有这两个**：白名单、类型/范围、审计全在后端（`p0/fish_push_audit.py`），
+前端把 `key`/`value` 原样发过去、把 400 的原文贴出来，**不复制一份判据**。
+`push.enabled` 不可写、只在页面上显示警告：在 DSH 上设 false 会连 `tool_activity` 采集一起停
+（`fish_push_hook.py:138`），想止血请用「止血预设」（它只动三个口味键）。
+写成功后前端会**重新 GET overview**（不拿本地值假装已生效）；接口 405 的只有
+`GET /api/push/config|preset`（写要 POST），而不是 404 —— 404 会让人去猜路径名。
+
+截图：`screenshots/08-settings-push.png`（推送页，1280×720 不横向溢出的读数在
+`verify_push_panel.py` 的 V-18，1440×900 同测）与 `screenshots/06-settings-1280.png`
+（**Agent 接入**页 1280×720：详情区可滚、刷新按钮 `bottom≤720` 且命中，判据 V-26；
+把两处布局修法还原成修前写法的产物副本必须红）。设计/口径/未验项见
+`docs/109-推送面板-设计与验收-20261124.md`。
 
 ### 翻页的窗口起点：`wsince`（R-01 残留）
 
