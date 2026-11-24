@@ -332,46 +332,49 @@ def detect_cycles(conn: sqlite3.Connection, host: str) -> dict:
         "detect_cycles 在 W6 落地（113 §10.1）：W1 只有空壳，一行都不写")
 
 
-class _AdapterShell:
-    """宿主适配器空壳的公共部分：**所有方法都响亮失败**，不返回假结果。
+class _LazyAdapter:
+    """按需加载宿主适配器：导入 `fish_lineage` 时**不**把 `fish_corpus_*`/`fish` 拖进来。
 
-    W2/W3 用真实现替换时，按 113 §2.5 拆成叶子模块（`fish_lineage_dsh` /
-    `fish_lineage_wb`），本模块只留注册表与公共算法——两波同时改一个文件必然打架。
+    为什么不在模块顶层 import 叶子（113 §2.4 的分层护栏）：
+    `fish_lineage_dsh`/`fish_lineage_wb` 会 import `fish_corpus_*`，后者最终 import `fish`；
+    而 `fish_lineage` 可能被 `fish_db` 或 hook 路径引用。顶层导入 = 把整条业务链拖进 hook。
     """
-    host = ""
 
-    def resolve(self, session_id: str, *, hint: dict | None = None) -> SessionNode | None:
-        raise NotImplementedError(
-            f"{self.host or '未命名'}适配器的 resolve 在 W2/W3 落地（113 §3/§4）："
-            "骨架返回 None 会被上层当成'这个会话不存在'，比报错危险得多")
+    def __init__(self, host: str, module: str, class_name: str) -> None:
+        self.host = host
+        self._module = module
+        self._class_name = class_name
+        self._impl = None
+
+    def _get(self):
+        if self._impl is None:
+            import importlib
+            module = importlib.import_module(self._module)
+            self._impl = getattr(module, self._class_name)()
+        return self._impl
+
+    def resolve(self, session_id: str, *, hint: dict | None = None) -> "SessionNode | None":
+        return self._get().resolve(session_id, hint=hint)
 
     def scan(self, *, since: str | None = None,
              limit: int | None = None) -> Iterable[SessionNode]:
-        raise NotImplementedError(
-            f"{self.host or '未命名'}适配器的 scan 在 W2/W3 落地（113 §3/§4）："
-            "空列表会被当成'扫描成功、宿主没有会话'")
+        return self._get().scan(since=since, limit=limit)
+
+    def __repr__(self) -> str:      # pragma: no cover
+        return f"<LazyLineageAdapter {self.host}>"
 
 
-class DshLineageAdapter(_AdapterShell):
-    """DSH 适配器空壳 → W2 填 `fish_lineage_dsh.py`（读会话头，classify 六条判据）。
-
-    DSH 是**唯一能判父**的宿主（`SessionStart`/`PostToolUse` payload 里没有 `agent_id`，
-    110 §1.1 v3），所以判父只能读 `session.v4.jsonl.zstd` 的首帧。
-    """
-    host = "dsh"
-
-
-class WbLineageAdapter(_AdapterShell):
-    """WorkBuddy 适配器空壳 → W3 填 `fish_lineage_wb.py`（runtime → path → missing 四级）。
-
-    注意 WB 的 `session_id` 只能取文件名（transcript 首行的 `sessionId` 不是
-    `agent-<uuid>`，113 §4.5），所以本适配器的 `resolve` 在 W3 也必须按路径取 id。
-    """
-    host = "workbuddy"
-
-
-#: 宿主 → 适配器。W2/W3 把这两个空壳换成叶子模块里的真实现（注册表本身不用改）。
+#: 宿主 → 适配器（**懒加载**：首次 `resolve`/`scan` 才 import 叶子模块）。
 ADAPTERS: dict[str, SessionLineageAdapter] = {
-    "dsh": DshLineageAdapter(),
-    "workbuddy": WbLineageAdapter(),
+    "dsh": _LazyAdapter("dsh", "fish_lineage_dsh", "DshLineageAdapter"),
+    "workbuddy": _LazyAdapter("workbuddy", "fish_lineage_wb", "WbLineageAdapter"),
 }
+
+
+def get_adapter(host: str) -> SessionLineageAdapter:
+    """按宿主取适配器；未登记 → `KeyError`（**不猜、不回退到 dsh**）。"""
+    try:
+        return ADAPTERS[host]
+    except KeyError:
+        raise KeyError(
+            f"没有 {host!r} 的会话树适配器；已登记：{sorted(ADAPTERS)}") from None

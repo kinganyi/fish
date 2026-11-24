@@ -272,6 +272,10 @@ FISH_GIT_SCHEMA_LINES_MAX = 320
 # 加表可以长，但「顺手加逻辑」不行——逻辑一进来它就不再是零依赖的叶子了。
 FISH_LINEAGE_SCHEMA_LINES_MIN = 60
 FISH_LINEAGE_SCHEMA_LINES_MAX = 200
+#: 会话树投影层本体（W1 骨架 207 → W2 实现 depth 后 ~380 → W6 还会加 detect_cycles；
+#: 留住 200–700 的真实区间，长成第二个巨石时这条会红）。
+FISH_LINEAGE_LINES_MIN = 200
+FISH_LINEAGE_LINES_MAX = 700
 # Phase 3 拆出的写库层：当前 217 行 → 上界 380（还要容纳 Phase 4/5 的写入入口）
 FISH_GIT_STORE_LINES_MIN = 150
 FISH_GIT_STORE_LINES_MAX = 380
@@ -857,6 +861,8 @@ class SplitSizeTest(unittest.TestCase):
                 # 2026-11-25（113 W1b）：会话树 DDL 叶子
                 ("fish_lineage_schema.py", FISH_LINEAGE_SCHEMA_LINES_MIN,
                  FISH_LINEAGE_SCHEMA_LINES_MAX),
+                # 2026-11-25（113 W2/W3）：会话树投影层本体（懒加载注册表 + depth 重算）
+                ("fish_lineage.py", FISH_LINEAGE_LINES_MIN, FISH_LINEAGE_LINES_MAX),
                 ("fish_git_store.py", FISH_GIT_STORE_LINES_MIN, FISH_GIT_STORE_LINES_MAX),
                 ("fish_git_link.py", FISH_GIT_LINK_LINES_MIN, FISH_GIT_LINK_LINES_MAX),
                 ("fish_purge.py", FISH_PURGE_LINES_MIN, FISH_PURGE_LINES_MAX),

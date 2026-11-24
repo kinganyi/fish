@@ -411,10 +411,10 @@ class ShellTest(unittest.TestCase):
         self.assertEqual(sorted(fish_lineage.ADAPTERS), ["dsh", "workbuddy"])
         for host, adapter in fish_lineage.ADAPTERS.items():
             self.assertEqual(adapter.host, host, "适配器的 host 与注册表键不一致")
-            with self.assertRaises(NotImplementedError):
-                adapter.resolve("s-1")
-            with self.assertRaises(NotImplementedError):
-                list(adapter.scan())
+            # W2/W3 起注册表是**懒加载真实现**：不存在的会话返回 None，
+            # 不再像 W1 空壳那样抛 NotImplementedError（"不知道"与"没有"要分开）。
+            self.assertIsNone(adapter.resolve("s-1"))
+            self.assertLessEqual(len(list(adapter.scan(limit=1))), 1)
 
     def test_identity_key_of_strips_role_once(self):
         """唯一的 `#role` 剥离点（113 §1-5）：只剥第一段，其余原样。"""
