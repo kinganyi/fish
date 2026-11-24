@@ -563,6 +563,153 @@ def _ensure_identity_tables(conn: sqlite3.Connection):
     for stmt in _IDENTITY_INDEXES:
         conn.execute(stmt)
 
+
+# ============================================================== session_tokens.evidence CHECK
+# 2026-11-25（113 W4 · §5.3）：旧库的 CHECK 是**三值**，`provisional` 会被拒绝。
+# SQLite 改不了 CHECK，只能重建表（12 步）——照 `_ensure_presence_session:300-398` 的
+# 既有范式：备份 → `PRAGMA foreign_keys=OFF` → `BEGIN IMMEDIATE` → 建 `_v2` → 拷 →
+# drop → rename → 重建索引 → `foreign_key_check` → COMMIT。
+#
+# 判据式探测而不是扒 `sqlite_master.sql`：**"插得进去吗"就是 CHECK 的实际语义**，
+# 字符串手术对列顺序/空白/未来加列都敏感（`_presence_rebuild_ddl` 的注释记过同款教训）。
+_SESSION_EVIDENCE_PROVISIONAL = "provisional"
+
+_SESSION_EVIDENCE_PROBE = (
+    "INSERT INTO session_tokens (token_hash,citizen_id,session_key,evidence,channel,"
+    "parent_token,issued_at,expires_at) VALUES "
+    "('__probe__','__probe__','__probe__',?,'cli',NULL,'1970-01-01T00:00:00Z',NULL)")
+
+
+def _session_tokens_rebuild_ddl(table="session_tokens_v2") -> str:
+    """把 `_SESSION_TOKENS_DDL` 建到临时表名——**DDL 只有一份**（同 `_presence_rebuild_ddl`）。"""
+    head = "CREATE TABLE IF NOT EXISTS session_tokens"
+    if _SESSION_TOKENS_DDL.count(head) != 1:
+        raise PresenceMigrationError("_SESSION_TOKENS_DDL 形态变了：找不到唯一的建表头")
+    return _SESSION_TOKENS_DDL.replace(head, f"CREATE TABLE IF NOT EXISTS {table}", 1)
+
+
+def _session_evidence_accepted(conn, level=_SESSION_EVIDENCE_PROVISIONAL) -> bool:
+    """把这张表的 DDL **原样重放到内存库**，再试插一条 `evidence=<level>`：
+    被 CHECK 拒 = 旧库；插得进去 = 已扩。
+
+    ## 为什么不在真库上试插再 `SAVEPOINT` 回滚（113 §5.3 的初版写法）
+
+    `migrate()` 被**每条命令**调用，包括 `board render` 这类只读命令。初版在真库上
+    试插（哪怕随后回滚），实测会让 `index.sqlite-wal` 发生变化——
+    `test_board_home_root` 的"只读命令不许改 data_root"当场红。**判据式 ≠ 可以写**。
+
+    重放 DDL 让 SQLite 用**它自己的 CHECK** 回答，既不做字符串手术（§5.3 的明文纪律），
+    也不在用户的库上留任何痕迹。代价是每条命令建一个内存库 + 一张表（微秒级）。
+    """
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' "
+                       "AND name='session_tokens'").fetchone()
+    if not row or not row[0]:
+        return False
+    mem = sqlite3.connect(":memory:")
+    try:
+        mem.execute(row[0])                       # 原样重放（含旧 CHECK）
+        mem.execute(_SESSION_EVIDENCE_PROBE, (level,))
+        return True
+    except sqlite3.IntegrityError:
+        return False
+    except sqlite3.Error:
+        # 重放本身失败（DDL 里有本库独有的东西）→ 判不到就当"未扩"：
+        # 走重建路径而不是静默接受（宁可多一次幂等重建，也不放过旧 CHECK）。
+        return False
+    finally:
+        mem.close()
+
+
+def _session_evidence_backup(conn, data_root) -> str:
+    """迁移前的库快照（SQLite backup API，WAL 下不撕裂）；拿不到目录 → 不迁移。"""
+    if data_root is None:
+        raise PresenceMigrationError("拿不到数据目录，无法备份 → 本次不迁移（宁可不升级）")
+    out_dir = Path(data_root) / "_backups"
+    stamp = datetime.datetime.now().strftime("%y%m%d-%H%M%S")
+    dest = out_dir / f"index-before-session-evidence-{stamp}.sqlite"
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        dst = sqlite3.connect(str(dest))
+        try:
+            conn.backup(dst)
+        finally:
+            dst.close()
+    except (OSError, sqlite3.Error) as exc:
+        raise PresenceMigrationError(f"备份失败（{dest}）：{exc}") from exc
+    return str(dest)
+
+
+def _ensure_session_evidence_levels(conn, *, data_root=None) -> dict:
+    """幂等：`session_tokens.evidence` 的 CHECK 扩到含 `provisional`（113 §5.3）。
+
+    返回 `{"rebuilt","backup","rows_before","rows_after"}`。状态机：
+
+      0. 表不存在 → 空操作（全新库由 `SCHEMA` 直接建对）
+      1. 探测通过 → 空操作（幂等出口：不备份、不重建、零写入）
+      2. 探测失败 → 备份 + 事务内重建 + 行数对拍 + 外键校验 + **重建后再探一次**
+      3. 备份拿不到目录 → 抛 `PresenceMigrationError`（调用方降级，不阻断启动）
+    """
+    result = {"rebuilt": False, "backup": None, "rows_before": 0, "rows_after": 0}
+    try:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                            "AND name='session_tokens'").fetchone():
+            return result
+    except sqlite3.Error:
+        return result
+    rows_before = int(conn.execute("SELECT COUNT(*) FROM session_tokens").fetchone()[0] or 0)
+    result["rows_before"] = result["rows_after"] = rows_before
+    if _session_evidence_accepted(conn):
+        return result
+    root = Path(data_root) if data_root is not None else _presence_data_root(conn)
+    try:
+        conn.commit()                                  # FK 开关必须在事务外
+        result["backup"] = _session_evidence_backup(conn, root)
+        cols = ("token_hash,citizen_id,session_key,evidence,channel,parent_token,"
+                "issued_at,expires_at,revoked_at")
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("BEGIN IMMEDIATE")
+        committed = False
+        try:
+            conn.execute("DROP TABLE IF EXISTS session_tokens_v2")
+            conn.execute(_session_tokens_rebuild_ddl("session_tokens_v2"))
+            conn.execute(f"INSERT INTO session_tokens_v2 ({cols}) "
+                         f"SELECT {cols} FROM session_tokens")
+            copied = int(conn.execute("SELECT changes()").fetchone()[0] or 0)
+            rows_after = int(conn.execute(
+                "SELECT COUNT(*) FROM session_tokens_v2").fetchone()[0] or 0)
+            if copied != rows_before or rows_after != rows_before:
+                raise PresenceMigrationError(
+                    f"行数不守恒：{rows_before} → 拷入 {copied} / 表内 {rows_after}"
+                    "（已回滚，原表未动）")
+            conn.execute("DROP TABLE session_tokens")
+            conn.execute("ALTER TABLE session_tokens_v2 RENAME TO session_tokens")
+            # 重建会连带 DROP 掉三条索引（含 W4 的 `idx_tokens_parent`），必须补回
+            for stmt in _IDENTITY_INDEXES:
+                conn.execute(stmt)
+            bad = conn.execute("PRAGMA foreign_key_check(session_tokens)").fetchall()
+            if bad:
+                raise PresenceMigrationError(f"外键校验失败：{len(bad)} 行（已回滚）")
+            if not _session_evidence_accepted(conn):
+                raise PresenceMigrationError(
+                    "重建后仍不接受 provisional（CHECK 没改对，已回滚）")
+            conn.execute("COMMIT")
+            committed = True
+        except Exception:
+            if not committed:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error as exc:      # 事务状态不确定 → 出声（静默清零）
+                    warn_derived(conn, "rollback", exc)
+            raise
+        finally:
+            conn.execute("PRAGMA foreign_keys=ON")
+        result.update({"rebuilt": True, "rows_after": rows_after})
+        return result
+    except PresenceMigrationError:
+        raise
+    except sqlite3.Error as exc:
+        raise PresenceMigrationError(f"重建失败（原表未动）：{exc}") from exc
+
 def _ensure_workspace_table(conn: sqlite3.Connection):
     """幂等：建 workspace_map（旧库升级路径）。
 

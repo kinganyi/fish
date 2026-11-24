@@ -120,6 +120,68 @@ def identity_key_of(session_key: str) -> str:
     return str(session_key or "").split("#", 1)[0]
 
 
+# ---------------------------------------------------------------- 判父（W4 热路径的唯一入口）
+#
+# 2026-11-25（113 W4 · §5.7）：子会话的 SessionStart payload **没有父**（110 §1.1 v3），
+# 唯一能判父的是会话头。所以 `ensure` 的继承必须走这里：
+#
+#   投影表有行 → 直接用（W2/W6 已经算过，零 IO）
+#   投影表没行 → 现读宿主会话头（**只读**：热路径不写投影，写只走 `upsert_node`）
+#
+# 为什么先查投影表：`session ensure` 每次 SessionStart 都跑，而一个 4 层链就是 4 次
+# 向上查询；投影表的读是索引命中，读头是解压 + JSON 解析。但"投影表没填"（W6 回填
+# 之前是常态）不能让继承失效——那正是 W4 必须在 W2 之后、却不能依赖 W6 的原因。
+
+_PARENT_OF_SQL = ("SELECT parent_session FROM session_lineage "
+                  "WHERE host=? AND session_id=? LIMIT 1")
+
+
+def parent_of(conn, host: str, session_id: str):
+    """会话 → 裸父 id（判不到 → `None`，**不许兜成 main**）。
+
+    三种"判不到"都返回 `None`：会话不存在、宿主头读不出来、宿主没有适配器。
+    返回值不做任何前缀归一（与 `session_lineage.parent_session` 同口径）。
+    """
+    sid = str(session_id or "")
+    if not host or not sid:
+        return None
+    row = None
+    try:
+        row = conn.execute(_PARENT_OF_SQL, (host, sid)).fetchone()
+    except sqlite3.Error:          # 老库还没建投影表：当成"投影没填"，去读头
+        row = None
+    if row is not None:
+        return row[0] or None
+    try:
+        node = get_adapter(host).resolve(sid)
+    except (KeyError, RuntimeError, OSError):
+        # KeyError = 宿主没登记；RuntimeError = HeaderError（头坏了/缺依赖）；
+        # OSError = 目录不可读。三者都只能得出"判不到"，不是"它是根"。
+        return None
+    return (node or {}).get("parent_session") or None
+
+
+def ancestor_sessions(conn, host: str, session_id: str, *, max_hops: int = 64) -> list:
+    """沿 `parent_session` 向上，返回祖先 id 列表（**近 → 远**，不含自己）。
+
+    停在三处：没有父 / 成环（`instr` 的等价物：`seen` 集合）/ 超过 `max_hops`。
+    "不设深度上限"指的是**扫描不给 max_depth**（110 §3.6.1）；这里给跳数上限是为了
+    防环与防病态数据把一次会话启动拖死，而不是对树深做业务限制——64 层远超任何真实链。
+    """
+    seen = {str(session_id or "")}
+    out: list[str] = []
+    cur = parent_of(conn, host, session_id)
+    hops = 0
+    while cur and hops < max_hops:
+        if cur in seen:
+            break                      # 环：到此为止（U 形回指不许无限展开）
+        out.append(cur)
+        seen.add(cur)
+        cur = parent_of(conn, host, cur)
+        hops += 1
+    return out
+
+
 def _node_params(node: SessionNode | dict) -> dict:
     """把节点整理成 SQL 参数：校验 → 补 DEFAULT → `extra` 规范化成 JSON 文本。"""
     row = dict(node)

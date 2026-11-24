@@ -15,7 +15,12 @@ DSH 的 MCP 子进程环境被 `scrubbedParentEnv()` 删掉所有 `DSH_*`
 hook_event_name 的基础字段……构建每个事件的 stdin payload」）。
 
 所以本脚本做一件事：
-    stdin(JSON，含 session_id) → 调 fish session start → 输出 additionalContext(token)
+    stdin(JSON，含 session_id) → 调 fish session **ensure** → 输出 additionalContext(token)
+
+2026-11-25（113 W4.0 · §5.2）：由 `session start` 改为 `session ensure`。
+为什么必须换：`start` 会**轮换**（吊销同会话旧凭证），hook 每次 SessionStart 都跑，
+两个进程就会互相踢掉对方的凭证；而继承父公民只有 ensure 这条入口（它才去读会话头判父）。
+ensure 幂等：已有活凭证就原样返回（不重签、不轮换），首次启动仍给明文 token。
 
 与旧 hook 的关系
 ----------------
@@ -301,14 +306,14 @@ def main() -> int:
     for key in ("DSH_SESSION_ID", "CODEBUDDY_SESSION_ID", "CLAUDE_SESSION_ID"):
         env[key] = session_id
 
-    # ── 3. 调 session start（P1-b 已冻结的实现，只喂不改）──────────
+    # ── 3. 调 session ensure（W4.0：幂等、不轮换、会按父链继承父公民）──────
     # 注意：--root 是**全局参数**，必须放在子命令 `session` 之前。
     # TTL 不在这里传：它由 config 的 `session.token_ttl_hours` 控制（默认 24h）。
     cmd = [sys.executable, str(FISH)]
     fish_root = os.environ.get("FISH_ROOT", "").strip()
     if fish_root:  # 测试用：把数据目录指到临时位置（生产不设此变量）
         cmd += ["--root", fish_root]
-    cmd += ["session", "start"]
+    cmd += ["session", "ensure"]
     # 2026-10-26（身份锚，EVAL-261025-19 同族）：hook 必须能签给「工作区指定的身份」。
     # 没有锚时它会按 host_session_key 找到/新建一个 `dsh-session-<id>` 公民——而用户
     # 指定的身份可能是 `fish-主AI-3`，于是每次重启就分裂成两个公民（看板/归属各看各的）。
@@ -335,17 +340,17 @@ def main() -> int:
         )
         log_child_stderr("fish_dsh_hook.py:proc", proc.stderr)
     except subprocess.TimeoutExpired:
-        return _skip("session start 超时")
+        return _skip("session ensure 超时")
     except Exception as exc:  # noqa: BLE001
-        return _skip(f"session start 调用失败 ({type(exc).__name__})")
+        return _skip(f"session ensure 调用失败 ({type(exc).__name__})")
 
     if proc.returncode != 0:
         stderr_full = (proc.stderr or "").strip()
         lines = stderr_full.splitlines()
         tail = lines[-1] if lines else f"exit={proc.returncode}"
         diag = _probe()
-        _debug_note(session_id, "session_start_failed", f"{tail} | {diag}")
-        return _skip(f"session start failed: {tail}\n[env] {diag}")
+        _debug_note(session_id, "session_ensure_failed", f"{tail} | {diag}")
+        return _skip(f"session ensure failed: {tail}\n[env] {diag}")
 
     # ── 4. 解析 key: value 输出 ───────────────────────────────────
     fields: dict[str, str] = {}
@@ -358,9 +363,13 @@ def main() -> int:
             fields[key] = val
 
     token = fields.get("token", "")
-    if not token:
+    token_source = fields.get("token_source", "issued")
+    if not token and token_source != "existing":
         _debug_note(session_id, "no_token", (proc.stdout or "")[:150])
-        return _skip("session start 没有返回 token")
+        return _skip("session ensure 没有返回 token")
+    # W4（113 §5.4）：ensure 是幂等的——**已有活凭证时不重签**，于是这里拿不到明文。
+    # 这是刻意的（重签=轮换=互踢），不是失败：照常报身份，只是不注入 token。
+    already = (not token) and token_source == "existing"
 
     # ── 5. 注入 ───────────────────────────────────────────────────
     who = fields.get("display_name") or fields.get("account_id") or "(未命名)"
@@ -372,7 +381,8 @@ def main() -> int:
     if project.strip() in ("-", "（未指定）", "（未声明）"):
         project = ""
     # 只记身份与证据级别，**不记 token**（凭证纪律）
-    _debug_note(session_id, "issued", f"{who} / {evidence} / {project or '-'}")
+    _debug_note(session_id, "issued",
+                f"{who} / {evidence} / {project or '-'} / {token_source}")
 
     # 2026-10-24 加：「工作区」行 + 项目来源说明。
     # 起因：live 会话显示「项目 : -」时，光看注入内容无法判断是
@@ -389,6 +399,19 @@ def main() -> int:
     elif not project:
         cwd_line = "  工作区     : （hook 载荷里没有 cwd 字段）\n"
 
+    if already:
+        # 已有活凭证：不注入 token（拿不到明文，也不许为拿明文而重签）。
+        _emit(
+            "[fish] 本会话已有活凭证：ensure 幂等，未重签也未轮换（避免与其它进程互踢）\n"
+            f"  身份       : {who}（证据级别 {evidence}）\n"
+            f"  项目       : {project or '（未声明）'}\n"
+            f"{cwd_line}"
+            f"  有效期至   : {expires}\n"
+            "\n"
+            "token 明文只在签发时输出一次，这里取不回来；要重新拿一条就 `fish session start`"
+            "（它会轮换掉现有凭证）。"
+        )
+        return 0
     _emit(
         "[fish] 本次会话凭证已自动签发，无需你操作\n"
         f"  token      : {token}\n"

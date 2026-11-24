@@ -89,10 +89,10 @@ MUTATIONS = (
         "把「先关后开」加回去（2026-10-24 语义变更前的老行为）→ 旧项目的档期被关掉",
     ),
     (
-        "M-E", "E", "fish.py", "test_E_agent_one_hop",
-        '    if parent["evidence"] != "machine":\n',
-        "    if False:   # 变异：不再检查父的证据级别（允许链式继承）\n",
-        "摘掉一跳守卫里的证据级别检查（inherited 也能当父）",
+        "M-E", "E", "fish.py", "test_E_agent_chain_allowed",
+        '    if root != "machine":\n',
+        '    if parent["evidence"] != "machine":   # 变异：退回一跳守卫\n',
+        "把防漂白的根检查退回成『父必须是 machine』（W4 放开的链式签发再次被拒）",
     ),
     (
         "M-F", "F", "fish.py", "test_F_end_revokes",

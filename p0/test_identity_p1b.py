@@ -14,7 +14,8 @@ fish 身份层 · P1-b（session 命令族）验收
   B  幂等：同 env 连跑两次 → 同一个 citizen_id，公民只多 1 行；凭证轮换（旧的行留、revoked_at 有值）
   C  evidence 分级：有宿主 env → machine；只有 --alias → self-reported；什么都没有 → 匿名自报
   D  档期唯一：切项目只有一个开档期、旧的有 to_ts；同项目重跑不切（档期是时间段不是打卡）
-  E  子 agent 一跳：父 machine → 子 inherited；拿 inherited / self-reported 当父 → 被拒
+  E  子 agent 链式（W4 起）：父 machine → 子 inherited；inherited 父（根仍是 machine）
+     → 孙也能签；self-reported 父仍拒（证据升级）
   F  end 吊销：revoked_at 有值、validate 失败、档期关闭、子凭证级联、重复调幂等
   G  token 不落盘：扫遍 root 与 cwd 的每个文件都找不到明文；事件表里只有 hash
   H  不注册 MCP 工具：工具表仍是 11 个、分发表里没有 session，而 CLI 侧确实有这个命令
@@ -108,7 +109,10 @@ SESSION_CITIZEN_SQL = {
     # 这是 **声明出来的契约变更**，上面 4 个函数的语句一字未改。
     # 为什么必须有它：`--citizen` 是"同一 AI 在 MCP 与 CLI 两条通道归属分裂"的
     # 唯一显式出口——绑到一个不存在的公民上，比不绑更糟（它会静默成功）。
-    "start_session": (
+    # 2026-11-25（113 W4）：这两条**整块搬到 `_forced_citizen`**（`session ensure` 的
+    # `--citizen` 锚路径要走同一道门）。语句逐字未变，只是所在函数改了名——
+    # 这是声明出来的落点变更，不是放宽判据。
+    "_forced_citizen": (
         "SELECT citizen_id, display_name, account_id, archived_at FROM citizens "
         "WHERE citizen_id=?",
         "UPDATE citizens SET account_id=? WHERE citizen_id=?",
@@ -644,8 +648,14 @@ class FishIdentityP1bTest(unittest.TestCase):
 
     # ------------------------------------------------------------ 判据 E
 
-    def test_E_agent_one_hop(self):
-        """判据 E：父 machine → 子 inherited 成功；拿 inherited / self-reported 当父 → 被拒。"""
+    def test_E_agent_chain_allowed(self):
+        """判据 E（W4 起）：machine 父 → 子 inherited；拿 inherited 当父 → **允许**（根仍
+        必须是 machine）；self-reported 当父 → 仍被拒。
+
+        113 §5.6 把"只允许一跳"放开了：N≥3 层时孙必须能拿 inherited 父再签一次。
+        放开一跳**不是**放松证据：防漂白改由 `evidence_root` 兜（根的等级 = 链的等级），
+        而 self-reported 依旧拒（自报值再继承一次就是证据升级）。
+        """
         root = self._root("e")
         env = clean_env(DSH_SESSION_ID="sess-E")
         parent, out_p = self._start(root, env)
@@ -666,41 +676,48 @@ class FishIdentityP1bTest(unittest.TestCase):
             self.assertEqual(row[1], "dsh:sess-E#reviewer", "子会话靠 #role 后缀区分")
             self.assertEqual((row[2], row[3]), ("inherited", "parent"))
             self.assertEqual(row[4], token_hash(parent), "parent_token 必须指向父的 hash")
-            # 孙：拿 inherited 当父 → 必须被拒（"不能链式继承"）
-            before = self._token_count(conn)
-            with self.assertRaises(ValueError) as ctx:
-                fish.issue_agent_token(conn, parent_token=child, role="sub")
-            self.assertIn("链式", str(ctx.exception), "拒绝理由要能被读到（不是静默失败）")
-            conn.rollback()
-            self.assertEqual(self._token_count(conn), before, "被拒的签发不该留下行")
+            # 孙：拿 inherited 当父 → **允许**（W4 放开一跳；根仍是 machine）
+            grand = fish.issue_agent_token(conn, parent_token=child, role="sub")
+            self.assertEqual(grand["evidence"], "inherited")
+            self.assertEqual(fish.evidence_root(conn, token_hash(grand["token"])), "machine",
+                             "孙凭证的根必须仍是 machine（防漂白）")
+            self.assertEqual(fish.evidence_root(conn, token_hash(child)), "machine")
             # 自报级当父也不许背书：否则自报值会被抬成 inherited（证据升级）
             _, out_s = self._start(root, clean_env(), "--alias", "e-self")
             self_reported = TOKEN_RE.search(out_s).group(1)
             self._assert_agent_refused(conn, self_reported, "sub", "判据 E（自报级父）")
         finally:
             conn.close()
-        # CLI 侧的孙也必须非零退出（AI 必须能看出"被拒了"）
-        rc2, _, err2 = self._run(
+        # CLI 侧的孙也必须能签（AI 必须能看出"这次可以"）
+        rc2, out2, err2 = self._run(
             root, ["session", "agent", "--parent", child, "--role", "sub"], env)
-        self.assertNotEqual(rc2, 0, "链式继承必须在 CLI 上失败")
-        self.assertIn("链式", err2)
+        self.assertEqual(rc2, 0, f"W4 起孙必须能签（放开一跳）：{err2}")
+        self.assertEqual(field_of(out2, "evidence"), "inherited")
 
-    def test_E_mutation_chain_allowed_goes_red(self):
-        """变异自证：把"一跳守卫"摘掉（等价于允许链式）→ 判据 E 必红。"""
+    def test_E_mutation_machine_only_goes_red(self):
+        """变异自证（W4）：把守卫退回"父必须是 machine"→ 孙签不出 → 判据 E 必红。
+
+        113 §5.6 的成对纪律：放开一跳与递归吊销必须同波。这条变异**只**退回签发守卫，
+        它必须让"孙能签"那条断言红——否则那条断言没有判别力（恒绿）。
+        """
         conn = self._conn(self._root("mut-e"))
         try:
             res = fish.start_session(conn, environ={"DSH_SESSION_ID": "sess-EM"})
             child = fish.issue_agent_token(conn, parent_token=res["token"], role="reviewer")
-            with mock.patch.object(fish, "assert_agent_parent_allowed",
-                                   lambda parent: None):
-                grand = fish.issue_agent_token(conn, parent_token=child["token"],
-                                               role="sub")
-                self.assertEqual(grand["evidence"], "inherited",
-                                 "变异没生效：孙还是被拒了")
-                # 同一组断言在变异下重跑：它必须报错，否则说明它没有判别力
-                with self.assertRaises(AssertionError):
-                    self._assert_agent_refused(conn, child["token"], "sub",
-                                               "变异：允许链式继承")
+            orig = fish.assert_agent_parent_allowed
+
+            def machine_only(conn_, parent):
+                root_grade = orig(conn_, parent)
+                if parent["evidence"] != "machine":
+                    raise ValueError("不能链式继承（变异：退回一跳守卫）")
+                return root_grade
+
+            with mock.patch.object(fish, "assert_agent_parent_allowed", machine_only):
+                with self.assertRaises(ValueError, msg="变异没生效：孙还是签出来了"):
+                    fish.issue_agent_token(conn, parent_token=child["token"], role="sub")
+            # 对照：未变异时同一动作必须成功（证明红的是变异，不是环境）
+            grand = fish.issue_agent_token(conn, parent_token=child["token"], role="sub")
+            self.assertEqual(grand["evidence"], "inherited")
         finally:
             conn.close()
 
@@ -878,7 +895,8 @@ class FishIdentityP1bTest(unittest.TestCase):
         那 4 个函数的语句一旦被改（哪怕只是加一个 OR），本判据立刻红。
         """
         counts = {name: len(v) for name, v in SESSION_CITIZEN_SQL.items()}
-        # 2026-10-25：4 → 5。多出来的是 `start_session`（`--citizen` 校验）。
+        # 2026-10-25：4 → 5。多出来的是 `start_session`（`--citizen` 校验；
+        # 2026-11-25 W4 起这段整块搬到 `_forced_citizen`，语句逐字未变）。
         # 2026-10-26：5 → 6（`_session_labels_for`，会话维度的可读名）。
         # 两次都是**声明过的契约变更**（见 SESSION_CITIZEN_SQL 里的注释），
         # 不是放宽判据——原来那些函数的语句一字未改，仍是逐条冻结的。
@@ -895,7 +913,10 @@ class FishIdentityP1bTest(unittest.TestCase):
                 self.assertEqual(got[func], tuple(sorted(set(stmts))),
                                  f"{func} 的 citizens 语句被改过")
         # 反向：不许再多出**未声明**的会话公民引用函数（P1-a 判据 G 的同一条纪律）
-        extra = {f for f in got if "session" in f or f in ("load_citizen", "touch_citizen")}
+        # 2026-11-25（113 W4）：`_forced_citizen` 是 `start_session` 里那段 `--citizen`
+        # 校验的新落点（改名搬家，语句逐字未变），所以显式列进白名单。
+        extra = {f for f in got if "session" in f
+                 or f in ("load_citizen", "touch_citizen", "_forced_citizen")}
         self.assertEqual(extra, set(EXPECTED_NEW_FUNCS),
                          f"多出了未登记的会话公民读写点：{sorted(extra - EXPECTED_NEW_FUNCS)}")
 

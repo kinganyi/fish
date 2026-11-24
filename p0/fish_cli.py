@@ -624,6 +624,22 @@ def main():
                          "**显式给了 --project 时以 --project 为准**（这里只做兜底）")
     sp.set_defaults(func=_f.cmd_session_start)
 
+    # 2026-11-25（113 W4.0 · §5.2）：`session ensure` = hook 的入口。
+    # 参数与 `start` **同形**（同一个工厂：少一个就少一条 hook 能走的路径），
+    # 差别只在语义：ensure 幂等、**绝不轮换**（重跑 SessionStart 不许互踢）。
+    sp = sess.add_parser("ensure", help="幂等确保会话身份与凭证（不轮换；SessionStart 用）")
+    sp.add_argument("--bind-token", dest="bind_token", default=None,
+                    help="绑定已有公民时的证明：你现有的 fish token（S-01）")
+    sp.add_argument("--project", action="append", default=None, metavar="PREFIX",
+                    help="顺带开一个项目档期（可重复给）")
+    sp.add_argument("--account", default=None, help="AI 账号（跨会话聚合锚点）")
+    sp.add_argument("--citizen", default=None, metavar="CITIZEN_ID",
+                    help="把这条会话直接绑到已存在的公民上（身份锚路径）")
+    sp.add_argument("--alias", default=None, help="会话别名（没有宿主 session id 时它是幂等键）")
+    sp.add_argument("--cwd", default=None, metavar="PATH",
+                    help="当前工作目录：按 workspace_map 解析成项目并自动开档期")
+    sp.set_defaults(func=_f.cmd_session_ensure)
+
     sp = sess.add_parser("status", help="当前会话的身份 / 档期 / 凭证状态")
     sp.add_argument("--token", default=None, help="查某条凭证（缺省=用 env 定位当前会话）")
     sp.set_defaults(func=_f.cmd_session_status)

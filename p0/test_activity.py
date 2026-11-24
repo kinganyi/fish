@@ -492,6 +492,12 @@ class FrozenCitizensSqlTest(unittest.TestCase):
         "SQL_HOST_SESSION_CITIZEN": (
             "SELECT citizen_id FROM citizens_all WHERE host_session_key=? AND "
             "status='active' ORDER BY created_at LIMIT 1"),
+        # 2026-11-25（113 W4 · §5.2）：第三级 = `session_identity`（子会话继承父公民）。
+        # 登记在这里而不是放宽判据：它也是本模块的 citizens 读点，改一个空格都算变更。
+        "SQL_SESSION_IDENTITY_CITIZEN": (
+            "SELECT i.citizen_id FROM session_identity i "
+            "JOIN citizens_all c ON c.citizen_id=i.citizen_id "
+            "WHERE i.session_key=? AND c.status='active' LIMIT 1"),
     }
 
     def test_module_sql_constants_frozen(self):

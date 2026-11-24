@@ -82,14 +82,14 @@ _SESSION_TOKENS_DDL = """CREATE TABLE IF NOT EXISTS session_tokens (
   token_hash   TEXT PRIMARY KEY,   -- sha256(token)，明文只在签发时回一次
   citizen_id   TEXT NOT NULL,
   session_key  TEXT NOT NULL,
-  evidence     TEXT NOT NULL,      -- machine | inherited | self-reported
+  evidence     TEXT NOT NULL,      -- machine | inherited | self-reported | provisional
   channel      TEXT NOT NULL,      -- cli | hook | parent
   parent_token TEXT,               -- inherited 时指向父
   issued_at    TEXT NOT NULL,
   expires_at   TEXT,
   revoked_at   TEXT,
   CHECK (channel IN ('cli','hook','parent')),
-  CHECK (evidence IN ('machine','inherited','self-reported')),
+  CHECK (evidence IN ('machine','inherited','self-reported','provisional')),
   CHECK (channel != 'parent' OR parent_token IS NOT NULL),
   CHECK (channel != 'parent' OR evidence = 'inherited')
 );"""
@@ -138,11 +138,11 @@ _STINT_OPEN_INDEX_DDL = (
     "ON project_stints(citizen_id, project) WHERE to_ts IS NULL")
 
 _IDENTITY_INDEXES = (
-    # 凭证撤销的两条主查询：按公民批量吊销 / 按会话查还有哪些活的
+    # 凭证撤销的三条主查询：按公民批量吊销 / 按会话查还有哪些活的 / 按父递归吊销（§5.5）
     "CREATE INDEX IF NOT EXISTS ix_session_tokens_citizen ON session_tokens(citizen_id)",
     "CREATE INDEX IF NOT EXISTS ix_session_tokens_session ON session_tokens(session_key)",
-    # account_id 存在的唯一理由就是"按账号聚合会话"，这条单列索引是它的取数口。
-    # 刻意不给 device_id / last_seen_at 建索引：还没有查询的东西不加索引。
+    "CREATE INDEX IF NOT EXISTS idx_tokens_parent ON session_tokens(parent_token)",
+    # account_id 的唯一理由是按账号聚合会话；刻意不给 device_id/last_seen_at 建索引
     "CREATE INDEX IF NOT EXISTS ix_citizens_account ON citizens(account_id)",
 )
 

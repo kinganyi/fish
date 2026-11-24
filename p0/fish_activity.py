@@ -244,6 +244,14 @@ SQL_SESSION_TOKEN_CITIZEN = (
 SQL_HOST_SESSION_CITIZEN = (
     "SELECT citizen_id FROM citizens_all WHERE host_session_key=? AND status='active' "
     "ORDER BY created_at LIMIT 1")
+# 2026-11-25（113 W4 · §5.2）：第三级 = `session_identity`（N 会话 → 1 公民，方案 A）。
+# 为什么需要它：子会话继承父公民之后，它的凭证可能已过期/被吊销，而
+# `citizens.host_session_key` 是**单值列**（只有"自己建出来的那个会话"），
+# 于是"我是谁"会掉成 None——采集写下的 citizen_id 就从有变空。第三级把归属接上。
+SQL_SESSION_IDENTITY_CITIZEN = (
+    "SELECT i.citizen_id FROM session_identity i "
+    "JOIN citizens_all c ON c.citizen_id=i.citizen_id "
+    "WHERE i.session_key=? AND c.status='active' LIMIT 1")
 
 
 def remember_session_cwd(conn, *, session_key, citizen_id=None, host="", cwd="",
@@ -305,7 +313,12 @@ def session_cwd(conn, session_key) -> str:
 
 
 def resolve_citizen(conn, session_key, now=None):
-    """会话键 → 公民；查不到返回 None（**不猜**）。"""
+    """会话键 → 公民；查不到返回 None（**不猜**）。
+
+    三级（113 W4）：活凭证 → `citizens.host_session_key` → `session_identity`。
+    顺序不能换：前两级是 W4 之前就有的口径（读数必须不变），第三级只在前两级都
+    查不到时兜底——它回答的是"这个会话继承自谁"，不是"谁手里有活凭证"。
+    """
     if not session_key:
         return None
     ts = now or utc_now()
@@ -314,6 +327,13 @@ def resolve_citizen(conn, session_key, now=None):
         if row and row[0]:
             return row[0]
         row = conn.execute(SQL_HOST_SESSION_CITIZEN, (session_key,)).fetchone()
+        if row and row[0]:
+            return row[0]
+        # 唯一的 `#role` 剥离点在 `fish_lineage.identity_key_of`（113 §1-5）。
+        # 函数内 import：采集层是 hook 热路径，只有走到第三级才付这一次模块导入。
+        from fish_lineage import identity_key_of
+        row = conn.execute(SQL_SESSION_IDENTITY_CITIZEN,
+                           (identity_key_of(session_key),)).fetchone()
         return row[0] if row and row[0] else None
     except sqlite3.Error:
         return None

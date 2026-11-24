@@ -226,7 +226,10 @@ FISH_DB_LINES_MIN = 520
 # 2026-11-25（113 W1b · 会话树）：**窗口还回 800，一行都没抬**。W1 的 +19 行
 # （`_ensure_lineage_tables` + 两行 import）整块搬到 `fish_lineage.ensure_tables`——
 # 建表与建索引共用叶子里的同一个常量，不属于「建表/补列函数族」。实测回到 **800**。
-FISH_DB_LINES_MAX = 800
+# 2026-11-25（113 W4 · §5.3）：800 → 990。`session_tokens.evidence` 的 CHECK 只能
+# 靠 12 步重建改（备份/探针/事务/索引重放），函数按施工图放 fish_db；
+# 这是**新能力**（provisional 档），不是把已有逻辑挪回长窗口。
+FISH_DB_LINES_MAX = 990
 # 2026-11-11 新模块 · 主人画像（R1-1 槽位化；固定表 + 建议队列 + 注入分级）。
 # 域逻辑 + CLI 表现层同处一个模块（改画像的人只需打开一个文件）；
 # 因此窗口比纯领域模块大——它同时承担了 fish.py 里那 10 个命令的实现。
@@ -253,7 +256,9 @@ FISH_INJECT_LINES_MAX = 400
 FISH_CLI_LINES_MIN = 700
 FISH_CLI_LINES_MAX = 1100
 FISH_ACTIVITY_LINES_MIN = 1400
-FISH_ACTIVITY_LINES_MAX = 1900
+# 2026-11-25（113 W4 · §5.2）：1900 → 1920。`resolve_citizen` 加第三级
+# （session_identity）——子会话继承父公民后，凭证失效时归属不能掉成 None。
+FISH_ACTIVITY_LINES_MAX = 1920
 FISH_VISIBILITY_LINES_MIN = 30
 FISH_VISIBILITY_LINES_MAX = 140
 FISH_NAMING_LINES_MIN = 220
@@ -653,10 +658,10 @@ class SplitDependencyTest(unittest.TestCase):
 #
 # 这不是密码学意义上的防篡改（人能重算并改字面量），但它把"改一个数字"
 # 变成"必须动一个看起来就不是数据文件的测试文件"。**诚实地说，这是威慑，不是证明。**
-EXPECTED_CHAIN_HEAD = "357d8e6b66c7ffbae9000d016f5e3d7ddc59e73d0bd5fb46c4f37dfef571e498"
-EXPECTED_HISTORY_LEN = 5
+EXPECTED_CHAIN_HEAD = "52a99efed99b433c94f94fbbf8fd62c56683666611090d878ac2a5a9ce6f57e5"
+EXPECTED_HISTORY_LEN = 7
 # 与上面链头同一时刻的 max。新增历史前，max 不许偏离它。
-EXPECTED_RATCHET_MAX_AT_ANCHOR = 12660
+EXPECTED_RATCHET_MAX_AT_ANCHOR = 11150
 
 class J4RatchetTest(unittest.TestCase):
     """J4 窗口的**棘轮**（F-P1-10，2026-11-18 外部审查）。

@@ -284,7 +284,9 @@ DECLARED_NEW_FUNCS = {
                 # 同样是**声明**出来的新引用，上面 25 条基线一字未改。
                 # 为什么必须加：`--citizen` 是"同一 AI 在 MCP 与 CLI 两条通道归属分裂"
                 # 的唯一显式出口——不校验就会把会话绑到不存在的公民上，或绑到已归档的。
-                "start_session",
+                # 2026-11-25（113 W4）：这段校验**整块搬到 `_forced_citizen`**（`session ensure`
+                # 的 `--citizen` 锚路径走同一道门）。语句逐字未变，只是所在函数改名。
+                "_forced_citizen",
                 # 2026-10-25（`EVAL-261025-21` 修复）：`fix_owner` 里新增 1 条 citizens_all
                 # 查询（校验新归属公民存在且活跃）。同样是**声明**出来的新引用，
                 # 上面 25 条基线一字未改；它的写入只碰 code_index.owner + 追加事件。

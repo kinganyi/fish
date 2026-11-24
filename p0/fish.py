@@ -78,6 +78,7 @@ from fish_db import (    PresenceMigrationError, _CITIZENS_ALL_COLUMNS, _PRESENC
     _citizens_all_view_ddl, _ensure_activity_table, _ensure_board_seen_session, _ensure_board_tables,
     _ensure_boards_home_paths, _ensure_citizens_all_view, _ensure_identity_tables,
     _ensure_name_tables, _ensure_presence_session, _ensure_push_tables,
+    _ensure_session_evidence_levels,
     _ensure_stint_open_index, _ensure_workspace_table,
     _has_unique_index, _presence_backup, _presence_data_root, _presence_pk_cols,
     _presence_pk_cols_of, _presence_rebuild_ddl, _presence_session_counts, append_event,
@@ -555,6 +556,20 @@ def migrate(conn: sqlite3.Connection):
     # 身份层 P1-a（纯结构）：citizens 补 5 列 + 4 张新表 + citizens_all 视图 + 索引。
     # 顺序纪律见 _ensure_identity_tables 的说明。**不动任何既有查询。**
     _ensure_identity_tables(conn)
+
+    # 2026-11-25（113 W4 · §5.3）：`session_tokens.evidence` 的 CHECK 扩 `provisional`。
+    # 必须排在 `_ensure_identity_tables` **之后**（表与三索引先就位，重建会一并补回）。
+    # 失败**不阻断启动**（与 presence 迁移同一纪律）：既有三档一字未动，只是"临时身份"
+    # 这一档暂不可用，而 `issue_session_token` 会在用到时响亮失败。
+    evidence_migration = {"rebuilt": False, "backup": None}
+    try:
+        evidence_migration = _ensure_session_evidence_levels(conn)
+    except PresenceMigrationError as exc:
+        print(f"警告：session_tokens.evidence 迁移未完成（provisional 暂不可用）：{exc}",
+              file=sys.stderr)
+    if evidence_migration.get("rebuilt"):
+        print(f"（session_tokens 已重建以扩 evidence CHECK；备份："
+              f"{evidence_migration.get('backup')}）", file=sys.stderr)
 
     # 工作区 → 项目映射（R1 根治）：项目归属的权威来源，替掉"最近更新者即当前项目"的猜测。
     # 与身份层无依赖，放在后面是为了让"结构升级"的既有顺序一个字节都不动。
@@ -3286,7 +3301,9 @@ def resolve_actor(conn, actor_name=None):
 #   ④ account_id 允许为空，表示"还没归属到某个 AI 账号"，后续可补。
 
 SESSION_TOKEN_TTL_KEY = "session.token_ttl_hours"
-SESSION_EVIDENCE_LEVELS = ("machine", "inherited", "self-reported")
+# 2026-11-25（113 W4 · §5.3）：第四个值 `provisional` = "整条父链都查不到身份"。
+# 它**不是 machine**，也不是 inherited：是一个明确的"临时、待补证"标记（J4 靠它看得见代价）。
+SESSION_EVIDENCE_LEVELS = ("machine", "inherited", "self-reported", "provisional")
 SESSION_CHANNELS = ("cli", "hook", "parent")
 
 # 宿主会话标识的 env（**按优先级**）。DSH 排第一是因为它是本机现役宿主；
@@ -3597,20 +3614,47 @@ def issue_session_token(conn, *, citizen_id, session_key, evidence, channel,
             "expires_at": expires_at}
 
 
+#: 2026-11-25（113 W4 · §5.5）：`parent_hash` 口径改成**递归吊销全部后代**。
+#:
+#: 四个坑（110 §3.6.4 实测，判据在 `test_revoke_recursive` 逐条钉住）：
+#:   ① `UNION` 不是 `UNION ALL`：`t.hash` 去重防环（环只会重复"已见 hash"）；
+#:   ② 保留 `revoked_at IS NULL`——幂等全靠它（重复 end 从"报错"变"0 条"）；
+#:   ③ `WITH … UPDATE` 的 `cursor.rowcount` 返回 **-1**，真实吊销数走 `SELECT changes()`；
+#: ④ 返回值语义从"直接子级数"变成"全部后代数"（`children_revoked` 的输出/事件同步）。
+#:
+#: **成对纪律（113 §5.6 末）**：本函数与 `assert_agent_parent_allowed` 的"放开一跳"
+#: 必须同波上线、也必须**成对回退**——只退一半（单跳吊销 + 仍允许链式）比今天更糟。
+_REVOKE_DESCENDANTS = """
+WITH RECURSIVE t(hash) AS (
+  SELECT token_hash FROM session_tokens WHERE parent_token = :root
+  UNION
+  SELECT s.token_hash FROM session_tokens s JOIN t ON s.parent_token = t.hash
+)
+UPDATE session_tokens SET revoked_at = :now
+ WHERE token_hash IN (SELECT hash FROM t) AND revoked_at IS NULL
+"""
+
+
 def revoke_session_tokens(conn, *, session_key=None, citizen_id=None, token_hash=None,
                           parent_hash=None) -> int:
     """吊销凭证（**只标 revoked_at，不删行**），返回吊销条数。
 
     四种口径互不重叠，全部走这一处——"什么算失效"只能有一份判断，多一份就会漂：
       session_key  同一会话的所有活凭证（start 轮换 / end 当前会话）
-      citizen_id   某公民的所有活凭证（公民退役时用）
+      citizen_id   某公民的所有活凭证（公民退役时用；**end 永不用它**，110 §7-12）
       token_hash   单条（`end --token`）
-      parent_hash  某条凭证派生出的子凭证（父会话结束时级联，见 end_session）
+      parent_hash  某条凭证派生出的**全部后代**（父会话结束时级联，见 end_session）
     一个过滤条件都没给就报错：全表吊销是灾难，不能靠"忘了传参"触发。
+    `parent_hash` 支是递归 CTE，**不与其它口径组合**（今天没有组合调用；要组合请先
+    想清楚"递归集合 AND 单键"的语义，别让它在某天静默变成另一个意思）。
     """
+    if parent_hash is not None:
+        conn.execute(_REVOKE_DESCENDANTS, {"root": parent_hash, "now": now_utc()})
+        # 坑 ③：`WITH … UPDATE` 的 cursor.rowcount 恒为 -1，必须问 changes()
+        return int(conn.execute("SELECT changes()").fetchone()[0] or 0)
     sets, where, params = ["revoked_at=?"], [], [now_utc()]
     for column, value in (("session_key", session_key), ("citizen_id", citizen_id),
-                          ("token_hash", token_hash), ("parent_token", parent_hash)):
+                          ("token_hash", token_hash)):
         if value is not None:
             where.append(f"{column}=?")
             params.append(value)
@@ -3762,18 +3806,73 @@ def credential_state_line(conn, token) -> str:
     return f"凭证状态：剩余 {hours} 小时"
 
 
-def find_session_citizen(conn, session_key):
-    """按宿主会话标识找**活跃**会话公民（走 citizens_all：归档后身份不能悬空）。
+def _session_identity_row(conn, session_key):
+    """**第一级解析**：`session_identity`（N 个会话键 → 1 个公民，方案 A）。
+
+    键一律剥掉 `#role` 尾（113 §1-5：`identity_key_of` 是全仓唯一剥离点）——
+    W4 **不执行** 110-⑥ 的去尾，所以 `issue_agent_token` 的子键仍带 `#<role>`，
+    而身份行只按"会话 id"登记。
+
+    为什么公民必须仍在 `citizens_all` 且状态 active：身份行是**投影**，公民可能已退役/
+    归档。投影指向一个退役公民时，正确行为是"查不到"（让上层重新解析），不是复活它。
+    表不存在（老库还没 migrate）也返回 None：那不是"这个会话没身份"，而是"这张表还没有"，
+    但两者对调用方的动作是同一条（继续走下一级），所以不值得抛。
+    """
+    try:
+        row = conn.execute(
+            "SELECT citizen_id,origin,inherited_from,evidence FROM session_identity "
+            "WHERE session_key=?", (fish_lineage.identity_key_of(session_key),)).fetchone()
+    except sqlite3.Error as exc:
+        warn_ignored('fish.py _session_identity_row', exc)
+        return None
+    if not row:
+        return None
+    citizen = load_citizen(conn, row[0])
+    if citizen is None or str(citizen.get("status") or "") != "active":
+        return None
+    citizen.update({"identity_origin": row[1], "inherited_from": row[2],
+                    "identity_evidence": row[3]})
+    return citizen
+
+
+def find_session_citizen(conn, session_key, *, allow_identity=True):
+    """按宿主会话标识找**活跃**会话公民（两级解析，113 §5.2）。
+
+      1. `session_identity`：会话级投影（子会话继承父公民后，子键就登记在这里）；
+      2. `citizens_all.host_session_key`：W4 之前的唯一一级（单值列，老数据仍靠它）。
 
     只认 status='active'：退役/归档的公民不该被一条会话标识"复活"。
+    `allow_identity=False` 只走第 2 级——留给"回退/诊断"与变异判据（113 §5.8 的变异 ②）。
     """
     if not session_key:
         return None
+    if allow_identity:
+        found = _session_identity_row(conn, session_key)
+        if found is not None:
+            return found
     return _citizen_row(conn.execute(
         "SELECT citizen_id,display_name,kind,role,host,status,account_id,"
         "host_session_key,last_seen_at,archived_at FROM citizens_all "
         "WHERE host_session_key=? AND status='active' ORDER BY created_at LIMIT 1",
         (session_key,)).fetchone())
+
+
+def _write_session_identity(conn, session_key, citizen_id, *, origin, inherited_from,
+                            evidence, at=None):
+    """写一行身份投影（幂等 UPSERT；**键剥 `#role`**）。身份解析的唯一写口。
+
+    为什么是 UPSERT 而不是 INSERT：同一会话重跑 ensure 必须落在同一行（`session_key`
+    是主键）；而"重跑"正是本波要保护的动作（113 §5.4）。
+    """
+    stamp = at or now_utc()
+    conn.execute(
+        "INSERT INTO session_identity (session_key,citizen_id,inherited_from,origin,"
+        "evidence,created_at,observed_at) VALUES (?,?,?,?,?,?,?) "
+        "ON CONFLICT(session_key) DO UPDATE SET citizen_id=excluded.citizen_id, "
+        "inherited_from=excluded.inherited_from, origin=excluded.origin, "
+        "evidence=excluded.evidence, observed_at=excluded.observed_at",
+        (fish_lineage.identity_key_of(session_key), citizen_id, inherited_from, origin,
+         evidence, stamp, stamp))
 
 
 def load_citizen(conn, citizen_id):
@@ -3793,8 +3892,9 @@ def touch_citizen(conn, citizen_id, *, at=None) -> int:
 
 
 def find_or_create_session_citizen(conn, *, session_key, evidence, host, display_name,
-                                   account_id=None, kind="visitor", role=None) -> dict:
-    """按 host_session_key 找活跃会话公民；没有就建。返回 dict（含 created 标记）。
+                                   account_id=None, kind="visitor", role=None,
+                                   identity_origin="direct") -> dict:
+    """按会话标识找活跃公民（两级解析）；没有就建。返回 dict（含 created 标记）。
 
     **这是幂等的全部实现**（18 §10：token 丢了重跑 start → 公民不变、凭证换新）。
     主键选 host_session_key 而不是 display_name：库里已有 `dsh-main` vs
@@ -3803,6 +3903,11 @@ def find_or_create_session_citizen(conn, *, session_key, evidence, host, display
     复用只补两件事，**绝不改名**（改名让历史记忆指向一个陌生的名字）：
       · last_seen_at = now（活跃痕迹）
       · account_id 原来为空、这次能推断出来 → 补上；已有值不覆盖（那是别的会话的归属）
+
+    2026-11-25（113 W4 · §5.2）：**新建公民时同事务写 `session_identity`**。
+    `identity_origin` 只有两个合法来源：`direct`（根会话/显式绑定）与 `provisional`
+    （父链存在但整链无身份）。写在这里而不是调用方，是因为"新建公民"与"登记身份"
+    必须同事务——只建不登记等于下一次解析又查不到，子会话便会再建一个。
     """
     found = find_session_citizen(conn, session_key)
     if found:
@@ -3826,6 +3931,8 @@ def find_or_create_session_citizen(conn, *, session_key, evidence, host, display
         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (citizen_id, display_name, kind, role, host, "active", stamp,
          0, account_id, None, session_key, stamp, None))
+    _write_session_identity(conn, session_key, citizen_id, origin=identity_origin,
+                            inherited_from=None, evidence=evidence, at=stamp)
     append_event(conn, "citizen.registered",
                  {"citizen_id": citizen_id, "evidence_level": evidence},
                  {"kind": "citizen", "id": citizen_id},
@@ -4295,6 +4402,85 @@ def _normalize_projects(projects=None, project=None) -> list:
     return out
 
 
+def _prove_citizen_binding(conn, target_id, *, session_key, bind_token=None):
+    """S-01：绑定**已存在**公民必须证明持有它（`start` 与 `ensure` 共用，唯一实现）。
+
+    原先是 `start_session` 里的闭包 `_prove`；W4 提成模块级是因为 `session ensure`
+    的 `--citizen` 锚路径走同一道门——两份证明逻辑必然漂，而这是安全门。
+
+    证明口径（2026-10-28 晚，按外部审查 🔴4 修正）：**持有过**即证明——接受该公民的
+    **历史 token**（含已轮换/已过期/已吊销），因为轮换紧接着就吊销旧 token，要求
+    "有效"会让第二次重绑永久锁死。
+    """
+    proof = str(bind_token or os.environ.get("FISH_SESSION_BIND_TOKEN") or "").strip()
+    if proof:
+        info = lookup_session_token(conn, proof)
+        if info is None:
+            raise ValueError("bind_token 从未签发过（不是这个系统的凭证）")
+        if info["citizen_id"] != target_id:
+            raise ValueError("bind_token 不属于目标公民（拒绝：防接管）")
+        # 外部审查 🟠7（2026-10-29）：**吊销的历史 token 只在 7 天内可作证明**。
+        # 永久接受等于把"泄露后被轮换掉的凭证"升级成长期通行证。
+        revoked_at = info.get("revoked_at")
+        if revoked_at:
+            try:
+                age = (parse_utc(now_utc()) - parse_utc(revoked_at)).total_seconds()
+            except (TypeError, ValueError):
+                age = 0.0
+            if age > 7 * 86400:
+                raise ValueError("bind_token 已吊销超过 7 天，不再作为证明（请用当前凭证）")
+        return
+    # 外部审查 🔴5（2026-11-11）：**取消"签发过 token 即放行"**。
+    # 那一版（10-29 二改）本意是恢复 hook，但把门做反了——所有真实公民都签发过
+    # token，于是"知道 citizen_id 就能接管"对全部真实身份成立。
+    # 现在只由**本机身份锚的会话白名单**授权；完整演进史见
+    # `fish_trust.identity_anchor_grants` 的 docstring。
+    if identity_anchor_grants(target_id, session_key):
+        return
+    raise ValueError(
+        "绑定已有公民需要证明：fish session start --citizen <id> "
+        "--bind-token <该公民签发过的任一 token（吊销 7 天内仍有效）>"
+        "（或设 FISH_SESSION_BIND_TOKEN）；"
+        "本机 hook 请改用身份锚 p0/fish_identity.json"
+        "（{\"citizen\": <id>, \"sessions\": [<该会话的 session_key>]}）"
+        "——只写 citizen 而不给 sessions 白名单不再放行")
+
+
+def _forced_citizen(conn, forced, *, session_key, bind_token=None, account_id=None):
+    """`--citizen` 显式绑定：校验存在/未归档/证明，返回 `who` dict（不签发、不轮换）。"""
+    row = conn.execute(
+        "SELECT citizen_id, display_name, account_id, archived_at FROM citizens "
+        "WHERE citizen_id=?", (forced,)).fetchone()
+    if not row:
+        raise ValueError(f"指定的公民不存在：{forced}")
+    if row[3]:
+        raise ValueError(
+            f"指定的公民已归档：{forced}。先跑 `fish citizen-restore {forced}` 把它搬回热表再绑"
+            "（还原只恢复身份，不恢复凭证；要凭证请重新 `fish session start`）")
+    _prove_citizen_binding(conn, forced, session_key=session_key, bind_token=bind_token)
+    who = {"citizen_id": row[0], "created": False, "display_name": row[1],
+           "account_id": row[2], "archived": False}
+    if account_id and not row[2]:
+        conn.execute("UPDATE citizens SET account_id=? WHERE citizen_id=?",
+                     (account_id, row[0]))
+        who["account_id"] = account_id
+    return who
+
+
+def rotate_token(conn, *, session_key, citizen_id, evidence, channel, ttl_hours=None) -> dict:
+    """**人驱动**的换证：吊销该会话全部活凭证，再签一条新的（`session start` 的唯一实现）。
+
+    与 `ensure_session` 的分工就是 W4 那句话（113 §5.1）：`rotate` 会吊销（"重跑 start
+    = 换一条能用的"），`ensure` 只要还有活的就原样返回（**绝不轮换**）——hook 每次
+    SessionStart 都跑，那里若还轮换，多个进程就会互相踢掉对方的凭证。
+    返回 `{"revoked": int, "issued": {...含明文 token...}}`。
+    """
+    revoked = revoke_session_tokens(conn, session_key=session_key)
+    issued = issue_session_token(conn, citizen_id=citizen_id, session_key=session_key,
+                                 evidence=evidence, channel=channel, ttl_hours=ttl_hours)
+    return {"revoked": revoked, "issued": issued}
+
+
 def start_session(conn, *, projects=None, project=None, account=None, alias=None,
                   kind="visitor", role=None, environ=None, ttl_hours=None,
                   citizen=None, bind_token=None) -> dict:
@@ -4320,65 +4506,11 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
     # 场景：同一个 AI 在 MCP 侧已经登记成公民 A，但 CLI 这边的 host_session_key 不同，
     # 于是 `find_or_create` 会新建一个 B——两条通道的归属从此对不上，且无法合并。
     # `--citizen` 让调用方把这条会话**直接绑到已存在的公民**上，是那个问题的显式出口。
+    # S-01（安全审计 2026-10-28）：证明逻辑在 `_prove_citizen_binding`（与 ensure 共用）。
     forced = (citizen or "").strip() if isinstance(citizen, str) else citizen
-    # S-01（安全审计 2026-10-28）：绑定**已存在**公民必须证明持有它——否则任何会话
-    # 凭可读的 session_name / citizen_id 就能接管任意公民，且轮换会吊销受害者活凭证。
-    proof = str(bind_token or os.environ.get("FISH_SESSION_BIND_TOKEN") or "").strip()
-
-    def _prove(target_id):
-        # S-01 的证明口径（2026-10-28 晚，按外部审查 🔴4 修正）：
-        # **持有过**即证明——接受该公民的**历史 token**（含已轮换/已过期/已吊销），
-        # 因为轮换紧接着就吊销旧 token，要求"有效"会让第二次重绑永久锁死。
-        if proof:
-            info = lookup_session_token(conn, proof)
-            if info is None:
-                raise ValueError("bind_token 从未签发过（不是这个系统的凭证）")
-            if info["citizen_id"] != target_id:
-                raise ValueError("bind_token 不属于目标公民（拒绝：防接管）")
-            # 外部审查 🟠7（2026-10-29）：**吊销的历史 token 只在 7 天内可作证明**。
-            # 永久接受等于把"泄露后被轮换掉的凭证"升级成长期通行证。
-            revoked_at = info.get("revoked_at")
-            if revoked_at:
-                try:
-                    age = (parse_utc(now_utc()) - parse_utc(revoked_at)).total_seconds()
-                except (TypeError, ValueError):
-                    age = 0.0
-                if age > 7 * 86400:
-                    raise ValueError(
-                        "bind_token 已吊销超过 7 天，不再作为证明（请用当前凭证）")
-            return
-        # 外部审查 🔴5（2026-11-11）：**取消"签发过 token 即放行"**。
-        # 那一版（10-29 二改）本意是恢复 hook，但把门做反了——所有真实公民都签发过
-        # token，于是"知道 citizen_id 就能接管"对全部真实身份成立。
-        # 现在只由**本机身份锚的会话白名单**授权；完整演进史见
-        # `fish_trust.identity_anchor_grants` 的 docstring。
-        if identity_anchor_grants(target_id, ident.get("session_key")):
-            return
-        raise ValueError(
-            "绑定已有公民需要证明：fish session start --citizen <id> "
-            "--bind-token <该公民签发过的任一 token（吊销 7 天内仍有效）>"
-            "（或设 FISH_SESSION_BIND_TOKEN）；"
-            "本机 hook 请改用身份锚 p0/fish_identity.json"
-            "（{\"citizen\": <id>, \"sessions\": [<该会话的 session_key>]}）"
-            "——只写 citizen 而不给 sessions 白名单不再放行")
-
     if forced:
-        row = conn.execute(
-            "SELECT citizen_id, display_name, account_id, archived_at FROM citizens "
-            "WHERE citizen_id=?", (forced,)).fetchone()
-        if not row:
-            raise ValueError(f"指定的公民不存在：{forced}")
-        if row[3]:
-            raise ValueError(
-            f"指定的公民已归档：{forced}。先跑 `fish citizen-restore {forced}` 把它搬回热表再绑"
-            "（还原只恢复身份，不恢复凭证；要凭证请重新 `fish session start`）")
-        _prove(forced)
-        who = {"citizen_id": row[0], "created": False, "display_name": row[1],
-               "account_id": row[2], "archived": False}
-        if account_id and not row[2]:
-            conn.execute("UPDATE citizens SET account_id=? WHERE citizen_id=?",
-                         (account_id, row[0]))
-            who["account_id"] = account_id
+        who = _forced_citizen(conn, forced, session_key=ident["session_key"],
+                              bind_token=bind_token, account_id=account_id)
     else:
         who = find_or_create_session_citizen(
             conn, session_key=ident["session_key"], evidence=ident["evidence"],
@@ -4392,14 +4524,17 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
             # 真正的接管洞在**显式 `citizen=`** 那条路径：现在**任何**已有公民的
             # `citizen=` 绑定都必须出示证明（含"从未签发过 token"的新公民）。
             # `self:` 的猜名风险如实记录在审查处置里（不在本轮修）。
-            _prove(who["citizen_id"])
+            _prove_citizen_binding(conn, who["citizen_id"],
+                                   session_key=ident["session_key"],
+                                   bind_token=bind_token)
     # 轮换：同一会话的新凭证生效时，旧的活凭证立即作废。
     # 为什么轮换而不是"留着"：重跑 start 的语义是"拿到一条新的、能用的凭证"，
     # 留着旧的意味着泄露面随时间只增不减；轮换后任一时刻一个会话只有一条活凭证。
-    rotated = revoke_session_tokens(conn, session_key=ident["session_key"])
-    issued = issue_session_token(
-        conn, citizen_id=who["citizen_id"], session_key=ident["session_key"],
-        evidence=ident["evidence"], channel=ident["channel"], ttl_hours=ttl_hours)
+    # 与 `ensure_session` 的分工见 `rotate_token` 的 docstring。
+    rotated_out = rotate_token(conn, session_key=ident["session_key"],
+                               citizen_id=who["citizen_id"], evidence=ident["evidence"],
+                               channel=ident["channel"], ttl_hours=ttl_hours)
+    rotated, issued = rotated_out["revoked"], rotated_out["issued"]
     stints = [
         open_project_stint(conn, who["citizen_id"], name, account_id=account_id,
                            set_by=f"cli:{ident['evidence']}")
@@ -4441,14 +4576,46 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
             "name_conflicts": same_name}
 
 
-def assert_agent_parent_allowed(parent) -> None:
+def evidence_root(conn, token_hash, *, max_hops=64) -> str:
+    """沿 `parent_token` 向上走到**根**，返回根的 evidence（113 §5.6 的防漂白）。
+
+    返回值：`machine` / `inherited` / `self-reported` / `provisional` /
+    `unknowable`（走不到根：父行缺失、成环、或超过 `max_hops`）。
+
+    为什么需要它：`inherited` 链的可信度**等于根的等级**。放开一跳之后，一条
+    "provisional 根 → 继承 → 再继承"的链如果继续标 inherited，就是把临时身份洗成
+    有根身份。所以子凭证的强度必须回到根上取，而不是看父那一行的标签。
+    """
+    seen, cur, hops = set(), token_hash, 0
+    while cur and hops <= max_hops:
+        row = conn.execute(
+            "SELECT evidence,parent_token FROM session_tokens WHERE token_hash=?",
+            (cur,)).fetchone()
+        if row is None:
+            return "unknowable"
+        if not row[1]:
+            return str(row[0] or "unknowable")
+        if cur in seen:
+            return "unknowable"          # 环：链没有根，不许当成"根就是它"
+        seen.add(cur)
+        cur = row[1]
+        hops += 1
+    return "unknowable"
+
+
+def assert_agent_parent_allowed(conn, parent) -> str:
     """子 agent 签发的守卫：父凭证不存在/已失效/证据不达标 → 抛 ValueError。
 
-    **一跳限制的唯一实现**（18 §5）。父必须是 machine 级：
-      machine        → 允许（父是机器事实，子继承它是有根的）
-      inherited      → 拒绝（链式继承 = 无限漂白：父继承、孙再继承……最后无法追溯来源）
-      self-reported  → 拒绝（**这条是本实现的加严**：父本来就是自报的，子再"继承"一次
-                       会把自报值抬成 inherited 的可信度——证据升级比链式继承更糟）
+    2026-11-25（113 W4 · §5.6）：**放开"只许一跳"**。父可以是 `machine` 或
+    `inherited`——N≥3 层时，孙必须能拿 inherited 父再签一次；仍拒 `self-reported`
+    （自报值被抬成 inherited 就是证据升级，比链式继承更糟）。
+
+    **防漂白靠根**：允许链式之后，"证据升级"改由 `evidence_root` 兜——父是 inherited
+    时，必须一路走到 `machine` 根才放行；根不是 machine（provisional/自报/走不到）
+    一律拒绝，因为 `channel='parent'` 强制 `evidence='inherited'`（DDL CHECK），
+    而把没有 machine 根的链接标成 inherited 正是漂白本身。
+
+    返回根的等级（当前恒为 `machine`），供调用方写事件与回执。
     """
     if parent is None:
         raise ValueError("父 token 不存在：明文只在签发时输出一次，"
@@ -4457,27 +4624,42 @@ def assert_agent_parent_allowed(parent) -> None:
         raise ValueError(f"父 token 已吊销（{parent['revoked_at']}），不能为子 agent 背书")
     if parent["expired"]:
         raise ValueError(f"父 token 已过期（{parent['expires_at']}），不能为子 agent 背书")
-    if parent["evidence"] != "machine":
+    grade = str(parent["evidence"] or "")
+    if grade == "self-reported":
         raise ValueError(
-            f"不能链式继承：父 token 的 evidence={parent['evidence']}。"
-            "只有 machine 级（能读宿主 env 的 CLI 签发）才能给子 agent 背书。"
+            "不能链式继承：父 token 的 evidence=self-reported。"
+            "自报值再被继承一次就被抬成 inherited（证据升级比链式继承更糟）。"
             "→ 回主会话重跑 `fish session start` 拿一个新的 machine token。")
+    if grade not in ("machine", "inherited", "provisional"):
+        raise ValueError(f"父 token 的 evidence={grade!r} 不在闭集里，拒绝背书")
+    root = evidence_root(conn, parent["token_hash"])
+    if root != "machine":
+        raise ValueError(
+            f"不能继承：这条链的根 evidence={root}（父={grade}）。"
+            "inherited 链的可信度等于根的等级，而 channel='parent' 只允许 evidence='inherited'"
+            "——把无 machine 根的链接标成 inherited 就是漂白。"
+            "→ 让根会话重跑 `fish session start` 拿 machine token，"
+            "或用 `fish session ensure`（它会把证据如实降为 provisional）。")
+    return root
 
 
 def issue_agent_token(conn, *, parent_token, role, ttl_hours=None) -> dict:
-    """给子 agent 签 inherited 凭证（**只允许一跳**）。返回 dict，含明文 token。
+    """给子 agent 签 inherited 凭证（W4 起允许 N 跳，根必须是 machine）。返回 dict，含明文 token。
 
     子 agent **不新建公民**（本实现的决定，记录在交付报告里）：
     `citizen_agents` 表还没建（P1-a 只建了 4 张表），现在给子 agent 造一个"独立公民"
     会把子 agent 的动作记成另一个人的历史——而 16 §2.1 要的是"共享父身份、各自可区分"。
     所以：citizen_id 复用父的，区分靠 session_key 的 `#<role>` 后缀 + 凭证上的
     evidence/channel。等 citizen_agents 建表（P1-d）再拆。
+
+    **`#role` 尾保留**（113 §1-5 / W4 **不执行** 110-⑥）：去掉之后子键与父键相同，
+    子会话的 SessionStart 会在同一键上轮换、吊销父的活 token。
     """
     role = (role or "").strip()
     if not role:
         raise ValueError("--role 不能为空：子 agent 的身份就是「它为哪个角色干活」")
     parent = lookup_session_token(conn, parent_token)
-    assert_agent_parent_allowed(parent)
+    assert_agent_parent_allowed(conn, parent)
     child_key = f"{parent['session_key']}#{role}"
     issued = issue_session_token(
         conn, citizen_id=parent["citizen_id"], session_key=child_key,
@@ -4502,6 +4684,199 @@ def issue_agent_token(conn, *, parent_token, role, ttl_hours=None) -> dict:
             "role": role, "evidence": "inherited", "channel": "parent",
             "parent_token_hash": parent["token_hash"], "issued_at": issued["issued_at"],
             "expires_at": issued["expires_at"]}
+
+
+# ------------------------------------------------------ 会话身份 ensure / 继承（W4 · 方案 A）
+#
+# 110 §3.3 定案：**身份解析扩到会话级，不动吊销粒度**。`ensure` 与 `rotate` 的分工：
+#   rotate（人驱动 `session start`）——换一条能用的，旧的立即吊销；
+#   ensure（hook 每次 SessionStart）——幂等，只要还有活的就原样返回，**绝不轮换**。
+# 为什么必须拆：SessionStart 会在同一会话上重复触发，两个入口都轮换就会互相吊销
+# 对方的凭证（`fish_session_hook.py:29-31` 那句"不在这里调 start"就是这个坑）。
+
+
+def _session_id_of(session_key) -> str:
+    """会话键 → 宿主会话 id（`dsh:abc` / `dsh:abc#role` → `abc`）。判父只能吃裸 id。"""
+    key = fish_lineage.identity_key_of(session_key)
+    return key.split(":", 1)[1] if ":" in key else key
+
+
+def _alive_session_token(conn, session_key):
+    """该会话键当前**活着**的凭证行（吊销/过期都不算）；没有 → None。
+
+    与 `fish_activity.SQL_SESSION_TOKEN_CITIZEN` 同一条有效性口径，但这里要的是**整行**
+    ——ensure 要复用它、而不是重新签发（重签就是轮换，正是本波要禁止的动作）。
+    """
+    row = conn.execute(
+        "SELECT token_hash,citizen_id,evidence,channel,parent_token,issued_at,expires_at "
+        "FROM session_tokens WHERE session_key=? AND revoked_at IS NULL "
+        "AND (expires_at IS NULL OR expires_at > ?) "
+        "ORDER BY issued_at DESC LIMIT 1", (session_key, now_utc())).fetchone()
+    if not row:
+        return None
+    keys = ("token_hash", "citizen_id", "evidence", "channel", "parent_token",
+            "issued_at", "expires_at")
+    return dict(zip(keys, row))
+
+
+def _nearest_identity_ancestor(conn, *, host, session_key):
+    """父链上**最近一个**有身份的祖先：`(祖先会话键, 公民行)`；没有 → `(None, None)`。
+
+    判父只有一条路（113 §5.7）：`fish_lineage.ancestor_sessions`（投影表优先、投影没行
+    就现读宿主会话头）。走不到 / 成环 / 超跳都只是"没有祖先"，**不猜**。
+    """
+    for sid in fish_lineage.ancestor_sessions(conn, host, _session_id_of(session_key)):
+        ancestor_key = fish_activity.make_session_key(host, sid)
+        hit = find_session_citizen(conn, ancestor_key)
+        if hit is not None:
+            return ancestor_key, hit
+    return None, None
+
+
+def _inherited_token_shape(conn, ancestor_key, *, channel):
+    """继承链上的凭证口径：`(evidence, channel, parent_hash, parent_expires_at)`。
+
+    根是 machine 且祖先**还有活凭证** → 正常继承（`inherited`/`parent`，可级联吊销）；
+    否则 → `provisional` 且**不挂父**。这是 113 §5.6 的防漂白落点：没有 machine 根的链
+    不许继续标 inherited，而 DDL 规定 `channel='parent'` ⇒ `evidence='inherited'`，
+    所以唯一诚实的写法就是降级 + 断开父链（identity 的 `inherited_from` 仍记录血缘）。
+    """
+    parent = _alive_session_token(conn, ancestor_key)
+    if parent is not None and evidence_root(conn, parent["token_hash"]) == "machine":
+        return "inherited", "parent", parent["token_hash"], parent["expires_at"]
+    return "provisional", channel, None, None
+
+
+def ensure_session(conn, *, session_key, host, evidence, display_name=None,
+                   account_id=None, kind="visitor", role=None, ttl_hours=None,
+                   channel="cli", projects=None, citizen=None, bind_token=None) -> dict:
+    """幂等：有身份就复用，没身份就继承最近有身份祖先 / 退 provisional。**绝不轮换**。
+
+    四支行为（113 §5.4）：
+      · 已有身份   → 复用（`session_identity` 第一级 / `host_session_key` 第二级）；
+      · `--citizen`→ 显式绑定（证明口径与 `start` 共用 `_prove_citizen_binding`）；
+      · `inherited`→ 父链上最近一个有身份的祖先；凭证 `inherited`+`parent`；
+      · 无可继承   → 根会话 `direct`（机器事实照旧），有父链但整链无身份 `provisional`。
+
+    签发规则（**唯一的"写"**）：该 session_key 当前**没有活凭证**时才 `issue_session_token`；
+    已经有活的就原样返回（`token=None` + `token_source='existing'`）。
+      → 重跑 SessionStart 不会互踢（113 §5.4）
+      → 首次启动仍有明文 token（hook 打印得出来）
+
+    返回 `{token, token_source, citizen_id, session_key, evidence, channel, host,
+    display_name, account_id, created, identity_origin, inherited_from, issued_at,
+    expires_at, stints, projects, project, ...}`。
+    """
+    key = (session_key or "").strip()
+    if not key:
+        raise ValueError("ensure_session 需要 session_key（没有会话标识就没有「同一会话」）")
+    project_list = _normalize_projects(projects)
+    display_name = display_name or auto_session_display_name(host, key, role)
+    found = find_session_citizen(conn, key)
+    citizen_id = found["citizen_id"] if found else None
+    if found is not None:
+        # 复用身份时用**库里生效的名字**（与 find_or_create 同一条"绝不改名"）：
+        # 继承来的子会话该显示父公民的可读名，而不是它自己的自动占位名。
+        display_name = found["display_name"]
+    origin = (found or {}).get("identity_origin") or "direct"
+    inherited_from = (found or {}).get("inherited_from")
+    created = False
+    account_id = (found or {}).get("account_id") or account_id
+    if found is not None and (found or {}).get("identity_origin") is None:
+        # 老库的第二级命中（`citizens.host_session_key` 有、`session_identity` 没有）：
+        # 补一行 direct 投影。这是**一次性回填**，也是"第三级解析以后能查到它"的前提。
+        _write_session_identity(conn, key, citizen_id, origin="direct",
+                                inherited_from=None, evidence=evidence)
+    ancestor_key = None
+    if citizen:
+        # 显式锚**永远优先**（与 `start --citizen` 同语义）：人改了身份锚就该生效，
+        # 不能被"上一次 ensure 写下的投影"顶掉。
+        who = _forced_citizen(conn, (citizen or "").strip(), session_key=key,
+                              bind_token=bind_token, account_id=account_id)
+        citizen_id, origin, inherited_from = who["citizen_id"], "direct", None
+        display_name = who["display_name"]
+        account_id = who.get("account_id") or account_id
+        _write_session_identity(conn, key, citizen_id, origin="direct",
+                                inherited_from=None, evidence="machine")
+    if citizen_id is None:
+        ancestor_key, hit = _nearest_identity_ancestor(conn, host=host, session_key=key)
+        if hit is not None:
+            citizen_id, origin = hit["citizen_id"], "inherited"
+            inherited_from = ancestor_key
+            display_name = hit["display_name"]
+            account_id = hit.get("account_id") or account_id
+            _write_session_identity(conn, key, citizen_id, origin="inherited",
+                                    inherited_from=ancestor_key, evidence="inherited")
+        else:
+            # 没有可继承的祖先：**有父链但整链无身份**才是 provisional；
+            # 根会话（判不到父）仍是 direct —— 那是今天就在走的机器事实路径。
+            has_parent = bool(fish_lineage.ancestor_sessions(conn, host, _session_id_of(key)))
+            origin = "provisional" if has_parent else "direct"
+            who = find_or_create_session_citizen(
+                conn, session_key=key,
+                evidence="provisional" if origin == "provisional" else evidence,
+                host=host, display_name=display_name, account_id=account_id,
+                kind=kind, role=role, identity_origin=origin)
+            citizen_id, created = who["citizen_id"], who["created"]
+            display_name = who["display_name"]
+    # ---- 凭证（唯一的"写"）：有活的就复用，没有才签 ----
+    alive = _alive_session_token(conn, key)
+    token_evidence, token_channel, parent_hash, parent_expires = evidence, channel, None, None
+    if alive is not None and alive["citizen_id"] == citizen_id:
+        issued = None
+        token_source = "existing"
+        issued_at, expires_at = alive["issued_at"], alive["expires_at"]
+        token_evidence, token_channel = alive["evidence"], alive["channel"]
+    else:
+        if origin == "inherited":
+            ancestor_key = ancestor_key or inherited_from
+            token_evidence, token_channel, parent_hash, parent_expires = \
+                _inherited_token_shape(conn, ancestor_key, channel=channel)
+        elif origin == "provisional":
+            token_evidence = "provisional"
+        issued = issue_session_token(
+            conn, citizen_id=citizen_id, session_key=key, evidence=token_evidence,
+            channel=token_channel, parent_hash=parent_hash, ttl_hours=ttl_hours)
+        if parent_hash and parent_expires and issued["expires_at"] is not None \
+                and issued["expires_at"] > parent_expires:
+            # 子凭证不能比父凭证活得久（与 issue_agent_token 同一条纪律）
+            conn.execute("UPDATE session_tokens SET expires_at=? WHERE token_hash=?",
+                         (parent_expires, issued["token_hash"]))
+            issued["expires_at"] = parent_expires
+        token_source = "issued"
+        issued_at, expires_at = issued["issued_at"], issued["expires_at"]
+    stints = [
+        open_project_stint(conn, citizen_id, name, account_id=account_id,
+                           set_by=f"ensure:{origin}")
+        for name in project_list
+    ]
+    conn.commit()
+    append_event(
+        conn, "session.ensured",
+        {"citizen_id": citizen_id, "evidence_level": token_evidence},
+        {"kind": "citizen", "id": citizen_id},
+        # 事件里**只有 hash**，没有明文（凭证纪律：不可变表会永久留下写进去的东西）
+        {"session_key": key, "host": host, "identity_origin": origin,
+         "inherited_from": inherited_from, "evidence": token_evidence,
+         "channel": token_channel, "token_source": token_source,
+         "token_hash": (issued or {}).get("token_hash"), "expires_at": expires_at,
+         "citizen_created": created, "projects": project_list,
+         "stint_actions": [{"project": s["project"], "action": s["action"]}
+                           for s in stints]})
+    same_name = find_same_name_citizens(conn, display_name, citizen_id) if created else []
+    return {"token": (issued or {}).get("token"),
+            "token_hash": (issued or {}).get("token_hash"),
+            "token_source": token_source, "citizen_id": citizen_id, "session_key": key,
+            "host": host, "evidence": token_evidence, "channel": token_channel,
+            "display_name": display_name, "account_id": account_id,
+            "created": created, "identity_origin": origin,
+            "inherited_from": inherited_from, "rotated": 0,
+            "issued_at": issued_at, "expires_at": expires_at,
+            "stint": stints[0] if stints else None, "stints": stints,
+            "project": project_list[0] if len(project_list) == 1 else None,
+            "projects": project_list, "warning": None,
+            "archived": bool((found or {}).get("archived_at")),
+            "name_conflicts": same_name}
 
 
 def end_session(conn, *, token=None, environ=None, reason="session_end") -> dict:
@@ -4572,7 +4947,11 @@ def session_status(conn, *, token=None, environ=None) -> dict:
     found = find_session_citizen(conn, ident["session_key"])
     citizen = load_citizen(conn, found["citizen_id"]) if found else None
     stints = current_open_stints(conn, citizen["citizen_id"]) if citizen else []
+    # 2026-11-25（113 W4 · §5.2）：多一行 `identity_origin`（**旧键一个不动**）。
+    # 它回答的是"这个会话是自建的、还是继承来的、还是临时身份"——只看 evidence 看不出来。
     return {"source": "env", "token": None, "citizen": citizen, "identity": ident,
+            "identity_origin": (found or {}).get("identity_origin"),
+            "inherited_from": (found or {}).get("inherited_from"),
             "stints": stints, "stint": stints[-1] if stints else None}
 
 
@@ -7681,6 +8060,41 @@ def _print_session_start(res):
     print("（token 明文只此一次；丢了就重跑 session start——公民不变，凭证换新）")
 
 
+def _print_session_ensure(res):
+    """`session ensure` 的输出（**契约**：hook 按 `key: value` 抓 token / 身份 / 项目）。
+
+    与 `_print_session_start` 的差别只有一处：ensure **可能不带 token**（已有活凭证时
+    绝不轮换，113 §5.4）。所以用 `token_source` 两行说清，而**不是**把 `None` 印成一个
+    看起来像凭证的东西——那会让 hook 把 "None" 当 token 注入进会话。
+    """
+    if res.get("token"):
+        print(f"token: {res['token']}")
+    print(f"token_source: {res['token_source']}")
+    print(f"citizen_id: {res['citizen_id']}")
+    print(f"session_key: {res['session_key']}")
+    print(f"evidence: {res['evidence']}")
+    print(f"project: {', '.join(res.get('projects') or []) or '-'}")
+    print(f"channel: {res['channel']}")
+    print(f"host: {res['host']}")
+    print(f"display_name: {res['display_name']}")
+    print(f"account_id: {res['account_id'] or '-'}")
+    print(f"identity: {res['identity_origin']}")
+    if res.get("inherited_from"):
+        print(f"inherited_from: {res['inherited_from']}")
+    print(f"issued_at: {res['issued_at']}")
+    print(f"expires_at: {res['expires_at'] or '永久'}")
+    print(f"citizen: {'新建' if res['created'] else '复用'}")
+    for it in res.get("name_conflicts") or []:
+        print(same_name_notice(it["citizen_id"], it["kind"]))
+    for st in res.get("stints") or []:
+        print(f"stint: {st['action']} {st['project']}")
+        print(f"（档期 id={st['stint_id']}，自 {st['from_ts']} 起）")
+    if res["token_source"] == "existing":
+        print("（本会话已有活凭证：ensure 幂等，未重签也未轮换——避免与其它进程互踢）")
+    else:
+        print("（token 明文只此一次；丢了就重跑 session start——公民不变，凭证换新）")
+
+
 def _print_session_status(res):
     info, citizen, stints = res["token"], res["citizen"], res.get("stints") or []
     ident = res["identity"] or {}
@@ -7702,6 +8116,11 @@ def _print_session_status(res):
         print(f"  host         {citizen['host'] or '-'}")
         print(f"  account_id   {citizen['account_id'] or '-'}")
         print(f"  last_seen_at {citizen['last_seen_at'] or '-'}")
+        # 2026-11-25（W4）：多一行「身份解析」——只看 evidence 分不出"自建/继承/临时"。
+        origin = res.get("identity_origin") or (citizen or {}).get("identity_origin")
+        if origin:
+            source = f" ← {res.get('inherited_from') or citizen.get('inherited_from')}"
+            print(f"  身份解析     {origin}{'' if origin == 'direct' else source}")
         if citizen.get("archived_at"):
             print(f"  归档时间     {citizen['archived_at']}（身份在冷表里）")
     else:
@@ -7806,6 +8225,62 @@ def cmd_session_start(args):
     # ② 失败静默（会话启动不能被看板拖垮）；③ 多个项目逐个签，最多 3 个；
     # 一个项目都没有时签根板（"我今天有活动"这件事本身有价值）。
     _auto_checkin_after_start(conn, res, getattr(args, "cwd", None))
+    conn.close()
+
+
+def cmd_session_ensure(args):
+    """`session ensure`（W4.0 · 113 §5.2）：hook 的入口。幂等、不轮换。
+
+    与 `cmd_session_start` 的两处差别**都是刻意的**：
+      · 不开 `--project` 之外的档期逻辑照旧（`--cwd` → workspace_map → 兜底项目），
+        因为"这条会话在哪个项目上"这件事 hook 照样要报给模型；
+      · 不打印 "token 明文只此一次" 那句（ensure 可能复用已有凭证），改由
+        `_print_session_ensure` 用 `token_source` 说清。
+    """
+    conn = connect(Path(args.root))
+    conn.executescript(SCHEMA)
+    migrate(conn)
+    projects = getattr(args, "project", None)
+    cwd = getattr(args, "cwd", None)
+    resolved_from_cwd = None
+    fell_back = None
+    if not projects and cwd:
+        try:
+            resolved_from_cwd = resolve_project_by_cwd(conn, cwd)
+        except Exception:
+            resolved_from_cwd = None
+        if resolved_from_cwd:
+            projects = [resolved_from_cwd]
+        else:
+            fell_back = fallback_project(conn)
+            if fell_back:
+                projects = [fell_back]
+    ident = build_session_identity(alias=getattr(args, "alias", None))
+    try:
+        res = ensure_session(
+            conn, session_key=ident["session_key"], host=ident["host"],
+            evidence=ident["evidence"], channel=ident["channel"],
+            display_name=ident["alias"] or None,
+            account_id=resolve_account_id(account=getattr(args, "account", None),
+                                          alias=ident["alias"]),
+            projects=projects, citizen=getattr(args, "citizen", None),
+            bind_token=getattr(args, "bind_token", None))
+    except ValueError as e:
+        conn.close()
+        print(f"错误：{e}", file=sys.stderr)
+        sys.exit(2)
+    # 诊断句必须走 stderr：stdout 是 `key: value` 的契约面（hook 按冒号切分）。
+    if resolved_from_cwd:
+        print(f"（项目由 --cwd 经 workspace_map 解析：{resolved_from_cwd}）",
+              file=sys.stderr)
+    elif fell_back:
+        print(f"（--cwd 未匹配任何 workspace_map 条目，落到兜底项目「{fell_back}」）",
+              file=sys.stderr)
+    elif cwd and not getattr(args, "project", None):
+        print(f"（--cwd 未匹配任何 workspace_map 条目，未开档期：{cwd}）",
+              file=sys.stderr)
+    _print_session_ensure(res)
+    _auto_checkin_after_start(conn, res, cwd)
     conn.close()
 
 
@@ -7914,10 +8389,11 @@ def cmd_session_end(args):
         print(f"凭证本来已是吊销态：{res['session_key']}（公民 {res['citizen_id']}）"
               "——只补齐档期与活跃时间")
         if res["children_revoked"]:
-            print(f"级联吊销子凭证：{res['children_revoked']} 条")
+            print(f"级联吊销后代凭证（含孙级）：{res['children_revoked']} 条")
     else:
         print(f"已结束会话：{res['session_key']}（公民 {res['citizen_id']}）")
-        print(f"吊销凭证：{res['revoked']} 条；级联吊销子凭证：{res['children_revoked']} 条")
+        print(f"吊销凭证：{res['revoked']} 条；级联吊销后代凭证（含孙级）："
+              f"{res['children_revoked']} 条")
     print(f"关闭档期：{res['stints_closed']} 个")
     conn.close()
 
@@ -7943,7 +8419,7 @@ def cmd_session_agent(args):
     print(f"parent_token_hash: {res['parent_token_hash'][:12]}…")
     print(f"issued_at: {res['issued_at']}")
     print(f"expires_at: {res['expires_at'] or '永久'}")
-    print("（子 agent 凭证只允许一跳：不能拿它再去 `session agent --parent`）")
+    print("（W4 起子 agent 凭证可继续派生：根必须是 machine 级；`#role` 后缀区分角色）")
     conn.close()
 
 
