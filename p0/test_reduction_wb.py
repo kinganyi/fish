@@ -39,8 +39,8 @@ P0 = Path(__file__).resolve().parent
 sys.path.insert(0, str(P0))
 
 import fish  # noqa: E402
-import fish_common  # noqa: E402
 import fish_push_audit  # noqa: E402
+import fish_push_vocab  # noqa: E402
 import fish_ui  # noqa: E402
 import fish_workbench_api  # noqa: E402
 
@@ -86,11 +86,11 @@ class ChannelVocabularyTest(_DbCase):
     """B1（A1）：通道词表单源。"""
 
     def test_single_source_is_the_actual_three(self):
-        self.assertIs(fish.PUSH_CHANNELS, fish_common.PUSH_CHANNELS,
+        self.assertIs(fish.PUSH_CHANNELS, fish_push_vocab.PUSH_CHANNELS,
                       "`fish.PUSH_CHANNELS` 必须是单源的**同一个对象**（别名，不是副本）")
-        self.assertIs(fish_push_audit.CHANNELS, fish_common.PUSH_CHANNELS,
+        self.assertIs(fish_push_audit.CHANNELS, fish_push_vocab.PUSH_CHANNELS,
                       "审计读端的词表必须来自同一单源")
-        self.assertEqual(tuple(fish_common.PUSH_CHANNELS), CHANNEL_ACTUAL,
+        self.assertEqual(tuple(fish_push_vocab.PUSH_CHANNELS), CHANNEL_ACTUAL,
                          "单源词表必须等于生产库实际出现的三个值")
 
     def test_declared_equals_db_actual_with_a_negative_control(self):
@@ -98,7 +98,7 @@ class ChannelVocabularyTest(_DbCase):
             self.assertEqual(self._push("WBT-261124-01", channel, reaction), 1)
         actual = {row[0] for row in self.conn.execute(
             "SELECT DISTINCT channel FROM push_log")}
-        declared = set(fish_common.PUSH_CHANNELS)
+        declared = set(fish_push_vocab.PUSH_CHANNELS)
         self.assertEqual(actual, declared,
                          "声明集合 != 库实际集合（112 C-B1）")
         self.assertEqual(actual, set(CHANNEL_ACTUAL))
@@ -164,11 +164,11 @@ class AcceptRateSingleSourceTest(_DbCase):
         acc = sum(row["accepted"] for row in audit["channels"])
         ign = sum(row["ignored"] for row in audit["channels"])
         self.assertEqual(audit["totals"]["acceptRate"],
-                         fish_common.accept_rate(acc, ign),
+                         fish_push_vocab.accept_rate(acc, ign),
                          "同一份响应里两个 acceptRate 出自不同公式（112 §四 N-3）")
         for row in audit["channels"]:
             self.assertEqual(row["acceptRate"],
-                             fish_common.accept_rate(row["accepted"], row["ignored"]),
+                             fish_push_vocab.accept_rate(row["accepted"], row["ignored"]),
                              "通道行 %r 的 acceptRate 不是单源函数的输出" % row["channel"])
 
     def test_workbench_stats_uses_the_same_rate(self):
@@ -180,7 +180,7 @@ class AcceptRateSingleSourceTest(_DbCase):
                                msg="/api/stats 的 acceptRate 分母变了")
         for row in push["top"]:
             self.assertEqual(row["rate"],
-                             fish_common.accept_rate(row["accepted"], row["ignored"]),
+                             fish_push_vocab.accept_rate(row["accepted"], row["ignored"]),
                              "推送 Top 行的 rate 不是单源函数的输出")
 
     def test_all_three_read_paths_call_the_one_function(self):
@@ -192,7 +192,7 @@ class AcceptRateSingleSourceTest(_DbCase):
         self._seed()
         ro = fish_ui.open_readonly(str(self.db))
         self.addCleanup(ro.close)
-        with mock.patch.object(fish_common, "accept_rate", return_value=0.4242):
+        with mock.patch.object(fish_push_vocab, "accept_rate", return_value=0.4242):
             stats = fish.push_stats(self.conn)
             audit = fish_push_audit.overview(str(self.db))
             push = fish_workbench_api.collect_stats(ro, days=30, top=10)["data"]["push"]

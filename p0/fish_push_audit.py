@@ -107,6 +107,7 @@ from datetime import datetime, timedelta, timezone
 
 import fish_common
 import fish_db
+import fish_push_vocab
 import fish_ui
 
 # ── 口径常量 ────────────────────────────────────────────────────────────
@@ -118,10 +119,10 @@ EVENTS_LIMIT_MAX = 100
 TOP_CODES_LIMIT = 12
 CACHE_TTL_S = 15.0
 
-#: 通道词的唯一真相在 `fish_common.PUSH_CHANNELS`（**同一个对象**，不是副本）。
+#: 通道词的唯一真相在 `fish_push_vocab.PUSH_CHANNELS`（**同一个对象**，不是副本）。
 #: 顺序即 UI 的显示顺序；历史词 `hook`/`situational` 只做写入兼容与读端识别，
 #: 不进这份 UI 词表（聚合时追加成额外行并标 `legacy=True`，见 112 W-B · A1）。
-CHANNELS = fish_common.PUSH_CHANNELS
+CHANNELS = fish_push_vocab.PUSH_CHANNELS
 #: `events` 允许的 reaction 过滤值。**`pending` = 待判**（库里 `reaction IS NULL`）。
 #:
 #: 为什么不是空串（评审 🟠-2）：`parse_qs` 默认把 `reaction=` 丢成「没有这个参数」，
@@ -340,8 +341,8 @@ def check_channel(channel) -> str | None:
     raw = "" if channel is None else str(channel).strip()
     if not raw:
         return None
-    if raw not in fish_common.PUSH_CHANNELS_WRITE:
-        raise ValueError(f"channel 只能是 {list(fish_common.PUSH_CHANNELS_WRITE)}，收到 {raw}")
+    if raw not in fish_push_vocab.PUSH_CHANNELS_WRITE:
+        raise ValueError(f"channel 只能是 {list(fish_push_vocab.PUSH_CHANNELS_WRITE)}，收到 {raw}")
     return raw
 
 
@@ -627,10 +628,10 @@ def _build_overview(conn: sqlite3.Connection, *, days: int, now: datetime) -> di
             "accepted": accepted,
             "ignored": ignored,
             "pending": int(row["pending"] or 0) if row else 0,
-            "acceptRate": fish_common.accept_rate(accepted, ignored),
+            "acceptRate": fish_push_vocab.accept_rate(accepted, ignored),
             # 历史词（hook/situational）出现在这里说明库里有旧数据：显式标出来，
             # 免得它看起来像"当前还会写入的通道"（UI 词表只有实际三词）。
-            "legacy": name in fish_common.LEGACY_PUSH_CHANNELS,
+            "legacy": name in fish_push_vocab.LEGACY_PUSH_CHANNELS,
         })
 
     # ── ③ kinds（mem_type 优先 → 前缀兜底 → memory）────────────────────

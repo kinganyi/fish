@@ -44,7 +44,7 @@ CLI）与两个 hook（Pre/Post）都调这里——不在任何一处再写第�
 from __future__ import annotations
 from fish_common import now_utc as utc_now, parse_utc, warn_ignored  # 时间原语与报警出口全仓只有一份实现
 from fish_common import _presence_has_session  # 列探测也只有一份（112 W-A · B5：旧"hook 不许 import"理由用错了层级）
-import fish_common  # 时间差原语（112 W-D · C7）：机制一份，策略留在本模块
+import fish_clock  # 时间差原语（112 W-D · C7）：机制一份，策略留在本模块（fish_common 有行数上界）
 
 import datetime
 import hashlib
@@ -136,14 +136,14 @@ def _age_sec_or_inf(ts, now_text=None) -> float:
     本模块三处调用（presence 缓存节流、声明面 90 分钟窗、实际面 30 分钟窗）
     拿到的都是"最保守的过期"。
 
-    机制（解析 + 相减）只有 `fish_common.age_sec` 一份；另一份策略
+    机制（解析 + 相减）只有 `fish_clock.age_sec` 一份；另一份策略
     `fish_git_hook._age_sec_or_none` 用的是"未知"（节流判据不许猜）。
     两份策略各有正当理由，**不许合并成一个**——那会逼出一个二选一的语义。
 
     改名理由（112 W-D · C7）：旧名 `_age_sec` 与 `fish_git_hook` 那份同名，
     但一份返 `inf`、一份返 `None`——"同名不同义"比"两个函数"更难查。
     """
-    age = fish_common.age_sec(ts, now_text)
+    age = fish_clock.age_sec(ts, now_text)
     return float("inf") if age is None else age
 
 

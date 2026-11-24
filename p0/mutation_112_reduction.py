@@ -107,7 +107,7 @@ MUTANTS = [
     # ── W-B ──────────────────────────────────────────────────────────────
     {
         "id": "WB-M1",
-        "file": "fish_common.py",
+        "file": "fish_push_vocab.py",
         "desc": "往通道单源里加历史词 `hook`（声明集合 ≠ 库实际集合）",
         "old": 'PUSH_CHANNELS = ("inject", "prompt", "tool_after")',
         "new": 'PUSH_CHANNELS = ("inject", "prompt", "tool_after", "hook")',
@@ -120,7 +120,7 @@ MUTANTS = [
     },
     {
         "id": "WB-M2",
-        "file": "fish_common.py",
+        "file": "fish_push_vocab.py",
         "desc": "采纳率分母改成 accepted+ignored+1（口径漂移的典型形态）",
         "old": "    decided = accepted + ignored",
         "new": "    decided = accepted + ignored + 1",
@@ -150,7 +150,7 @@ MUTANTS = [
         "id": "WB-M4",
         "file": "fish_workbench_api.py",
         "desc": "推送 Top 的率改回内联公式（不再是单源，但数值可能一样）",
-        "old": '                "rate": fish_common.accept_rate(accepted, ignored),',
+        "old": '                "rate": fish_push_vocab.accept_rate(accepted, ignored),',
         "new": ('                "rate": ((accepted / (accepted + ignored))\n'
                 '                         if (accepted + ignored) else None),'),
         "must_fail": [

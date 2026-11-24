@@ -6,7 +6,7 @@
 
   · **改名**（C6 `now_utc` / C8 `_coerce` / C9 `_read_state`·`_write_state`）：
     名字必须各自表达语义——全仓不许再出现"同名但返回值/策略不同"；
-  · **下沉原语 + 策略留名**（C7 `_age_sec`）：解析/相减只有一份（`fish_common.age_sec`），
+  · **下沉原语 + 策略留名**（C7 `_age_sec`）：解析/相减只有一份（`fish_clock.age_sec`），
     `inf` 与 `None` 两种策略留在调用点并各自命名。
 
 ## 判据为什么这么写
@@ -30,6 +30,7 @@ P0 = Path(__file__).resolve().parent
 sys.path.insert(0, str(P0))
 
 import fish_activity  # noqa: E402
+import fish_clock  # noqa: E402
 import fish_common  # noqa: E402
 import fish_git_hook  # noqa: E402
 import fish_push_audit  # noqa: E402
@@ -107,18 +108,19 @@ class AgePrimitiveStrategyTest(unittest.TestCase):
     """C-D2：原语一份、策略两份，且**各自**保住原行为。"""
 
     def test_primitive_is_one_implementation(self):
-        self.assertEqual(_defs("age_sec"), ["fish_common.py"],
-                         "时间差原语应在 fish_common 里唯一一份")
+        self.assertEqual(_defs("age_sec"), ["fish_clock.py"],
+                         "时间差原语应在 `fish_clock` 里唯一一份"
+                         "（`fish_common` 有行数上界，装不下——窗口是验收契约，不调阈值）")
         self.assertEqual(_defs("_age_sec"), [],
                          "`_age_sec` 两份同名实现都应消失（改名成带策略的名字）")
         self.assertEqual(_defs("_age_sec_or_inf"), ["fish_activity.py"])
         self.assertEqual(_defs("_age_sec_or_none"), ["fish_git_hook.py"])
 
     def test_primitive_returns_none_on_bad_input(self):
-        self.assertIsNone(fish_common.age_sec("不是时间"),
+        self.assertIsNone(fish_clock.age_sec("不是时间"),
                           "原语只做机制：解析不了返回 None，策略由调用点定")
-        self.assertIsNone(fish_common.age_sec(None))
-        self.assertAlmostEqual(fish_common.age_sec(
+        self.assertIsNone(fish_clock.age_sec(None))
+        self.assertAlmostEqual(fish_clock.age_sec(
             "2026-11-24T00:00:00Z", "2026-11-24T00:00:30Z"), 30.0)
 
     def test_policies_stay_at_call_sites(self):

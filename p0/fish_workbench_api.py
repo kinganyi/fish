@@ -50,7 +50,7 @@ fish 工作台首屏要一条**真实**的五源合流时间线：工具动作�
   空/非法键给空串，标签怎么展示由调用点决定——112 W-B · N-5）
 - 宿主：**一律取 `session_key` 前缀**（实测 `tool_activity.host` 列与之一致率仅 2.5%，
   详见 §1.2六）；`citizens_all.host` 是自报值域，另作「公民档案的宿主」
-- 推送采纳率：`fish_common.accept_rate` / `fish.push_stats(...)` 的 `accept_rate`
+- 推送采纳率：`fish_push_vocab.accept_rate` / `fish.push_stats(...)` 的 `accept_rate`
   （分母 `decided = accepted + ignored`；无已判时回 `None` 不回 0）——这里**不重算**
 
 ## 用
@@ -89,6 +89,7 @@ if _HERE not in sys.path:
 
 import fish_common  # noqa: E402  可见性谓词 `_visibility_sql` / 主人解析 `resolve_owner` / `warn_ignored`
 import fish_naming  # noqa: E402  人类面取名唯一实现
+import fish_push_vocab  # noqa: E402  推送采纳率的唯一实现（112 W-B · N-3）
 import fish_hosts   # noqa: E402  宿主接入层（只读探测：装没装/接没接/接的哪条通道）
 import fish_push_audit  # noqa: E402  推送面板数据面（只读诊断 + 窄写配置）
 import fish_ui      # noqa: E402  只读连接纪律 + 会话短标识兜底
@@ -1535,8 +1536,8 @@ def collect_stats(conn: sqlite3.Connection, *, days: int, top: int) -> dict:
                 "pushed": int(r["pushed"] or 0),
                 "accepted": accepted, "ignored": ignored,
                 "pending": int(r["pending"] or 0),
-                # 与 push_stats 同一个函数（fish_common.accept_rate）；无已判回 None 不回 0
-                "rate": fish_common.accept_rate(accepted, ignored),
+                # 与 push_stats 同一个函数（fish_push_vocab.accept_rate）；无已判回 None 不回 0
+                "rate": fish_push_vocab.accept_rate(accepted, ignored),
                 "lastPushedAt": r["last"],
             })
         channels = conn.execute(

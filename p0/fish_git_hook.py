@@ -31,7 +31,7 @@
 """
 import sqlite3
 
-import fish_common
+import fish_clock
 import fish_git
 import fish_git_link
 import fish_git_store
@@ -54,7 +54,7 @@ def _age_sec_or_none(stamp, now_text=None):
     机制一份、策略两份：本函数用 `None`（"未知"——不知道多久以前，就不能当成
     "刚采过"来跳过采集），`fish_activity._age_sec_or_inf` 用无穷大（过期判据）。
     """
-    return fish_common.age_sec(stamp, now_text)
+    return fish_clock.age_sec(stamp, now_text)
 
 
 def obs_throttled(conn, root, *, window_sec=OBS_THROTTLE_SEC, now=None):

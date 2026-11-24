@@ -1157,8 +1157,23 @@ class ConfigRegisteredTest(RerankCase):
         self.diag_path = self.root / "_audit" / "push_config.jsonl"
 
     def _register(self, key, default, typ):
-        """把键**真的登记**进注册表（A 合并时会做的事），用例结束还原。"""
-        self.addCleanup(fish_common.CONFIG_DEFAULTS.pop, key, None)
+        """把键**真的登记**进注册表（A 合并时会做的事），用例结束**按原值还原**。
+
+        2026-11-24（112 W-A/W-B 收尾时暴露的既有测试污染）：旧实现是无条件
+        `CONFIG_DEFAULTS.pop(key, None)`——而 `push.rerank_enabled` 本来就是**已登记**
+        的键，于是这条用例跑完会把它从注册表里删掉，后续任何读 `_key_type` 的消费者
+        （`fish_push_audit.config_view` 就是）都会 `KeyError`。用"还原原值"代替
+        "删掉"：对原本不存在的键二者等价，对已存在的键前者才是对的。
+        """
+        original = fish_common.CONFIG_DEFAULTS.get(key)
+
+        def _restore():
+            if original is None:
+                fish_common.CONFIG_DEFAULTS.pop(key, None)
+            else:
+                fish_common.CONFIG_DEFAULTS[key] = original
+
+        self.addCleanup(_restore)
         fish_common.CONFIG_DEFAULTS[key] = (default, typ, None)
 
     def _diag_keys(self):

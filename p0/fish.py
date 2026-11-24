@@ -90,9 +90,11 @@ import fish_common  # noqa: F401 —— 模块本身也要在（判据 J1d 查�
 import fish_profile
 from fish_common import (  # noqa: F401
     _exc_text, count_tokens, fts_match_expr, fts_text, index_tokens, iso_local,
-    now_utc, ulid, citizen_ids_known, warn_ignored,
-    LEGACY_PUSH_CHANNELS, PUSH_CHANNELS,      # 推送渠道词表的唯一真相（112 W-B · A1）
+    now_utc, ulid, citizen_ids_known, warn_ignored
 )
+# 推送渠道词表的唯一真相（112 W-B · A1）。单独成叶子模块是因为 `fish_common` 有
+# 行数上界（`test_split_contract.FISH_COMMON_LINES_MAX`）——窗口是验收契约，不调阈值。
+from fish_push_vocab import LEGACY_PUSH_CHANNELS, PUSH_CHANNELS  # noqa: F401
 
 # 原始对话语料层（2026-10-27 · 语料层 T01/T02）：独立库 `corpus.sqlite`，与主库零耦合。
 # 项目/公民解析器以回调注入（这里不把 fish 的解析逻辑搬进语料模块，避免循环导入）。
@@ -113,6 +115,7 @@ from fish_attach import (AttachmentRejected, store_blob,  # F-P1-3
                          _attach_max_bytes, _attach_check_name,
                          _attach_check_root)
 import fish_atomic, fish_meta, fish_token  # noqa: E401 —— 薄模块挤行数窗口
+import fish_push_vocab  # 推送词汇/采纳率的唯一真相（叶子）
 from fish_inject import (  # noqa: F401  —— 拆分后仍从 fish 导出，调用方不用改
     _allow_untrusted_lessons, _lesson_rows, _recent_lesson_rows,
     count_lesson_rows, _rule_rows, count_rule_rows)
@@ -300,7 +303,7 @@ def normalize_occurred_at(value):
 # 压在 JSON 里每次都得解包再算，ix_push_code 也会变成空转。
 #
 # 字段语义：
-#   channel       inject | prompt | tool_after（词表唯一真相在 `fish_common.PUSH_CHANNELS`；
+#   channel       inject | prompt | tool_after（词表唯一真相在 `fish_push_vocab.PUSH_CHANNELS`；
 #                 历史词 hook/situational 只在写入校验里兼容，见 `_push_write_channels`）
 #   budget_tokens 这次推送**批次**占的预算（同批次 N 行同值，不是单条成本）
 #   candidate_id  候选池 id —— 候选池没实现之前恒为 NULL（**不许编**）
@@ -1244,7 +1247,7 @@ def access_log_rows(conn, code=None, citizen_id=None, session_key=None, via=None
 #   push_log          = **这一次推送**：我们主动塞了什么、占多少预算、有没有反应
 # inject 已经写过 access_log(via='push')——那记的是"这条被展示了"，记不出"这次推送批次"。
 # 而批次恰恰是时机策略的计量单位：推 3 条读了 1 条 ≠ 推 1 条读了 1 条。
-# 渠道词表：**唯一真相在 `fish_common.PUSH_CHANNELS`**（112 W-B · A1）。
+# 渠道词表：**唯一真相在 `fish_push_vocab.PUSH_CHANNELS`**（112 W-B · A1）。
 # `fish.PUSH_CHANNELS` 是从 `fish_common` 再导出的同一个对象（不是副本）——测试与
 # 既有调用方继续用这个名字；`fish_push_audit.CHANNELS` 也是同一个对象。
 # 词表里只有实际三词；`hook`/`situational` 两个历史词各自来自另一个维度
@@ -8136,8 +8139,8 @@ def push_stats(conn, days=30, now=None):
     lat = sorted(r[5] for r in rows if r[4] == "accepted" and isinstance(r[5], int))
     median_lat = lat[len(lat) // 2] if lat else None
 
-    # ① 采纳率（唯一实现：`fish_common.accept_rate`；分母 = accepted + ignored）
-    accept_rate = fish_common.accept_rate(accepted, ignored)
+    # ① 采纳率（唯一实现：`fish_push_vocab.accept_rate`；分母 = accepted + ignored）
+    accept_rate = fish_push_vocab.accept_rate(accepted, ignored)
 
     # ② 盲区消除率：推过之后真的读了正文
     cleared = 0
@@ -8187,7 +8190,7 @@ def push_stats(conn, days=30, now=None):
             s["pending"] += 1
     rates = []
     for s in by_session.values():
-        s["accept_rate"] = fish_common.accept_rate(s["accepted"], s["ignored"])
+        s["accept_rate"] = fish_push_vocab.accept_rate(s["accepted"], s["ignored"])
         if s["accept_rate"] is not None:
             rates.append(s["accept_rate"])
     if len(rates) >= 2:
