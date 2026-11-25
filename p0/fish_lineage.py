@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""会话树投影层：节点模型 + 唯一的写原语 + 深度重算 + 防环（113 §2.4 骨架，2026-11-25 · W1）。
+"""会话树投影层：节点模型 + 唯一的写原语 + 深度重算 + 防环 + 回填/对账（113 §2.4/§10）。
 
 > **W2 已填**：`recompute_depth` 落地（113 §3.3），DSH 适配器的真实现进了**叶子模块**
 > `fish_lineage_dsh.py`（`DshLineageAdapter` / `read_header` / `classify` 六判据）。
-> 本模块的 `DshLineageAdapter` 与 `ADAPTERS['dsh']` **仍是 W1 的空壳**：把注册表换掉是
-> W4/W6 的接线动作，而 W1 的判据（`test_lineage_schema.ShellTest`）正是钉"空壳要响"的那条
-> ——`recompute_depth` 一变真，那条判据只保留 `detect_cycles` 与两个适配器。
+> **W6 已填**：`detect_cycles`（walk 求反 → cycle/orphan/conflict 三清单 + 标环）落地（113 §10），
+> 而 `scan` / `report`（历史回填 dry-run + 只读对账）进了**批量层** `fish_lineage_backfill`
+> ——那里要装影子库、`_backups` 快照与报告渲染，塞进本文件会顶破 J4 的 700 行窗口
+> （仓库规矩是「先抽层再抬窗口」，先例：W1b 把 DDL 抽成 `fish_lineage_schema`）。
+> 方向是单向的：批量层 import 本模块，**本模块看不见批量层**。
+> 到这里本模块**没有空壳**了：剩下的 `DshLineageAdapter`/`ADAPTERS` 从来就不是壳——
+> 它们是 W2/W3 的**懒加载真实现**（`_LazyAdapter`），首次调用才 import 叶子模块。
 
 ## 这一波（W1）为什么几乎什么都不"做"
 
 W1 只搭骨架：**一行数据都不写、一个既有查询都不改**（113 §2.1）。所以本模块里
 只有 `upsert_node` 是真实现——它是全仓**唯一**的 `session_lineage` 写口，W2/W3/W6
-都只经由它写投影；其余两项（`detect_cycles` / 两个宿主适配器的壳）**仍是空壳**，
-调用即 `NotImplementedError`（`recompute_depth` 已由 W2 落地）。
+都只经由它写投影。
 
 为什么空壳要"响"而不是返回空结果：返回 `{}` 或 `[]` 会让调用方以为"算过了、没有
 异常"，而 W2/W6 的判据（J-D1 深度重算、J-D3 环）正是靠"算出来的数不对"才会红。
@@ -132,7 +135,7 @@ def identity_key_of(session_key: str) -> str:
 # 向上查询；投影表的读是索引命中，读头是解压 + JSON 解析。但"投影表没填"（W6 回填
 # 之前是常态）不能让继承失效——那正是 W4 必须在 W2 之后、却不能依赖 W6 的原因。
 
-_PARENT_OF_SQL = ("SELECT parent_session FROM session_lineage "
+_PARENT_OF_SQL = ("SELECT parent_session, relation FROM session_lineage "
                   "WHERE host=? AND session_id=? LIMIT 1")
 
 
@@ -140,6 +143,13 @@ def parent_of(conn, host: str, session_id: str):
     """会话 → 裸父 id（判不到 → `None`，**不许兜成 main**）。
 
     三种"判不到"都返回 `None`：会话不存在、宿主头读不出来、宿主没有适配器。
+
+    **W6 起第四种**：这一行是 `relation='cycle'` 的环成员 → 返回 `None`（113 §10.2
+    J-D3 "不参与继承/推送"）。为什么必须在这一处堵：`parent_of` 是继承
+    （`_nearest_identity_ancestor`）、推送目标（`push_target_of`）与 WB hook 反解父
+    三条路的**同一个入口**；只在某一条路上跳过环，另外两条仍会顺着环往下走，
+    而 `ancestor_sessions` 的 `seen` 只能保证"不无限循环"，不能保证"不从环里继承"。
+
     返回值不做任何前缀归一（与 `session_lineage.parent_session` 同口径）。
     """
     sid = str(session_id or "")
@@ -151,6 +161,8 @@ def parent_of(conn, host: str, session_id: str):
     except sqlite3.Error:          # 老库还没建投影表：当成"投影没填"，去读头
         row = None
     if row is not None:
+        if row[1] == "cycle":      # 环成员：对上层表现为"没有父"（不参与继承/推送）
+            return None
         return row[0] or None
     try:
         node = get_adapter(host).resolve(sid)
@@ -283,6 +295,41 @@ def _load_extra(text) -> dict:
     return value if isinstance(value, dict) else {"extra_value": value}
 
 
+#: 读投影行的**唯一列序**：`recompute_depth` / `detect_cycles` 共用（下标写死在这里）。
+#: 0=session_id 1=parent_session 2=relation 3=depth 4=lineage_path 5=depth_host
+#: 6=basis 7=extra —— 两处各写一份 SELECT 时，加列迟早只改一处，另一处静默错位。
+_NODE_COLS = ("session_id, parent_session, relation, depth, lineage_path, depth_host, "
+              "basis, extra")
+
+
+def read_rows(conn: sqlite3.Connection, host: str) -> dict:
+    """`session_id → 行元组`（列序见 `_NODE_COLS`）。表不存在时**不吞**：调用方自己判。"""
+    return {r[0]: r for r in conn.execute(
+        f"SELECT {_NODE_COLS} FROM session_lineage WHERE host = ?", (host,))}
+
+
+#: `_stop_kind` 的四个取值：`root`（走到没父）/ `seed`（fork 种子边，正常停止）/
+#: `orphan`（父指针指向不存在的会话）/ `cycle`（被 `instr` 守卫挡住 = 环）。
+_STOP_KINDS = ("root", "seed", "orphan", "cycle")
+
+
+def _stop_kind(rows: dict, cur: str) -> str:
+    """walk 走到 `cur` 时**为什么停**（113 §3.3 末尾列的三种退化形状 + 正常两种）。
+
+    抽成一个函数的理由不是好看：`recompute_depth` 用"停在哪"决定写不写深度，
+    `detect_cycles` 用"停在哪"把行分进 cycle / orphan 两份清单。两处各写一遍判断，
+    改一处忘一处时，深度和清单会给出**互相矛盾**的结论，而两边单看都"有数据"。
+    """
+    row = rows.get(cur)
+    if row is None:
+        return "orphan"
+    if row[1] is None:
+        return "root"
+    if row[2] == "fork":
+        return "seed"
+    return "cycle"
+
+
 def _lineage_path(depth: int, path: str, session_id: str) -> str:
     """CTE 的 `/A/B/`（**含自己**，守卫要靠它认环）→ 列注释要的**祖先链** `/A`。
 
@@ -318,12 +365,7 @@ def recompute_depth(conn: sqlite3.Connection, host: str) -> dict:
       · `cycles` / `orphans` 两个清单即使为空也要**存在**（"没检测"与"检测到 0"必须可分，
         113 §10.2 J-W6-C 的可观测性要求）。
     """
-    rows = {r[0]: r for r in conn.execute(
-        # 列序：session_id / parent_session / relation / depth / lineage_path /
-        #       depth_host / basis / extra     —— 下面的下标都按这个顺序
-        "SELECT session_id, parent_session, relation, depth, lineage_path, depth_host, "
-        "       basis, extra "
-        "  FROM session_lineage WHERE host = ?", (host,))}
+    rows = read_rows(conn, host)
     observed_at = fish_common.now_utc()
     if not rows:
         return {"host": host, "rows": 0, "updated": 0, "conflicts": 0, "conflict_ids": [],
@@ -345,12 +387,14 @@ def recompute_depth(conn: sqlite3.Connection, host: str) -> dict:
         depth, path, cur = best[sid]
         (_parent, relation, old_depth, old_path, depth_host, basis,
          old_extra) = rows[sid][1:]
-        if cur not in rows:
+        kind = _stop_kind(rows, cur)
+        if kind == "orphan":
             orphans.append(sid)              # 父指针指向一个不存在的会话（孤儿，不是根）
-        elif rows[cur][1] is not None:       # 停止点的父指针还在？
-            if rows[cur][2] != "fork":       # 且停止点不是 fork ⇒ 被 instr 守卫挡住 = 环
-                cycles.append(sid)
-                continue
+        elif kind == "cycle":
+            # 停止点有父且不是 fork ⇒ 被 instr 守卫挡住 = 环。环上没有可用深度（W6 才给它标
+            # `relation='cycle'`，本函数只**列名报告**、**不写深度**、也不碰 basis）
+            cycles.append(sid)
+            continue
         lineage_path = _lineage_path(depth, path, sid)
         max_depth = max(max_depth, depth)
 
@@ -385,13 +429,139 @@ def recompute_depth(conn: sqlite3.Connection, host: str) -> dict:
             "walk_rows": len(walk), "observed_at": observed_at}
 
 
-def detect_cycles(conn: sqlite3.Connection, host: str) -> dict:
-    """**W6 落地**（113 §10.1 步 4 / J-D3）：walk 求反 → `cycle` / `orphan` 两份清单。
+# ================================================================ W6 · 检测（三份清单）
+#
+# 113 §10.2 的三份清单（J-W6-C）：cycle / orphan / conflict。**清单本身就是判据**——
+# 所以三件事必须同时成立：① 三份清单永远存在（空也是空列表）；② 交给 `format_report`
+# 时**空清单也要打印"本次检测到 0 行"**（否则"没打印"与"没检测"不可分）；③ 环上的行
+# 真的被标成 `relation='cycle'` 且**不参与继承/推送**（`parent_of` 在环上返回 None）。
 
-    W1 明说不引入环风险（113 §2.8）：本波不写行，也就没有环可检。
+#: 环标记的唯一写入点：`relation='cycle'` + `basis='conflict'`，原值存进 `extra`（可逆）。
+_MARK_CYCLE_SQL = ("UPDATE session_lineage SET relation='cycle', basis='conflict', extra=:extra "
+                   "WHERE host=:host AND session_id=:sid")
+
+#: `extra` 里存"标记前原值"的两个键（与 `basis='conflict'` 的 `conflict_from` 同一条纪律）。
+_CYCLE_FROM_KEYS = ("cycle_relation_from", "cycle_basis_from")
+
+
+def _dump_extra(extra: dict) -> str | None:
+    """`extra` dict → 列的 JSON 文本（空 dict 写 NULL：空 `{}` 与"没额外证据"不是一回事）。"""
+    if not extra:
+        return None
+    return json.dumps(extra, ensure_ascii=False, sort_keys=True)
+
+
+def _mark_cycles(conn: sqlite3.Connection, host: str, cycle_ids: list,
+                 rows: dict) -> dict:
+    """把环成员标成 `relation='cycle'` / `basis='conflict'`，并把**原值**存进 `extra`。
+
+    两个方向都要写，缺一半就是"一去不回"的标记：
+
+      · 本轮**在环上**且还没标过 → 标，并把原 `relation`/`basis` 存成
+        `extra.cycle_relation_from` / `cycle_basis_from`（下一轮还原要用）；
+      · 上一轮标过、本轮**已不在环上**（数据被修正）→ 还原并清掉那两个键。
+
+    为什么必须可逆：标记一旦永久，环被拆开之后这些行会永远停在 `cycle/conflict`——
+    "一次性异常"退化成"永久噪音"，而 `basis='conflict'` 的告警价值就被稀释掉了
+    （与 113 §3.3 取舍② 同一条纪律）。
+
+    幂等：已在 `cycle/conflict` 的行不重复写（第二次跑 `marked=[]`）。
     """
-    raise NotImplementedError(
-        "detect_cycles 在 W6 落地（113 §10.1）：W1 只有空壳，一行都不写")
+    marked, restored = [], []
+    wanted = set(cycle_ids)
+    for sid, row in rows.items():
+        relation, basis, extra_text = row[2], row[6], row[7]
+        extra = _load_extra(extra_text)
+        if sid in wanted:
+            if relation == "cycle" and basis == "conflict":
+                continue                                     # 已标记：幂等
+            extra = dict(extra)
+            extra.setdefault(_CYCLE_FROM_KEYS[0], relation)
+            extra.setdefault(_CYCLE_FROM_KEYS[1], basis)
+            conn.execute(_MARK_CYCLE_SQL, {"host": host, "sid": sid,
+                                           "extra": _dump_extra(extra)})
+            marked.append(sid)
+            continue
+        if relation == "cycle" or extra.get(_CYCLE_FROM_KEYS[0]) is not None:
+            extra = dict(extra)
+            relation_from = extra.pop(_CYCLE_FROM_KEYS[0], None)
+            basis_from = extra.pop(_CYCLE_FROM_KEYS[1], None)
+            sets = ["relation = :relation"]
+            params = {"host": host, "sid": sid, "relation": relation_from,
+                      "extra": _dump_extra(extra)}
+            if basis_from is not None:
+                sets.append("basis = :basis")
+                params["basis"] = basis_from
+            sets.append("extra = :extra")
+            conn.execute("UPDATE session_lineage SET " + ", ".join(sets)
+                         + " WHERE host=:host AND session_id=:sid", params)
+            restored.append(sid)
+    return {"marked": marked, "restored": restored}
+
+
+def detect_cycles(conn: sqlite3.Connection, host: str, *, apply: bool = True) -> dict:
+    """**W6 落地**（113 §10.1 步 4 / J-D3）：walk 求反 → cycle / orphan / conflict 三份清单。
+
+    与 `recompute_depth` 共用同一条 walk（`_WALK_SQL`）与同一个停止点判断
+    （`_stop_kind`）——两处各判一遍时，"深度说没事、清单说有环"这种自相矛盾的结论
+    会同时出现在一张报告里，而单看哪一半都"有数据"。
+
+    分类（按停止点，四类只取三类进清单）：
+
+      · 停止点是 `cur not in rows` → **orphan**（父指针指向不存在的会话）。宿主写了
+        这条边，缺的是父那一行；它**不是 main**，W2 的适配器已把它落成
+        `origin='unknown'` / `basis='missing'`（J-D4 的数据面）；
+      · 停止点有父且不是 fork → **cycle**（`instr` 守卫挡住）。环上的行没有可用深度，
+        所以它同时进 conflict 的兄弟清单，但**不写深度**；
+      · 停止点不在上面两类里，而 `depth_host` 与重算深度不等 → **conflict**。
+
+    `apply=True`（缺省）时写环标记（`relation='cycle'` / `basis='conflict'`，见
+    `_mark_cycles`）；`apply=False` 时**一个字节都不写**——`fish lineage report` 与
+    对账工具都走这条路（只读连接上也能安全调用）。
+
+    返回 `{"host","rows","walk_rows","apply","cycles","orphans","conflicts","marked",
+    "restored","max_depth","observed_at"}`。**四份清单即使为空也存在**——这是 J-W6-C
+    的可观测性要求："没检测"与"检测到 0 行"必须可分。
+    """
+    observed_at = fish_common.now_utc()
+    empty = {"host": host, "rows": 0, "walk_rows": 0, "apply": bool(apply),
+             "cycles": [], "orphans": [], "conflicts": [], "marked": [], "restored": [],
+             "max_depth": 0, "observed_at": observed_at}
+    try:
+        rows = read_rows(conn, host)
+    except sqlite3.Error:
+        return empty                        # 老库 / 只读介质：没有投影表 → 检测到 0 行
+    if not rows:
+        return empty
+
+    walk = list(conn.execute(_WALK_SQL, {"host": host}))
+    best: dict[str, tuple] = {}
+    for sid, cur, depth, path in walk:
+        if sid not in best or depth > best[sid][0]:
+            best[sid] = (depth, path, cur)
+
+    cycles, orphans, conflicts = [], [], []
+    max_depth = 0
+    for sid in sorted(best):
+        depth, _path, cur = best[sid]
+        kind = _stop_kind(rows, cur)
+        if kind == "cycle":
+            cycles.append(sid)
+            continue                        # 环上没有可用深度（113 §3.3 末）
+        if kind == "orphan":
+            orphans.append(sid)
+        max_depth = max(max_depth, depth)
+        depth_host = rows[sid][5]
+        if depth_host is not None and depth_host != depth:
+            conflicts.append(sid)
+
+    marks = ({"marked": [], "restored": []} if not apply
+             else _mark_cycles(conn, host, cycles, rows))
+    return {"host": host, "rows": len(rows), "walk_rows": len(walk),
+            "apply": bool(apply), "cycles": cycles, "orphans": orphans,
+            "conflicts": conflicts, "marked": marks["marked"],
+            "restored": marks["restored"], "max_depth": max_depth,
+            "observed_at": observed_at}
 
 
 class _LazyAdapter:
@@ -421,6 +591,18 @@ class _LazyAdapter:
     def scan(self, *, since: str | None = None,
              limit: int | None = None) -> Iterable[SessionNode]:
         return self._get().scan(since=since, limit=limit)
+
+    @property
+    def last_report(self):
+        """最近一次 `scan` 的对账面（DSH 适配器有、WB 没有 → `None`）。
+
+        为什么不复制一份到包装层：对账面是**适配器实例**的状态，复制就会有两份，
+        而 `scan` 每次都会刷新——两份一旦不一致，报告里就会出现"文件数与失败清单对不上"。
+        """
+        try:
+            return getattr(self._get(), "last_report", None)
+        except (ImportError, AttributeError):     # 还没加载 / 该适配器没有对账面
+            return None
 
     def __repr__(self) -> str:      # pragma: no cover
         return f"<LazyLineageAdapter {self.host}>"

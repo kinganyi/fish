@@ -663,6 +663,24 @@ def main():
     sp.add_argument("--token", default=None, help="吊销这条凭证（缺省=吊销当前会话的全部）")
     sp.set_defaults(func=_f.cmd_session_end)
 
+    # 2026-11-25（113 §10 · W6）：会话树历史回填与对账。**默认 dry-run**——
+    # 回填会把规则灌进 1,522 行语料的历史判断，所以"先看报告、再决定写"必须是缺省，
+    # `--apply` 是显式动作（且它会先自动备份，见 `fish_lineage_backfill.scan`）。
+    p = sub.add_parser("lineage", help="会话树回填与对账（scan 默认 dry-run；report 只读）")
+    lsub = p.add_subparsers(dest="lineage_action", required=True)
+
+    lp = lsub.add_parser("scan", help="扫宿主日志回填 session_lineage（缺省只报告，不写库）")
+    lp.add_argument("--host", choices=["dsh", "workbuddy"], default=None,
+                    help="只扫这个宿主（缺省 = 两个都扫）")
+    lp.add_argument("--apply", action="store_true",
+                    help="真的写库（写前自动备份到 data/_backups/）；不加只出报告")
+    lp.set_defaults(func=_f.cmd_lineage)
+
+    lp = lsub.add_parser("report", help="只读对账：行数 / 分布 / cycle / orphan / conflict")
+    lp.add_argument("--host", choices=["dsh", "workbuddy"], default=None,
+                    help="只看这个宿主（缺省 = 两个都看）")
+    lp.set_defaults(func=_f.cmd_lineage)
+
     sp = sess.add_parser("agent", help="为子 agent 签 inherited 凭证（只允许一跳）")
     sp.add_argument("--parent", required=True, help="父会话的 token 明文")
     sp.add_argument("--role", required=True, help="子 agent 的角色（会拼进 session_key）")

@@ -40,6 +40,7 @@ from pathlib import Path
 import fish_activity
 import fish_git_store
 import fish_lineage
+import fish_lineage_backfill
 import fish_naming
 import fish_surface
 from fish_surface import _path_inside, normalize_surface, surface_hit  # noqa: F401 —— 对外仍是 fish 的名字
@@ -8523,6 +8524,23 @@ def cmd_session_tree(args):
         conn.close()
     print(fish_workbench_api.session_tree_text(tree), end="")
     sys.exit(0 if tree.get("rows") else 2)
+
+
+def cmd_lineage(args):
+    """`lineage scan|report`（113 §10 · W6）：回填缺省 dry-run，report 只读。"""
+    conn = connect(Path(args.root))
+    conn.executescript(SCHEMA)
+    migrate(conn)
+    try:
+        print(fish_lineage_backfill.run_cli(
+            conn, getattr(args, "lineage_action", "report"),
+            host=getattr(args, "host", None), apply_scan=getattr(args, "apply", False)), end="")
+    except (KeyError, OSError, sqlite3.Error) as exc:   # 未知宿主 / IO / SQL
+        print(f"错误：{exc}", file=sys.stderr)
+        sys.exit(2)
+    finally:
+        conn.close()
+    sys.exit(0)
 
 
 def cmd_session_end(args):

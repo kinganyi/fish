@@ -390,24 +390,30 @@ class UpsertNodeTest(_TempDb):
 class ShellTest(unittest.TestCase):
     """W1 的"空壳"必须是**响的**：返回假值的空壳会把 W2/W6 的判据变成恒绿。
 
-    W2 落地 `recompute_depth`（113 §3.3）之后，**空壳名单只剩 `detect_cycles`（W6）
-    与两个宿主适配器**——所以这里把"必须还响"的断言收窄到它们，并新增一条**反向**护栏：
-    `recompute_depth` 必须真能跑（在空库上返回 0 行 0 改动）。少了这条反向断言，有人把它
-    改回 `raise` 时 J-D1（四层链 0/1/2/3）会整条变绿，而本文件不会有任何反应。
+    这条判据**反向读过三次历史**：W1 钉 `recompute_depth`；W2 把它填上后收窄到
+    `detect_cycles` 与两个适配器；W6（113 §10）把最后两个空壳也填上了——
+    所以"必须抛 NotImplementedError"这一半到此**收口**，只留**反向护栏**：
+    空库上两个函数都必须真能跑，并各自报 0 行 / 0 改动 / 三份空清单。
+
+    留成"必须抛"会把 W6 的落地本身判成红——判据跟着施工进度收窄，而不是反过来
+    拦住施工（113 §2.4 的 W1b 先例：窗口只许降，判据同样只许跟着事实走）。
     """
 
-    def test_shells_fail_loudly(self):
-        with self.assertRaises(NotImplementedError):
-            fish_lineage.detect_cycles(None, "dsh")
-        # 反向护栏：W2 已填，它**不许**再是空壳
+    def test_shells_are_gone_and_real(self):
+        # 反向护栏：W2/W6 都已填，它们**不许**再是空壳
         conn = sqlite3.connect(":memory:")
         try:
             conn.executescript(fish.SCHEMA)
             stats = fish_lineage.recompute_depth(conn, "dsh")
+            detected = fish_lineage.detect_cycles(conn, "dsh")
         finally:
             conn.close()
         self.assertEqual((stats["rows"], stats["updated"], stats["conflicts"]), (0, 0, 0),
                          "空库上的重算应当报 0 行 / 0 改动 / 0 冲突")
+        self.assertEqual(
+            (detected["rows"], detected["cycles"], detected["orphans"], detected["conflicts"]),
+            (0, [], [], []),
+            "空库上的检测应当报 0 行 + 三份空清单（**存在但为空**，不是 None）")
         self.assertEqual(sorted(fish_lineage.ADAPTERS), ["dsh", "workbuddy"])
         for host, adapter in fish_lineage.ADAPTERS.items():
             self.assertEqual(adapter.host, host, "适配器的 host 与注册表键不一致")
