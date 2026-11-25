@@ -303,8 +303,9 @@ fish 的判断标准、数据结构与排序算法不是凭空来的。下面按
 | [zstandard](https://github.com/facebook/zstd) | **必需** | 读 zstd 压缩的 DSH 会话日志 | 5 个测试文件顶层 import 失败，被 unittest **静默丢弃**（不是 skip、不是红）——249 条判据凭空消失 |
 | [tiktoken](https://github.com/openai/tiktoken) | 可选 | token 计数（注入包预算） | 回落到"中文≈1.2 token/字"的估算（`fish_common.count_tokens`），不崩 |
 | [Pillow](https://python-pillow.org/) | 可选 | 读图片尺寸写 `kb_asset.width/height` | 返回 `(None, None)`，扫描继续，只是那几行没有尺寸（`fish_dataplane._media_dims`） |
+| [PyYAML](https://pyyaml.org/) | 可选 | 宿主接入层的宽松 YAML 解析（`fish_hosts.py`，`!!js` 标签容错） | 回落到内置极简解析器，只覆盖 fish 需要的子集（`fish_hosts._load_yaml`） |
 
-只有 `zstandard` 进了 `requirements.txt`。另两个是**可选增强**：缺了功能降级，不缺判据。
+只有 `zstandard` 进了 `requirements.txt`。其余是**可选增强**：缺了功能降级，不缺判据。
 
 > **本项目未内嵌（vendor）任何第三方项目代码。** 对上述论文与工程的借鉴是
 > **架构与算法层面**的，不是代码拷贝。核心路径保持纯 stdlib、可离线、可打包。
@@ -318,7 +319,7 @@ fish 的判断标准、数据结构与排序算法不是凭空来的。下面按
 ls p0/research/_raw/*.txt
 #    每篇的来源 URL 与抓取字数见 docs 里 31/32 号文档的 §0「调研语料（可复查）」
 
-# 2. 第三方依赖（2026-11-20 实测：3 个模块，其中只有 zstandard 是必需的）
+# 2. 第三方依赖（2026-11-26 复核：4 个模块——zstandard 必需，tiktoken/Pillow/PyYAML 可选）
 cd p0 && python - <<'PY'
 import ast, os, sys
 stdlib, local = set(sys.stdlib_module_names), {f[:-3] for f in os.listdir(".") if f.endswith(".py")}
@@ -336,7 +337,7 @@ for f in os.listdir("."):
         third |= {x for x in names if x not in stdlib and x not in local and x != "__future__"}
 print("第三方依赖:", sorted(third))
 PY
-# → 第三方依赖: ['PIL', 'tiktoken', 'zstandard']
+# → 第三方依赖: ['PIL', 'tiktoken', 'yaml', 'zstandard']（yaml 只在 fish_hosts 可选导入）
 #   只有 zstandard 必须装（requirements.txt）；另两个缺了功能降级，不减判据
 ```
 
