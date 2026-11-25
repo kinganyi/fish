@@ -10,6 +10,10 @@
 
 判据设计（成对，任一侧失效都会红）：
   R9-1  无合并事件时，rebuild 后 owner 保持原值（对照组，防"无条件改写"）
+  R9-1b **P1-1（2026-11-25 外部审查）**：actor 是 `unattributed` 时，快照里的有效
+        owner **不得被降级**（生产实测 8 条被改写；旧写法 `... or old.get("owner")`
+        把 `"unattributed"` 当成有效覆盖值）。**必须同时断言"这一炉提交了"**——
+        只断言 owner，回滚也能让它保持不变，判据就成了假绿。
   R9-2  有 citizen.merged 事件时，rebuild 后 owner 解析到 dst（核心回归）
   R9-3  citizen.retired{--migrate-to} 同样重放
   R9-4  合并链 A→B→C 解析到 C（链式，与 citizen_merge 的 8 跳上限一致）
@@ -70,6 +74,34 @@ class RebuildMergeReplayTest(unittest.TestCase):
         """
         fish.rebuild_projection(self.conn, self.root)
         self.assertEqual(self._owner(), self.src)
+
+    # --------------------------------------------------------------- R9-1b
+    def test_R9_1b_unattributed_actor_does_not_downgrade_owner(self):
+        """P1-1：actor=`unattributed` 时，快照里的有效 owner **不得**被覆盖。
+
+        这条补的正是 R9-1 漏掉的那一格：R9-1 只覆盖 actor=有效公民，
+        而生产事故（8 条降级）恰恰是 actor=unattributed + 快照有真归属。
+
+        事件表是 append-only（`events are immutable` 触发器），所以不能改写 actor——
+        另造一条无凭证事件即可（真实时序：无凭证写入 → 事后补归属 → rebuild）。
+        """
+        code = "r9-261125-9b"
+        fish.append_event(
+            self.conn, "memory.recorded", {"citizen_id": "unattributed"},
+            {"kind": "memory", "id": code},
+            {"code": code, "title": "无凭证写的那条",
+             "occurred_at": "2026-11-02T00:00:00Z"})
+        fish.rebuild_projection(self.conn, self.root)        # 物化（owner=unknown）
+        self.conn.execute("UPDATE code_index SET owner=? WHERE code=?", (self.src, code))
+        self.conn.commit()
+        rep = fish.rebuild_projection(self.conn, self.root)
+        row = self.conn.execute(
+            "SELECT owner FROM code_index WHERE code=?", (code,)).fetchone()
+        self.assertEqual(row[0], self.src,
+                         "P1-1 回归：unattributed 的 actor 把快照里的 owner 降级了")
+        self.assertNotEqual(row[0], "unattributed")
+        self.assertTrue(rep["applied"],
+                        f"应为一致提交；aborted={rep['aborted']} mismatch={rep['mismatch']}")
 
     # ---------------------------------------------------------------- R9-2
     def test_R9_2_merge_event_replayed(self):

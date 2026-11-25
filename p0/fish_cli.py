@@ -26,6 +26,8 @@ import os
 import sys
 from pathlib import Path
 
+import fish_rebuild as _rebuild   # P1-1：`fish rebuild` 的命令实现（本文件只做装配）
+
 # ## 为什么不在这里 `import fish`
 #
 # 试过，两种运行方式只有一种能活：
@@ -80,6 +82,17 @@ def install(namespace):
     for k, v in namespace.items():
         if not k.startswith("__") and k not in g:
             g[k] = v
+
+
+def _cmd_rebuild(a):
+    """`fish rebuild [--apply]`（P1-1，2026-11-25 外部审查）。
+
+    为什么包装在本文件而实现住 `fish_rebuild`：`fish.py:cmd_rebuild` 本轮被另一路修复
+    锁着，而"缺省 dry-run / `--apply` 才写"必须由**参数层**决定——实现层去偷看
+    `sys.argv` 是最坏的接法（测试无法显式表达意图）。这里只做装配：把 `fish` 命名空间
+    注入给实现（本模块不 import fish 的同一理由，见文件头），退出码 0/2 由实现给。
+    """
+    return _rebuild.cmd_rebuild(a, fish=_f)
 
 
 def main():
@@ -765,7 +778,15 @@ def main():
     p.set_defaults(func=_f.cmd_config)
 
     sub.add_parser("healthcheck").set_defaults(func=_f.cmd_healthcheck)
-    sub.add_parser("rebuild").set_defaults(func=_f.cmd_rebuild)
+    # P1-1（2026-11-25 外部审查）：`fish rebuild` **缺省 dry-run**（跑完全流程后回滚，
+    # 只报"将会变动的行"），写必须 `--apply`。命令实现住在 `fish_rebuild`——报告、
+    # 提交/回滚、退出码三件事读的是同一份 `rep`，分开必然漂（本项目"两份实现"的亏
+    # 吃过多次）。本文件只保留"哪个参数对应哪个函数"。
+    p = sub.add_parser("rebuild",
+                       help="从事件重放重建 code_index（缺省 dry-run，只报计划）")
+    p.add_argument("--apply", action="store_true",
+                   help="真的写库（写前备份到 data/_backups/；对账不一致则回滚并退出 2）")
+    p.set_defaults(func=_cmd_rebuild)
     sub.add_parser("reindex").set_defaults(func=_f.cmd_reindex)
 
     # `fish ui serve|dump`（2026-10-28 从生产树移植）：只读读口（给界面用）。

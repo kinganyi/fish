@@ -178,7 +178,10 @@ class AttributionPolicyTest(unittest.TestCase):
         _, before = self._last_owner()
         self.assertEqual(before, "unattributed", "前置：先得有一条无主")
 
-        rc, out = self._cli("rebuild")
+        # P1-1（2026-11-25）：`fish rebuild` 缺省改成 dry-run 了——**这里必须显式
+        # `--apply`**，否则这条判据退化成"演练没改任何东西"的假绿（它守的是维护
+        # 路径会不会制造假归属，演练路径根本不写）。
+        rc, out = self._cli("rebuild", "--apply")
         self.assertEqual(rc, 0, f"rebuild 失败：{out}")
         owner = self._cite("SELECT owner FROM code_index WHERE title='待重建的无主'")[0][0]
         self.assertEqual(owner, "unattributed",
