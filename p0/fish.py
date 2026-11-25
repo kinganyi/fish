@@ -1291,7 +1291,8 @@ def _push_write_channels() -> tuple:
 
 def append_push_log(conn, codes, *, channel, session_key=None, citizen_id=None,
                     project=None, candidate_id=None, budget_tokens=None,
-                    pushed_at=None, content_hash=None, hash_by_code=None) -> int:
+                    pushed_at=None, content_hash=None, hash_by_code=None,
+                    agent_id=None, parent_session=None) -> int:
     """写"这次推送"的日志：一条记忆一行，返回写入行数。
 
     容错边界与 append_access_log 完全一致（**故意的**）：本函数不做 try/except，
@@ -1300,6 +1301,11 @@ def append_push_log(conn, codes, *, channel, session_key=None, citizen_id=None,
 
     project 缺省时按编码回查 code_index.project（与 append_access_log 同一取舍：
     档期机制没落地之前，编码所属项目是当前能给出的最诚实的"当时在哪个项目"）。
+
+    `agent_id` / `parent_session`（113 §6.1 · W4.5）：**这一次投递的目标维度**，
+    与身份（`citizen_id`）正交——一个公民可以有父 + N 个子，投递看的是会话/代理。
+    缺省 `None` = 这次没有这个维度（**旧调用点一律保持缺省**：DSH 宿主根本没有
+    agent id，判不到父也不许编），所以旧行为逐字节等价。
     """
     if isinstance(codes, str):
         codes = [codes]
@@ -1323,13 +1329,55 @@ def append_push_log(conn, codes, *, channel, session_key=None, citizen_id=None,
              project if project is not None else proj.get(c),
              c, candidate_id, channel, budget, ts,
              ((hash_by_code or {}).get(c) or content_hash) if hash_by_code
-             else content_hash) for c in codes]
+             else content_hash, agent_id, parent_session) for c in codes]
     conn.executemany(
         "INSERT INTO push_log (session_key,citizen_id,project,code,candidate_id,channel,"
-        "budget_tokens,pushed_at,content_hash) VALUES (?,?,?,?,?,?,?,?,?)", rows)
+        "budget_tokens,pushed_at,content_hash,agent_id,parent_session) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
     conn.commit()
     return len(rows)
 
+
+def push_gate_no_identity(conn, citizen_id, *, strict_anonymous=False, mode=None) -> bool:
+    """无身份时这次该不该**不推**（`push.no_identity` 的唯一落点，113 §6.2 · W4.5）。
+
+    两档：`skip` = 无身份一律不推；`allow`（默认）= 照旧推 —— 那是**今天 prompt 侧
+    的真实行为**（`test_prompt_push.test_no_identity_gives_no_output` 一直钉着它，
+    而 docstring 曾把"无身份"写成否定条件：501 条 `citizen_id` 为空的 prompt 推送
+    就是这句谎话的代价）。
+
+    `strict_anonymous=True` 给 tool_after 通道（`fish_push_hook.py`）：它**今天就有**
+    "无身份不猜"这条自己的规矩（该文件头第 3 条）。W4.5 的硬约束是"默认值钉在今天
+    的行为"，所以只建开关、不放宽既有闸门——否则 allow 档会把无身份会话的 tool_after
+    推送从"不可能"变成"可能"，那就不是"只多两列"了。
+
+    `mode` 只给**只读回放**用：生产库以 `mode=ro` 打开时 `set_config` 写不进去，
+    而回放要同时看两档的结论。
+    """
+    if citizen_id:
+        return False
+    return (mode or get_config(conn, "push.no_identity")) == "skip" or bool(strict_anonymous)
+
+
+def push_target_of(conn, *, host, session_key, target_mode=None) -> tuple:
+    """这一次推送该记的 `(agent_id, parent_session)`（113 §6.1/§6.3 · W4.5）。
+
+    · `push.target_mode='citizen'`（旧口径）→ `(None, None)`：两列都不写，读侧无感；
+    · `session` 档（默认）→ DSH 写父会话 id。DSH **没有** agent id（110 §3.5.1 规则 2
+      的 `agent_id` 恒 NULL），父只能从投影表/会话头判（`fish_lineage.parent_of`）；
+    · WorkBuddy 本波**一律 NULL**：它的 `session_id` 被宿主改写成父键
+      （`resolveHookSessionId`），真父子要靠 `agent_id` + `transcript_path` 双校正——
+      那是 **W4.6**，W4.5 不猜（宁可不写，不串推）。
+    判不到父 → `None`，**不兜 main**（110 §3.6 的"孤儿诚实"）。
+    """
+    try:
+        # 配置读不进来（老库/只读介质）也只该少两列，不该让这次递送整个消失。
+        if (target_mode or get_config(conn, "push.target_mode")) != "session" or host != "dsh":
+            return None, None
+        return None, fish_lineage.parent_of(conn, host, _session_id_of(session_key))
+    except Exception as exc:       # noqa: BLE001 —— 少一列绝不能影响这次递送
+        warn_ignored("fish.py push_target_of", exc)
+        return None, None
 
 def push_log_rows(conn, code=None, session_key=None, channel=None, reaction=_UNSET,
                   limit=200) -> list:
@@ -8857,7 +8905,9 @@ def cmd_prompt_push(args):
     输出：**要递给模型的纯文本**（可以是空串——那就什么都不输出）。
 
     六条否定条件（任一即不推，设计 §6.4）：
-      `push.enabled`/`push.prompt_enabled` 关；无身份；prompt 洗成空；
+      `push.enabled`/`push.prompt_enabled` 关；**无身份且 `push.no_identity=skip`**
+      （`allow` 档照旧推——见 `push_gate_no_identity`，2026-11-25 · W4.5 起与实现同源，
+      在这之前这句话是谎的：实现从不 return）；prompt 洗成空；
       同一 prompt（hook 侧已挡，这里再算一次作为双保险）；
       候选为空；候选全是 24h 内推过的。
 
@@ -8886,6 +8936,9 @@ def cmd_prompt_push(args):
         if not session_key:
             return
         citizen_id = fish_activity.resolve_citizen(conn, session_key)
+        # W4.5（113 §6.2）：无身份是否推由开关决定，**默认 allow = 今天的实现行为**。
+        if push_gate_no_identity(conn, citizen_id):
+            return
         project = None
         cwd = payload.get("cwd") or ""
         if cwd:
@@ -8921,11 +8974,15 @@ def cmd_prompt_push(args):
         sys.stdout.write(text)
         sys.stdout.flush()
         codes = [ln[2:].split(" ", 1)[0] for ln in lines]
+        # W4.5（113 §6.3）：解析父链**一次**（判不到就是 None，不兜 main）。
+        # 不在这里做 WorkBuddy 校正：那是 W4.6，本波只把路由两列写对。
+        agent_id, parent_session = push_target_of(conn, host=host, session_key=session_key)
         try:
             append_push_log(conn, codes, channel="prompt", citizen_id=citizen_id,
                             session_key=session_key, project=project,
                             candidate_id=codes[0] if codes else None,
                             budget_tokens=budget,
+                            agent_id=agent_id, parent_session=parent_session,
                             hash_by_code={c["code"]: c.get("content_hash")
                                           for c in picked})
         except (sqlite3.Error, ValueError) as exc:

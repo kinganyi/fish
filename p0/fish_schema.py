@@ -62,7 +62,9 @@ _PUSH_LOG_DDL = """CREATE TABLE IF NOT EXISTS push_log (
   reaction      TEXT,
   reacted_at    TEXT,
   latency_sec   INTEGER,
-  content_hash  TEXT
+  content_hash  TEXT,
+  agent_id        TEXT,              -- DSH 恒 NULL；WB = 'agent-<uuid>'（113 §6.1 · W4.5）
+  parent_session  TEXT               -- 写下时解析到的父；NULL = 判不到（**不兜 main**）
 );"""
 
 _PUSH_SCHEMA = ("\n" + _ACCESS_LOG_DDL + "\n\n" + _LINKS_DDL
@@ -387,6 +389,10 @@ _PUSH_LOG_COLS = (
     # P0-2 第二段（2026-10-29）：推这份内容时它的指纹。结案（accepted/ignored）
     # 之后只有"当前指纹 != 记录指纹"才允许重推——读过的旧版不再打扰，新版该来。
     ("content_hash", "TEXT"),
+    # 113 §6.1（W4.5）：推送寻址**会话/代理**，不寻址公民。6,344 行旧数据两列 NULL
+    # 是**正确的**——"当时没有这个维度"比编一个值诚实。加列不建旁表：一行推送只写一处。
+    ("agent_id", "TEXT"),
+    ("parent_session", "TEXT"),
 )
 
 _PUSH_LOG_INDEXES = (
@@ -396,6 +402,9 @@ _PUSH_LOG_INDEXES = (
     "CREATE INDEX IF NOT EXISTS ix_push_code ON push_log(code, pushed_at)",
     # 待判行的取数口：read_body 的回填与 daily_report 的收口都只碰这些行
     "CREATE INDEX IF NOT EXISTS ix_push_reaction ON push_log(reaction) WHERE reaction IS NULL",
+    # 代理维的取数口（113 §6.1）：DSH 行恒 NULL，部分索引直接把它们排除在索引外
+    "CREATE INDEX IF NOT EXISTS ix_push_agent ON push_log(agent_id) "
+    "WHERE agent_id IS NOT NULL",
 )
 
 AUDIT_DIR_NAME = "_audit"

@@ -194,8 +194,12 @@ FISH_REBUILD_LINES_MAX = 565
 # W1b 按 `fish_git_schema` 的先例把会话树 DDL 抽成纯常量叶子 `fish_lineage_schema`：
 # 75 行搬走、本文件只留 1 行 import，实测回到 **700**（= W1 之前，持平）。
 # 判据没变：下界守「搬漏了」，上界守「长回去了」。
+# 2026-11-25（113 W4.5 · 推送路由）：700 → **712**。这一波**只加表结构**，不加逻辑：
+# `push_log` 两列（`agent_id` / `parent_session`）+ 一条部分索引 `ix_push_agent`（113 §6.1
+# 明文要求那三行 SQL），实测 708。这不是"又长回去了"——DDL 常量正是本模块的唯一职责，
+# 往别处塞才是制造第二处表结构。余量 4 行。
 FISH_SCHEMA_LINES_MIN = 480
-FISH_SCHEMA_LINES_MAX = 700
+FISH_SCHEMA_LINES_MAX = 712
 # 2026-11-11 新模块 · 建表/补列/迁移辅助（20 个 ensure 函数 + 2 个数据常量）。
 # 注意 `migrate` **不在**这里：它是编排者，要调 KB 专属的 ensure，搬走会成上行依赖。
 # F-P1-10（2026-11-18 外部审查）：窗口数字不再写死在测试里，改从

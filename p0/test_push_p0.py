@@ -191,7 +191,10 @@ class FishPushP0Test(unittest.TestCase):
         "channel", "budget_tokens", "pushed_at", "reaction", "reacted_at", "latency_sec",
         # 2026-10-29（P0-2 第二段，内容感知去重）：新增 content_hash。
         # 声明式契约变更——旧库升级也必须补上这列（test_L 钉住 upgrade 路径）。
-        "content_hash"}
+        "content_hash",
+        # 2026-11-25（113 W4.5 · 推送路由）：新增 agent_id / parent_session。
+        # 同样是声明式契约变更：旧库走同一条 ALTER 补列路径，旧行两列 NULL。
+        "agent_id", "parent_session"}
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="fish-push-p0-")

@@ -24,6 +24,10 @@
   1. **失败静默**：工具结果是主流程，推送只是锦上添花；任何异常都零输出。
   2. **频率闸前置**（对推送而言）：不到点就返回，**连 fish 都不 import**。
   3. **无身份不猜**：查不到 `session_key` 对应的公民就不推。
+     2026-11-25（113 §6.2 · W4.5）：这条规矩现在由 `push.no_identity` 托管——
+     `skip` 档与 prompt 侧一致（都不推）；`allow` 档**仍然挡**，因为这就是本通道
+     今天的真实行为，而 W4.5 的承诺是"默认值钉在今天"（放宽推送面是 W4.7 之后的事，
+     且那时是往**更严**的方向切）。
 
 配置（`~/.dsh/hooks.json`，由 `install_hooks.py` 生成）：
 ```json
@@ -202,8 +206,11 @@ def _run(argv=None):
 
             key = fish_activity.make_session_key(host, session_id)
             citizen_id = fish_activity.resolve_citizen(conn, key)
-            if not citizen_id:
-                return                     # 无身份不猜
+            # 无身份不猜（W4.5 · 113 §6.3 "同一口径"）：`strict_anonymous=True` 是因为
+            # **本通道今天就有这条规矩**（见文件头第 3 条）——W4.5 只建开关、不放宽
+            # 既有闸门；`skip` 档与 prompt 侧完全一致（都挡），`allow` 档维持今天的挡。
+            if fish.push_gate_no_identity(conn, citizen_id, strict_anonymous=True):
+                return
 
             project = None
             try:
@@ -226,10 +233,14 @@ def _run(argv=None):
             # channel 必须是 `append_push_log` 白名单里的值（2026-10-25 实测：
             # 写成 after_tool 会被明确拒绝——有这个校验才没静默写脏数据）。
             try:
+                # W4.5（113 §6.3）：路由两列与 prompt 侧同一口径（`target_mode=session`
+                # 才写；DSH 判父、WB 留给 W4.6）。判不到就是 None，绝不影响递送。
+                _agent_id, _parent = fish.push_target_of(
+                    conn, host=host, session_key=key)
                 fish.append_push_log(
                     conn, [c["code"]], channel="tool_after",
                     citizen_id=citizen_id, session_key=key,
-                    candidate_id=c["code"],
+                    candidate_id=c["code"], agent_id=_agent_id, parent_session=_parent,
                     budget_tokens=int(fish.get_config(conn, "push.after_tool_budget_tokens")))
             except Exception as exc:       # noqa: BLE001
                 _dbg("append_push_log failed: %r" % (exc,))

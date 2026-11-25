@@ -437,6 +437,9 @@ CONFIG_DEFAULTS = {
     "privacy.memory_citizen_isolation": (False, "bool", None),
     # 同会话 24h 内不重复推同一编码（与 _recent_pushed_codes 同一口径）。
     "push.prompt_exclude_hours": (24, "int", None),
+    # 113 §6.2（W4.5）：路由"三开关"里的两个（`push.enabled` 见上）；默认 = 今天的行为。
+    "push.no_identity": ("allow", "enum", ["allow", "skip"]),
+    "push.target_mode": ("session", "enum", ["session", "citizen"]),
 }
 
 _DEFAULT_DECAY = {k: v[0] for k, v in CONFIG_DEFAULTS.items() if k.startswith("decay.")}
