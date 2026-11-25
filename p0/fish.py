@@ -1199,21 +1199,23 @@ def supersede_memory(conn, old_code: str, new_code: str, reason: str = "",
                 f"下一步：当前结论请看 {actual_by}；若要以 {new_code} 为权威版本，"
                 f"请对 {actual_by} 再调一次 supersede（形成 {old_code}→{actual_by}→{new_code} 的链）。")
 
-    conn.execute("UPDATE code_index SET status='superseded', superseded_by=? WHERE code=?",
-                 (new_code, old_code))
-    conn.commit()
-    append_event(conn, "memory.superseded",
-                 {"citizen_id": actor or "unknown", "evidence_level": "machine"},
-                 {"kind": "memory", "id": old_code},
-                 {"old": old_code, "new": new_code, "reason": reason})
-    # 双写 links（13 §2.2「supersedes：已有 superseded_by 列 → 双写」）。
-    # 方向与 code_index.superseded_by 同向：**被替代者 → 替代者**，同一事实两种存储。
-    # 单独兜异常：状态已经写成功了，建边失败不能让人以为"替代没生效"。
     try:
-        add_link(conn, old_code, new_code, "supersedes", "explicit", 1.0,
-                 reason or "被新记录替代")
-    except Exception as exc:      # 取代边丢了 → 出声（静默清零）
-        warn_derived(conn, "add_link(supersedes)", exc)
+        conn.execute("UPDATE code_index SET status='superseded', superseded_by=? WHERE code=?",
+                     (new_code, old_code))
+        append_event(conn, "memory.superseded",
+                     {"citizen_id": actor or "unknown", "evidence_level": "machine"},
+                     {"kind": "memory", "id": old_code},
+                     {"old": old_code, "new": new_code, "reason": reason}, commit=False)
+        # 双写 links（13 §2.2「supersedes：已有 superseded_by 列 → 双写」）。
+        # 方向与 code_index.superseded_by 同向：**被替代者 → 替代者**，同一事实两种存储。
+        # 单独兜异常：状态已经写成功了，建边失败不能让人以为"替代没生效"。
+        try:
+            add_link(conn, old_code, new_code, "supersedes", "explicit", 1.0,
+                     reason or "被新记录替代", commit=False)
+        except Exception as exc:      # 取代边丢了 → 出声（静默清零）
+            warn_derived(conn, "add_link(supersedes)", exc)
+        conn.commit()
+    except Exception: conn.rollback(); raise
     return f"{old_code} 已标记为被 {new_code} 替代"
 
 
@@ -1233,19 +1235,21 @@ def record_access(conn, codes, source, *, counted=True, actor=None):
     if not codes:
         return 0
     ts = now_utc()
-    if counted:
-        conn.executemany(
-            "UPDATE code_index SET last_accessed_at=?, access_count=COALESCE(access_count,0)+1, "
-            "dormant=0 WHERE code=?", [(ts, c) for c in codes])
-    else:
-        conn.executemany(
-            "UPDATE code_index SET last_accessed_at=?, dormant=0 WHERE code=?",
-            [(ts, c) for c in codes])
-    conn.commit()
-    append_event(conn, "memory.accessed",
-                 {"citizen_id": actor or "unknown", "evidence_level": "machine"},
-                 {"kind": "memory", "id": codes[0] if len(codes) == 1 else "*"},
-                 {"codes": codes, "source": source, "counted": bool(counted)})
+    try:
+        if counted:
+            conn.executemany(
+                "UPDATE code_index SET last_accessed_at=?, access_count=COALESCE(access_count,0)+1, "
+                "dormant=0 WHERE code=?", [(ts, c) for c in codes])
+        else:
+            conn.executemany(
+                "UPDATE code_index SET last_accessed_at=?, dormant=0 WHERE code=?",
+                [(ts, c) for c in codes])
+        append_event(conn, "memory.accessed",
+                     {"citizen_id": actor or "unknown", "evidence_level": "machine"},
+                     {"kind": "memory", "id": codes[0] if len(codes) == 1 else "*"},
+                     {"codes": codes, "source": source, "counted": bool(counted)}, commit=False)
+        conn.commit()
+    except Exception: conn.rollback(); raise
     return len(codes)
 
 
@@ -1485,10 +1489,11 @@ LINK_SOURCES = ("explicit", "structural", "semantic", "manual")
 
 
 def add_link(conn, src, dst, rel, source="explicit", weight=1.0, evidence=None,
-             created_at=None) -> bool:
+             created_at=None, *, commit=True) -> bool:
     """建一条单向边 src→dst。返回 True=新建 / False=已存在（幂等）。
 
     幂等靠 UNIQUE(src,dst,rel) + INSERT OR IGNORE：同一对、同一关系重复生成不叠加。
+    `commit=False` 供调用方把"业务写 + 事件 + 边"组成同一个事务（P1-2）。
     """
     if not src or not dst:
         raise ValueError("边的两端都必须是编码")
@@ -1503,7 +1508,8 @@ def add_link(conn, src, dst, rel, source="explicit", weight=1.0, evidence=None,
         "INSERT OR IGNORE INTO links (src,dst,rel,source,weight,evidence,created_at) "
         "VALUES (?,?,?,?,?,?,?)",
         (src, dst, rel, source, w, evidence, created_at or now_utc()))
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.rowcount > 0
 
 
@@ -1854,14 +1860,16 @@ def link_alias(conn, kind, from_name, to_name, *, actor=None, reason="") -> dict
     if _walk_alias(_alias_map(conn, kind), t)[0] == f:
         raise ValueError(f"会成环：{f} → {t} → … → {f}")
 
-    conn.execute(
-        "INSERT INTO name_aliases (kind,from_name,to_name,created_at,created_by,reason) "
-        "VALUES (?,?,?,?,?,?)", (kind, f, t, now_utc(), actor, reason or ""))
-    conn.commit()
-    append_event(conn, "name.alias_linked",
-                 {"citizen_id": actor, "evidence_level": "self-reported"},
-                 {"kind": kind, "id": f},
-                 {"from": f, "to": t, "reason": reason or ""})
+    try:
+        conn.execute(
+            "INSERT INTO name_aliases (kind,from_name,to_name,created_at,created_by,reason) "
+            "VALUES (?,?,?,?,?,?)", (kind, f, t, now_utc(), actor, reason or ""))
+        append_event(conn, "name.alias_linked",
+                     {"citizen_id": actor, "evidence_level": "self-reported"},
+                     {"kind": kind, "id": f},
+                     {"from": f, "to": t, "reason": reason or ""}, commit=False)
+        conn.commit()
+    except Exception: conn.rollback(); raise
     return {"kind": kind, "from": f, "to": t, "created": True}
 
 
@@ -1876,16 +1884,18 @@ def unlink_alias(conn, kind, from_name, *, actor=None, reason="") -> bool:
     f = (from_name or "").strip()
     if not f:
         return False
-    cur = conn.execute("DELETE FROM name_aliases WHERE kind=? AND from_name=?",
-                       (kind, f))
-    conn.commit()
-    if not cur.rowcount:
-        return False
-    append_event(conn, "name.alias_unlinked",
-                 {"citizen_id": actor, "evidence_level": "self-reported"},
-                 {"kind": kind, "id": f},
-                 {"from": f, "reason": reason or ""})
-    return True
+    try:
+        cur = conn.execute("DELETE FROM name_aliases WHERE kind=? AND from_name=?",
+                           (kind, f))
+        deleted = bool(cur.rowcount)
+        if deleted:
+            append_event(conn, "name.alias_unlinked",
+                         {"citizen_id": actor, "evidence_level": "self-reported"},
+                         {"kind": kind, "id": f},
+                         {"from": f, "reason": reason or ""}, commit=False)
+        conn.commit()
+    except Exception: conn.rollback(); raise
+    return deleted
 
 
 def build_links_on_write(conn, code, *, title="", body="", cause=None) -> dict:
@@ -3074,12 +3084,14 @@ def withdraw_memory(conn, code: str, reason: str = "", actor=None) -> str:
         raise ValueError(
             f"{code} 已被 supersede（有替代者）。取代与作废是两种语义："
             f"要作废请先确认那条替代链是否也要处理。")
-    conn.execute("UPDATE code_index SET status='withdrawn' WHERE code=?", (code,))
-    conn.commit()
-    append_event(conn, "memory.retired",
-                 {"citizen_id": actor or "unknown", "evidence_level": "machine"},
-                 {"kind": "memory", "id": code},
-                 {"code": code, "status": "withdrawn", "reason": reason})
+    try:
+        conn.execute("UPDATE code_index SET status='withdrawn' WHERE code=?", (code,))
+        append_event(conn, "memory.retired",
+                     {"citizen_id": actor or "unknown", "evidence_level": "machine"},
+                     {"kind": "memory", "id": code},
+                     {"code": code, "status": "withdrawn", "reason": reason}, commit=False)
+        conn.commit()
+    except Exception: conn.rollback(); raise
     return f"{code} 已作废（withdrawn，编码不回收）"
 
 
@@ -3132,13 +3144,15 @@ def set_owner(conn, citizen_id):
         raise ValueError(
             f"主人必须是 resident 形态（{name} 当前是 {kind}）。"
             "若确需，请先把它改为 resident。")
-    conn.execute("UPDATE citizens SET is_owner=0 WHERE is_owner=1")
-    conn.execute("UPDATE citizens SET is_owner=1 WHERE citizen_id=?", (citizen_id,))
-    conn.commit()
-    append_event(conn, "config.changed",
-                 {"citizen_id": "system", "evidence_level": "signed"},
-                 {"kind": "citizen", "id": citizen_id},
-                 {"key": "owner", "new_value": citizen_id})
+    try:
+        conn.execute("UPDATE citizens SET is_owner=0 WHERE is_owner=1")
+        conn.execute("UPDATE citizens SET is_owner=1 WHERE citizen_id=?", (citizen_id,))
+        append_event(conn, "config.changed",
+                     {"citizen_id": "system", "evidence_level": "signed"},
+                     {"kind": "citizen", "id": citizen_id},
+                     {"key": "owner", "new_value": citizen_id}, commit=False)
+        conn.commit()
+    except Exception: conn.rollback(); raise
     return name
 
 
@@ -3990,7 +4004,7 @@ def touch_citizen(conn, citizen_id, *, at=None) -> int:
 
 def find_or_create_session_citizen(conn, *, session_key, evidence, host, display_name,
                                    account_id=None, kind="visitor", role=None,
-                                   identity_origin="direct") -> dict:
+                                   identity_origin="direct", commit=True) -> dict:
     """按会话标识找活跃公民（两级解析）；没有就建。返回 dict（含 created 标记）。
 
     **这是幂等的全部实现**（18 §10：token 丢了重跑 start → 公民不变、凭证换新）。
@@ -4035,7 +4049,7 @@ def find_or_create_session_citizen(conn, *, session_key, evidence, host, display
                  {"kind": "citizen", "id": citizen_id},
                  {"display_name": display_name, "kind": kind, "role": role,
                   "host": host, "host_session_key": session_key,
-                  "account_id": account_id, "via": "session.start"})
+                  "account_id": account_id, "via": "session.start"}, commit=commit)
     return {"citizen_id": citizen_id, "created": True, "display_name": display_name,
             "account_id": account_id, "archived": False}
 
@@ -4211,16 +4225,18 @@ def set_workspace_mapping(conn, path, project, *, note=None) -> dict:
     clean_note = (note or "").strip() or None
     existed = conn.execute(
         "SELECT 1 FROM workspace_map WHERE path_prefix=?", (prefix,)).fetchone()
-    conn.execute(
-        "INSERT INTO workspace_map (path_prefix, project, note, created_at) "
-        "VALUES (?,?,?,?) "
-        "ON CONFLICT(path_prefix) DO UPDATE SET project=excluded.project, note=excluded.note",
-        (prefix, name, clean_note, now_utc()))
-    conn.commit()
-    append_event(conn, "workspace.mapped",
-                 {"citizen_id": "system", "evidence_level": "signed"},
-                 {"kind": "workspace", "id": prefix},
-                 {"project": name, "note": clean_note, "created": not bool(existed)})
+    try:
+        conn.execute(
+            "INSERT INTO workspace_map (path_prefix, project, note, created_at) "
+            "VALUES (?,?,?,?) "
+            "ON CONFLICT(path_prefix) DO UPDATE SET project=excluded.project, note=excluded.note",
+            (prefix, name, clean_note, now_utc()))
+        append_event(conn, "workspace.mapped",
+                     {"citizen_id": "system", "evidence_level": "signed"},
+                     {"kind": "workspace", "id": prefix},
+                     {"project": name, "note": clean_note, "created": not bool(existed)}, commit=False)
+        conn.commit()
+    except Exception: conn.rollback(); raise
     return {"path_prefix": prefix, "project": name, "note": clean_note,
             "created": not bool(existed)}
 
@@ -4238,13 +4254,16 @@ def remove_workspace_mapping(conn, path) -> bool:
     prefix = normalize_workspace_path(path)
     if not prefix:
         raise ValueError("路径不能为空")
-    cur = conn.execute("DELETE FROM workspace_map WHERE path_prefix=?", (prefix,))
-    conn.commit()
-    if cur.rowcount:
-        append_event(conn, "workspace.unmapped",
-                     {"citizen_id": "system", "evidence_level": "signed"},
-                     {"kind": "workspace", "id": prefix}, {"removed": True})
-    return bool(cur.rowcount)
+    try:
+        cur = conn.execute("DELETE FROM workspace_map WHERE path_prefix=?", (prefix,))
+        removed = bool(cur.rowcount)
+        if removed:
+            append_event(conn, "workspace.unmapped",
+                         {"citizen_id": "system", "evidence_level": "signed"},
+                         {"kind": "workspace", "id": prefix}, {"removed": True}, commit=False)
+        conn.commit()
+    except Exception: conn.rollback(); raise
+    return removed
 
 
 def _workspace_path_from_text(raw) -> str:
@@ -4605,48 +4624,50 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
     # `--citizen` 让调用方把这条会话**直接绑到已存在的公民**上，是那个问题的显式出口。
     # S-01（安全审计 2026-10-28）：证明逻辑在 `_prove_citizen_binding`（与 ensure 共用）。
     forced = (citizen or "").strip() if isinstance(citizen, str) else citizen
-    if forced:
-        who = _forced_citizen(conn, forced, session_key=ident["session_key"],
-                              bind_token=bind_token, account_id=account_id)
-    else:
-        who = find_or_create_session_citizen(
-            conn, session_key=ident["session_key"], evidence=ident["evidence"],
-            host=ident["host"], display_name=display_name, account_id=account_id,
-            kind=kind, role=role)
-        # 2026-10-29（外部审查 🔴1）：`self:` 认领**不再**要求证明——`session_key` 就是
-        # "同一个会话"（重跑 start 幂等由 J7/T3 钉死；接管洞在显式 `citizen=`）。P2-6#1：
-        # 原先这里还有一个 `and False:` 死分支（里面调证明），已删。
-    # 轮换：同一会话的新凭证生效时，旧的活凭证立即作废。
-    # 为什么轮换而不是"留着"：重跑 start 的语义是"拿到一条新的、能用的凭证"，
-    # 留着旧的意味着泄露面随时间只增不减；轮换后任一时刻一个会话只有一条活凭证。
-    # 与 `ensure_session` 的分工见 `rotate_token` 的 docstring。
-    rotated_out = rotate_token(conn, session_key=ident["session_key"],
-                               citizen_id=who["citizen_id"], evidence=ident["evidence"],
-                               channel=ident["channel"], ttl_hours=ttl_hours)
-    rotated, issued = rotated_out["revoked"], rotated_out["issued"]
-    stints = [
-        open_project_stint(conn, who["citizen_id"], name, account_id=account_id,
-                           set_by=f"cli:{ident['evidence']}")
-        for name in project_list
-    ]
-    conn.commit()
-    append_event(
-        conn, "session.opened",
-        {"citizen_id": who["citizen_id"], "evidence_level": ident["evidence"]},
-        {"kind": "citizen", "id": who["citizen_id"]},
-        # 事件里**只有 hash**，没有明文：不可变表会把任何写进去的东西永久留下。
-        {"session_key": ident["session_key"], "evidence": ident["evidence"],
-         "channel": ident["channel"], "host": ident["host"],
-         "account_id": account_id,
-         # project 保持单值口径（只开一个项目时它就是那个项目，多项目时为 None），
-         # projects 记全量。两个都写：审计要能回答"这次 start 开了哪几个档期"，
-         # 又不能给只看 project 的旧查询突然塞一个逗号串。
-         "project": project_list[0] if len(project_list) == 1 else None,
-         "projects": project_list,
-         "token_hash": issued["token_hash"], "expires_at": issued["expires_at"],
-         "citizen_created": who["created"], "rotated": rotated,
-         "stint_actions": [{"project": s["project"], "action": s["action"]}
-                           for s in stints]})
+    try:
+        if forced:
+            who = _forced_citizen(conn, forced, session_key=ident["session_key"],
+                                  bind_token=bind_token, account_id=account_id)
+        else:
+            who = find_or_create_session_citizen(
+                conn, session_key=ident["session_key"], evidence=ident["evidence"],
+                host=ident["host"], display_name=display_name, account_id=account_id,
+                kind=kind, role=role, commit=False)
+            # 2026-10-29（外部审查 🔴1）：`self:` 认领**不再**要求证明——`session_key` 就是
+            # "同一个会话"（重跑 start 幂等由 J7/T3 钉死；接管洞在显式 `citizen=`）。P2-6#1：
+            # 原先这里还有一个 `and False:` 死分支（里面调证明），已删。
+        # 轮换：同一会话的新凭证生效时，旧的活凭证立即作废。
+        # 为什么轮换而不是"留着"：重跑 start 的语义是"拿到一条新的、能用的凭证"，
+        # 留着旧的意味着泄露面随时间只增不减；轮换后任一时刻一个会话只有一条活凭证。
+        # 与 `ensure_session` 的分工见 `rotate_token` 的 docstring。
+        rotated_out = rotate_token(conn, session_key=ident["session_key"],
+                                   citizen_id=who["citizen_id"], evidence=ident["evidence"],
+                                   channel=ident["channel"], ttl_hours=ttl_hours)
+        rotated, issued = rotated_out["revoked"], rotated_out["issued"]
+        stints = [
+            open_project_stint(conn, who["citizen_id"], name, account_id=account_id,
+                               set_by=f"cli:{ident['evidence']}")
+            for name in project_list
+        ]
+        append_event(
+            conn, "session.opened",
+            {"citizen_id": who["citizen_id"], "evidence_level": ident["evidence"]},
+            {"kind": "citizen", "id": who["citizen_id"]},
+            # 事件里**只有 hash**，没有明文：不可变表会把任何写进去的东西永久留下。
+            {"session_key": ident["session_key"], "evidence": ident["evidence"],
+             "channel": ident["channel"], "host": ident["host"],
+             "account_id": account_id,
+             # project 保持单值口径（只开一个项目时它就是那个项目，多项目时为 None），
+             # projects 记全量。两个都写：审计要能回答"这次 start 开了哪几个档期"，
+             # 又不能给只看 project 的旧查询突然塞一个逗号串。
+             "project": project_list[0] if len(project_list) == 1 else None,
+             "projects": project_list,
+             "token_hash": issued["token_hash"], "expires_at": issued["expires_at"],
+             "citizen_created": who["created"], "rotated": rotated,
+             "stint_actions": [{"project": s["project"], "action": s["action"]}
+                               for s in stints]}, commit=False)
+        conn.commit()
+    except Exception: conn.rollback(); raise
     # FB-08：签发后查**同名在用公民**。查在签发之后是刻意的——名字不唯一是既定
     # 决策（不合并、不拦），这里只负责让"你可能又建了一个自己"这件事可见。
     same_name = find_same_name_citizens(
@@ -4750,24 +4771,26 @@ def issue_agent_token(conn, *, parent_token, role, ttl_hours=None) -> dict:
     parent = lookup_session_token(conn, parent_token)
     assert_agent_parent_allowed(conn, parent)
     child_key = f"{parent['session_key']}#{role}"
-    issued = issue_session_token(
-        conn, citizen_id=parent["citizen_id"], session_key=child_key,
-        evidence="inherited", channel="parent", parent_hash=parent["token_hash"],
-        ttl_hours=ttl_hours)
-    # 子凭证不能比父凭证活得久：父失效后它就没有根了，留着等于一条无源凭证。
-    if parent["expires_at"] and issued["expires_at"] and \
-            issued["expires_at"] > parent["expires_at"]:
-        conn.execute("UPDATE session_tokens SET expires_at=? WHERE token_hash=?",
-                     (parent["expires_at"], issued["token_hash"]))
-        issued["expires_at"] = parent["expires_at"]
-    conn.commit()
-    append_event(
-        conn, "session.agent_issued",
-        {"citizen_id": parent["citizen_id"], "evidence_level": "inherited"},
-        {"kind": "citizen", "id": parent["citizen_id"]},
-        {"parent_token_hash": parent["token_hash"], "session_key": child_key,
-         "role": role, "evidence": "inherited", "channel": "parent",
-         "token_hash": issued["token_hash"], "expires_at": issued["expires_at"]})
+    try:
+        issued = issue_session_token(
+            conn, citizen_id=parent["citizen_id"], session_key=child_key,
+            evidence="inherited", channel="parent", parent_hash=parent["token_hash"],
+            ttl_hours=ttl_hours)
+        # 子凭证不能比父凭证活得久：父失效后它就没有根了，留着等于一条无源凭证。
+        if parent["expires_at"] and issued["expires_at"] and \
+                issued["expires_at"] > parent["expires_at"]:
+            conn.execute("UPDATE session_tokens SET expires_at=? WHERE token_hash=?",
+                         (parent["expires_at"], issued["token_hash"]))
+            issued["expires_at"] = parent["expires_at"]
+        append_event(
+            conn, "session.agent_issued",
+            {"citizen_id": parent["citizen_id"], "evidence_level": "inherited"},
+            {"kind": "citizen", "id": parent["citizen_id"]},
+            {"parent_token_hash": parent["token_hash"], "session_key": child_key,
+             "role": role, "evidence": "inherited", "channel": "parent",
+             "token_hash": issued["token_hash"], "expires_at": issued["expires_at"]}, commit=False)
+        conn.commit()
+    except Exception: conn.rollback(); raise
     return {"token": issued["token"], "token_hash": issued["token_hash"],
             "citizen_id": parent["citizen_id"], "session_key": child_key,
             "role": role, "evidence": "inherited", "channel": "parent",
@@ -4898,100 +4921,102 @@ def ensure_session(conn, *, session_key, host, evidence, display_name=None,
     inherited_from = (found or {}).get("inherited_from")
     created = False
     account_id = (found or {}).get("account_id") or account_id
-    if found is not None and (found or {}).get("identity_origin") is None:
-        # 老库的第二级命中（`citizens.host_session_key` 有、`session_identity` 没有）：
-        # 补一行 direct 投影。这是**一次性回填**，也是"第三级解析以后能查到它"的前提。
-        _write_session_identity(conn, key, citizen_id, origin="direct",
-                                inherited_from=None, evidence=evidence)
-    ancestor_key = None
-    if citizen:
-        # 显式锚**永远优先**（与 `start --citizen` 同语义）：人改了身份锚就该生效，
-        # 不能被"上一次 ensure 写下的投影"顶掉。
-        who = _forced_citizen(conn, (citizen or "").strip(), session_key=key,
-                              bind_token=bind_token, account_id=account_id)
-        citizen_id, origin, inherited_from = who["citizen_id"], "direct", None
-        display_name = who["display_name"]
-        account_id = who.get("account_id") or account_id
-        _write_session_identity(conn, key, citizen_id, origin="direct",
-                                inherited_from=None, evidence="machine")
-    if citizen_id is None:
-        explicit = _explicit_parent_key(key, parent_session)
-        if explicit:
-            # 父证据来自宿主 payload（WB hook 的 `transcript_path`）：不再现读会话头。
-            # 父**没有**身份时就到此为止（下面的 provisional 支）——替父建公民是另一个
-            # 进程的另一条 `ensure`（hook 先 ensure 父再 ensure 子），不在库里顺手造。
-            ancestor_key, hit = explicit, find_session_citizen(conn, explicit)
-        else:
-            ancestor_key, hit = _nearest_identity_ancestor(conn, host=host, session_key=key)
-        if hit is not None:
-            citizen_id, origin = hit["citizen_id"], "inherited"
-            inherited_from = ancestor_key
-            display_name = hit["display_name"]
-            account_id = hit.get("account_id") or account_id
-            _write_session_identity(conn, key, citizen_id, origin="inherited",
-                                    inherited_from=ancestor_key, evidence="inherited")
-        else:
-            # 没有可继承的祖先：**有父链但整链无身份**才是 provisional；
-            # 根会话（判不到父）仍是 direct —— 那是今天就在走的机器事实路径。
-            # `agent_id` 是第四个"有父"信号：宿主说这是子代理，只是真判不到父是谁
-            # （payload 里没有可反解的 transcript_path）→ provisional，**不许**造 machine。
-            has_parent = bool(explicit) or bool(agent_id) or bool(
-                fish_lineage.ancestor_sessions(conn, host, _session_id_of(key)))
-            origin = "provisional" if has_parent else "direct"
-            who = find_or_create_session_citizen(
-                conn, session_key=key,
-                evidence="provisional" if origin == "provisional" else evidence,
-                host=host, display_name=display_name, account_id=account_id,
-                kind=kind, role=role, identity_origin=origin)
-            citizen_id, created = who["citizen_id"], who["created"]
+    try:
+        if found is not None and (found or {}).get("identity_origin") is None:
+            # 老库的第二级命中（`citizens.host_session_key` 有、`session_identity` 没有）：
+            # 补一行 direct 投影。这是**一次性回填**，也是"第三级解析以后能查到它"的前提。
+            _write_session_identity(conn, key, citizen_id, origin="direct",
+                                    inherited_from=None, evidence=evidence)
+        ancestor_key = None
+        if citizen:
+            # 显式锚**永远优先**（与 `start --citizen` 同语义）：人改了身份锚就该生效，
+            # 不能被"上一次 ensure 写下的投影"顶掉。
+            who = _forced_citizen(conn, (citizen or "").strip(), session_key=key,
+                                  bind_token=bind_token, account_id=account_id)
+            citizen_id, origin, inherited_from = who["citizen_id"], "direct", None
             display_name = who["display_name"]
-    # ---- 凭证（唯一的"写"）：有活的就复用，没有才签 ----
-    alive = _alive_session_token(conn, key)
-    revoked = 0        # P1-6：重绑时吊销掉的旧活凭证数（事件与返回都要能看见）
-    token_evidence, token_channel, parent_hash, parent_expires = evidence, channel, None, None
-    if alive is not None and alive["citizen_id"] == citizen_id:
-        issued = None
-        token_source = "existing"
-        issued_at, expires_at = alive["issued_at"], alive["expires_at"]
-        token_evidence, token_channel = alive["evidence"], alive["channel"]
-    else:
-        # P1-6（2026-11-25）：**重绑不是重跑**——旧活凭证必须当场吊销，否则同一会话键有两条活凭证。
-        revoked = revoke_session_tokens(conn, session_key=key) if alive is not None else 0
-        if origin == "inherited":
-            ancestor_key = ancestor_key or inherited_from
-            token_evidence, token_channel, parent_hash, parent_expires = \
-                _inherited_token_shape(conn, ancestor_key, channel=channel)
-        elif origin == "provisional":
-            token_evidence = "provisional"
-        issued = issue_session_token(
-            conn, citizen_id=citizen_id, session_key=key, evidence=token_evidence,
-            channel=token_channel, parent_hash=parent_hash, ttl_hours=ttl_hours)
-        if parent_hash and parent_expires and issued["expires_at"] is not None \
-                and issued["expires_at"] > parent_expires:
-            # 子凭证不能比父凭证活得久（与 issue_agent_token 同一条纪律）
-            conn.execute("UPDATE session_tokens SET expires_at=? WHERE token_hash=?",
-                         (parent_expires, issued["token_hash"]))
-            issued["expires_at"] = parent_expires
-        token_source = "issued"
-        issued_at, expires_at = issued["issued_at"], issued["expires_at"]
-    stints = [
-        open_project_stint(conn, citizen_id, name, account_id=account_id,
-                           set_by=f"ensure:{origin}")
-        for name in project_list
-    ]
-    conn.commit()
-    append_event(
-        conn, "session.ensured",
-        {"citizen_id": citizen_id, "evidence_level": token_evidence},
-        {"kind": "citizen", "id": citizen_id},
-        # 事件里**只有 hash**，没有明文（凭证纪律：不可变表会永久留下写进去的东西）
-        {"session_key": key, "host": host, "identity_origin": origin,
-         "inherited_from": inherited_from, "evidence": token_evidence,
-         "channel": token_channel, "token_source": token_source,
-         "token_hash": (issued or {}).get("token_hash"), "expires_at": expires_at,
-         "revoked": revoked, "citizen_created": created, "projects": project_list,
-         "stint_actions": [{"project": s["project"], "action": s["action"]}
-                           for s in stints]})
+            account_id = who.get("account_id") or account_id
+            _write_session_identity(conn, key, citizen_id, origin="direct",
+                                    inherited_from=None, evidence="machine")
+        if citizen_id is None:
+            explicit = _explicit_parent_key(key, parent_session)
+            if explicit:
+                # 父证据来自宿主 payload（WB hook 的 `transcript_path`）：不再现读会话头。
+                # 父**没有**身份时就到此为止（下面的 provisional 支）——替父建公民是另一个
+                # 进程的另一条 `ensure`（hook 先 ensure 父再 ensure 子），不在库里顺手造。
+                ancestor_key, hit = explicit, find_session_citizen(conn, explicit)
+            else:
+                ancestor_key, hit = _nearest_identity_ancestor(conn, host=host, session_key=key)
+            if hit is not None:
+                citizen_id, origin = hit["citizen_id"], "inherited"
+                inherited_from = ancestor_key
+                display_name = hit["display_name"]
+                account_id = hit.get("account_id") or account_id
+                _write_session_identity(conn, key, citizen_id, origin="inherited",
+                                        inherited_from=ancestor_key, evidence="inherited")
+            else:
+                # 没有可继承的祖先：**有父链但整链无身份**才是 provisional；
+                # 根会话（判不到父）仍是 direct —— 那是今天就在走的机器事实路径。
+                # `agent_id` 是第四个"有父"信号：宿主说这是子代理，只是真判不到父是谁
+                # （payload 里没有可反解的 transcript_path）→ provisional，**不许**造 machine。
+                has_parent = bool(explicit) or bool(agent_id) or bool(
+                    fish_lineage.ancestor_sessions(conn, host, _session_id_of(key)))
+                origin = "provisional" if has_parent else "direct"
+                who = find_or_create_session_citizen(
+                    conn, session_key=key,
+                    evidence="provisional" if origin == "provisional" else evidence,
+                    host=host, display_name=display_name, account_id=account_id,
+                    kind=kind, role=role, identity_origin=origin, commit=False)
+                citizen_id, created = who["citizen_id"], who["created"]
+                display_name = who["display_name"]
+        # ---- 凭证（唯一的"写"）：有活的就复用，没有才签 ----
+        alive = _alive_session_token(conn, key)
+        revoked = 0        # P1-6：重绑时吊销掉的旧活凭证数（事件与返回都要能看见）
+        token_evidence, token_channel, parent_hash, parent_expires = evidence, channel, None, None
+        if alive is not None and alive["citizen_id"] == citizen_id:
+            issued = None
+            token_source = "existing"
+            issued_at, expires_at = alive["issued_at"], alive["expires_at"]
+            token_evidence, token_channel = alive["evidence"], alive["channel"]
+        else:
+            # P1-6（2026-11-25）：**重绑不是重跑**——旧活凭证必须当场吊销，否则同一会话键有两条活凭证。
+            revoked = revoke_session_tokens(conn, session_key=key) if alive is not None else 0
+            if origin == "inherited":
+                ancestor_key = ancestor_key or inherited_from
+                token_evidence, token_channel, parent_hash, parent_expires = \
+                    _inherited_token_shape(conn, ancestor_key, channel=channel)
+            elif origin == "provisional":
+                token_evidence = "provisional"
+            issued = issue_session_token(
+                conn, citizen_id=citizen_id, session_key=key, evidence=token_evidence,
+                channel=token_channel, parent_hash=parent_hash, ttl_hours=ttl_hours)
+            if parent_hash and parent_expires and issued["expires_at"] is not None \
+                    and issued["expires_at"] > parent_expires:
+                # 子凭证不能比父凭证活得久（与 issue_agent_token 同一条纪律）
+                conn.execute("UPDATE session_tokens SET expires_at=? WHERE token_hash=?",
+                             (parent_expires, issued["token_hash"]))
+                issued["expires_at"] = parent_expires
+            token_source = "issued"
+            issued_at, expires_at = issued["issued_at"], issued["expires_at"]
+        stints = [
+            open_project_stint(conn, citizen_id, name, account_id=account_id,
+                               set_by=f"ensure:{origin}")
+            for name in project_list
+        ]
+        append_event(
+            conn, "session.ensured",
+            {"citizen_id": citizen_id, "evidence_level": token_evidence},
+            {"kind": "citizen", "id": citizen_id},
+            # 事件里**只有 hash**，没有明文（凭证纪律：不可变表会永久留下写进去的东西）
+            {"session_key": key, "host": host, "identity_origin": origin,
+             "inherited_from": inherited_from, "evidence": token_evidence,
+             "channel": token_channel, "token_source": token_source,
+             "token_hash": (issued or {}).get("token_hash"), "expires_at": expires_at,
+             "revoked": revoked, "citizen_created": created, "projects": project_list,
+             "stint_actions": [{"project": s["project"], "action": s["action"]}
+                               for s in stints]}, commit=False)
+        conn.commit()
+    except Exception: conn.rollback(); raise
     same_name = find_same_name_citizens(conn, display_name, citizen_id) if created else []
     return {"token": (issued or {}).get("token"),
             "token_hash": (issued or {}).get("token_hash"),
@@ -5017,37 +5042,39 @@ def end_session(conn, *, token=None, environ=None, reason="session_end") -> dict
     幂等的含义：重复调不报错、不产生新副作用（凭证已是吊销态就只补齐档期与活跃时间）。
     """
     children = 0
-    if token:
-        info = lookup_session_token(conn, token)
-        if info is None:
-            raise ValueError("token 不存在：明文只在签发时输出一次，"
-                             "丢了就重跑 `fish session start`（公民不变，凭证换新）")
-        citizen_id, session_key = info["citizen_id"], info["session_key"]
-        already = bool(info["revoked_at"])
-        revoked = revoke_session_tokens(conn, token_hash=info["token_hash"])
-        # 父会话结束，派生出来的子凭证不该继续有效——它已经失去来源。
-        children = revoke_session_tokens(conn, parent_hash=info["token_hash"])
-    else:
-        ident = build_session_identity(environ=environ)
-        found = find_session_citizen(conn, ident["session_key"])
-        if found is None:
-            raise ValueError(
-                f"当前会话没有登记过公民（session_key={ident['session_key']}）："
-                "先跑 `fish session start`")
-        citizen_id, session_key = found["citizen_id"], ident["session_key"]
-        revoked = revoke_session_tokens(conn, session_key=session_key)
-        # 一条活的都没吊销 = 这个会话早就收过工了。用"实际吊销数"判定，而不是靠另一个标志位，
-        # 这样"重复 end"在两条入口（--token / env）上的语义才是同一个。
-        already = revoked == 0
-    stints = close_open_stints(conn, citizen_id, reason=reason)
-    touch_citizen(conn, citizen_id)
-    conn.commit()
-    append_event(
-        conn, "session.closed",
-        {"citizen_id": citizen_id, "evidence_level": "machine"},
-        {"kind": "citizen", "id": citizen_id},
-        {"session_key": session_key, "revoked": revoked, "children_revoked": children,
-         "stints_closed": stints, "reason": reason, "already_revoked": already})
+    try:
+        if token:
+            info = lookup_session_token(conn, token)
+            if info is None:
+                raise ValueError("token 不存在：明文只在签发时输出一次，"
+                                 "丢了就重跑 `fish session start`（公民不变，凭证换新）")
+            citizen_id, session_key = info["citizen_id"], info["session_key"]
+            already = bool(info["revoked_at"])
+            revoked = revoke_session_tokens(conn, token_hash=info["token_hash"])
+            # 父会话结束，派生出来的子凭证不该继续有效——它已经失去来源。
+            children = revoke_session_tokens(conn, parent_hash=info["token_hash"])
+        else:
+            ident = build_session_identity(environ=environ)
+            found = find_session_citizen(conn, ident["session_key"])
+            if found is None:
+                raise ValueError(
+                    f"当前会话没有登记过公民（session_key={ident['session_key']}）："
+                    "先跑 `fish session start`")
+            citizen_id, session_key = found["citizen_id"], ident["session_key"]
+            revoked = revoke_session_tokens(conn, session_key=session_key)
+            # 一条活的都没吊销 = 这个会话早就收过工了。用"实际吊销数"判定，而不是靠另一个标志位，
+            # 这样"重复 end"在两条入口（--token / env）上的语义才是同一个。
+            already = revoked == 0
+        stints = close_open_stints(conn, citizen_id, reason=reason)
+        touch_citizen(conn, citizen_id)
+        append_event(
+            conn, "session.closed",
+            {"citizen_id": citizen_id, "evidence_level": "machine"},
+            {"kind": "citizen", "id": citizen_id},
+            {"session_key": session_key, "revoked": revoked, "children_revoked": children,
+             "stints_closed": stints, "reason": reason, "already_revoked": already}, commit=False)
+        conn.commit()
+    except Exception: conn.rollback(); raise
     return {"citizen_id": citizen_id, "session_key": session_key,
             "revoked": revoked, "children_revoked": children,
             "stints_closed": stints, "already": already}
@@ -5372,11 +5399,10 @@ def cmd_project_add(args):
         conn.execute(
             "INSERT INTO code_registry (prefix, namespace, last_date, last_seq, status) VALUES (?,?,?,?,?)",
             (args.prefix, args.name, "", 0, "active"))
-        conn.commit()
         append_event(conn, "project.opened",
                      {"citizen_id": "system", "evidence_level": "signed"},
                      {"kind": "project", "id": args.prefix},
-                     {"prefix": args.prefix, "name": args.name})
+                     {"prefix": args.prefix, "name": args.name}, commit=False)
         # 2026-10-25（看板 C 批）：**新项目一开自动出看板**（`09` §8.3 C1 的判据）。
         # 为什么放在 cmd_project_add 而不是 append_event 里：事件层不该知道"看板"这个概念——
         # 事件是不可变事实流，看板是组织层的投影层。让事件层依赖投影层，会污染 ADR-001。
@@ -5387,12 +5413,15 @@ def cmd_project_add(args):
         except Exception as _e:      # noqa: BLE001 —— 见上：不阻断开项目
             print(f"（看板自动创建失败，可稍后 `fish board render --project "
                   f"{args.prefix}` 重建：{_e}）", file=sys.stderr)
+        conn.commit()
         print(f"项目已开立：{args.prefix} ({args.name})")
         hint = format_dup_hint(project_hints=hints)
         if hint:
             print(hint, file=sys.stderr)
     except sqlite3.IntegrityError:
+        conn.rollback()
         print(f"项目已存在：{args.prefix}")
+    except Exception: conn.rollback(); raise
     conn.close()
 
 
@@ -5996,13 +6025,18 @@ def cmd_forgetting(args):
     if to_archive:
         print(f"已归档 {len(to_archive)} 条（仍可按编码召回）")
     if args.apply and to_dormant:
-        conn.executemany("UPDATE code_index SET dormant=1 WHERE code=?", [(c,) for c in to_dormant])
-        conn.commit()
-        for c in to_dormant:
-            append_event(conn, "memory.dormant",
-                         {"citizen_id": "system", "evidence_level": "signed"},
-                         {"kind": "memory", "id": c},
-                         {"code": c, "reason": "decay_below_threshold"})
+        try:
+            conn.executemany("UPDATE code_index SET dormant=1 WHERE code=?",
+                             [(c,) for c in to_dormant])
+            for c in to_dormant:
+                append_event(conn, "memory.dormant",
+                             {"citizen_id": "system", "evidence_level": "signed"},
+                             {"kind": "memory", "id": c},
+                             {"code": c, "reason": "decay_below_threshold"}, commit=False)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         print(f"已标记休眠 {len(to_dormant)} 条，并写入 memory.dormant 事件")
     conn.close()
 
@@ -6064,15 +6098,17 @@ def cmd_citizen_add(args):
         conn.close()
         return
     cid = ulid()
-    conn.execute("INSERT INTO citizens (citizen_id,display_name,kind,role,host,status,created_at) "
-                 "VALUES (?,?,?,?,?,?,?)",
-                 (cid, args.name, args.kind, args.role, args.host, "active", now_utc()))
-    conn.commit()
-    append_event(conn, "citizen.registered",
-                 {"citizen_id": cid, "evidence_level": "machine"},
-                 {"kind": "citizen", "id": cid},
-                 {"display_name": args.name, "kind": args.kind,
-                  "role": args.role, "host": args.host})
+    try:
+        conn.execute("INSERT INTO citizens (citizen_id,display_name,kind,role,host,status,created_at) "
+                     "VALUES (?,?,?,?,?,?,?)",
+                     (cid, args.name, args.kind, args.role, args.host, "active", now_utc()))
+        append_event(conn, "citizen.registered",
+                     {"citizen_id": cid, "evidence_level": "machine"},
+                     {"kind": "citizen", "id": cid},
+                     {"display_name": args.name, "kind": args.kind,
+                      "role": args.role, "host": args.host}, commit=False)
+        conn.commit()
+    except Exception: conn.rollback(); raise
     print(f"{cid}\n{args.name} / {args.kind}")
     conn.close()
 
@@ -7676,13 +7712,15 @@ def fix_owner(conn, code, citizen_id, reason=""):
     if (c[1] or "").lower() != "active" or c[2]:
         raise ValueError(
             f"公民不是活跃态：{citizen_id}（status={c[1]} archived={bool(c[2])}）")
-    conn.execute("UPDATE code_index SET owner=? WHERE code=?", (citizen_id, code))
-    conn.commit()
-    append_event(conn, "memory.owner_fixed",
-                 {"citizen_id": "system", "evidence_level": "signed"},
-                 {"kind": "memory", "id": code},
-                 {"code": code, "old_owner": old, "new_owner": citizen_id,
-                  "reason": reason or ""})
+    try:
+        conn.execute("UPDATE code_index SET owner=? WHERE code=?", (citizen_id, code))
+        append_event(conn, "memory.owner_fixed",
+                     {"citizen_id": "system", "evidence_level": "signed"},
+                     {"kind": "memory", "id": code},
+                     {"code": code, "old_owner": old, "new_owner": citizen_id,
+                      "reason": reason or ""}, commit=False)
+        conn.commit()
+    except Exception: conn.rollback(); raise
     return {"code": code, "old_owner": old, "new_owner": citizen_id,
             "display_name": c[0]}
 

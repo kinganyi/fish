@@ -834,17 +834,22 @@ def set_config(conn, key, value, *, emit_event=True):
     if allowed and str(value) not in allowed:
         raise ValueError(f"{key} 只能是 {allowed}，收到 {value}")
     old = get_config(conn, key)
-    conn.execute(
-        "INSERT INTO config (key,value,type,updated_at) VALUES (?,?,?,?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-        (key, str(value).lower() if isinstance(value, bool) else str(value), typ, now_utc()),
-    )
-    conn.commit()
-    if emit_event:
-        append_event(conn, "config.changed",
-                     {"citizen_id": "system", "evidence_level": "signed"},
-                     {"kind": "config", "id": key},
-                     {"key": key, "old_value": old, "new_value": value})
+    try:
+        conn.execute(
+            "INSERT INTO config (key,value,type,updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, str(value).lower() if isinstance(value, bool) else str(value), typ, now_utc()),
+        )
+        if emit_event:
+            append_event(conn, "config.changed",
+                         {"citizen_id": "system", "evidence_level": "signed"},
+                         {"kind": "config", "id": key},
+                         {"key": key, "old_value": old, "new_value": value},
+                         commit=False)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return value
 
 
