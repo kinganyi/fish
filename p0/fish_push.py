@@ -684,12 +684,12 @@ def build_push_candidates(conn, root, *, citizen_id=None, session_actor=None,
 
     # ── C 态势（15%）：同项目、别的会话最近 10 分钟读过、本会话没读 ──────
     since10 = (now_dt - datetime.timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    rows = conn.execute(
-        "SELECT DISTINCT m.code, c.title FROM memory_access_log m "
+    _vs, _vp = _visibility_sql(conn, citizen_id)   # F-P1-3：标题会进包 → 同一可见性谓词
+    rows = conn.execute("SELECT DISTINCT m.code, c.title FROM memory_access_log m "
         "JOIN code_index c ON c.code = m.code "
-        "WHERE m.accessed_at >= ? AND c.status='active' AND c.dormant=0 "
-        "AND c.project IS ? ORDER BY m.accessed_at DESC LIMIT 8",
-        (since10, project)).fetchall()
+        "WHERE m.accessed_at >= ? AND c.status='active' AND c.dormant=0" + _vs +
+        " AND c.project IS ? ORDER BY m.accessed_at DESC LIMIT 8",
+        [since10] + list(_vp or []) + [project]).fetchall()
     for code, title in rows:
         if code in skip or seen(code):
             continue

@@ -36,8 +36,22 @@
 第二条注入一次真实的搬移失败（让第 2 个文件 move 抛 OSError），然后断言：
 源目录的文件**一个不少**（真回滚了），note 记成 `rolled_back`。
 第一版（没有回滚）在这条上必红——半搬的文件留在目标侧，源侧永久缺失。
+
+## 编号说明（2026-11-25）
+
+文首的 `F-P1-4` 是**上一轮**审查（W2 轮）对"迁移可中断"的编号；本轮外部审查
+（`docs/141`）把"**校验失败不回滚**"单列为 `F-P1-5`。同一个函数、两批判据：
+
+| 编号 | 判的是 | 判据 |
+|---|---|---|
+| F-P1-4（旧） | 搬移**中断**（OSError）要回滚 | `test_interrupted_relocate_*`（`verify=False`） |
+| F-P1-5（本轮） | **哈希校验失败**也要回滚 + 不许卡 `moving` + 拒绝 `dst ⊂ src` | `test_verify_failure_*` / `test_dst_inside_src_*`，全部 `verify=True` |
+
+旧判据全用 `verify=False`，于是"校验失败那条路"此前**一条判据都没有**——
+审查方的原话是"删掉回滚仍全绿"。本轮补的就是这个缺口。
 """
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -219,6 +233,144 @@ class RelocateJournalTest(unittest.TestCase):
                              reason=None, allow_sensitive=False, citizen_id=None,
                              account_id=None, via="test")
         self.assertIn("迁移进行中", str(ctx.exception))
+
+    # ------------------------------------------------------------- F-P1-5：校验失败
+    def _patch_bad_dst_hash(self, dst):
+        """让 `kb_sha256_file` 对**目标侧**路径返回假哈希（源侧基准仍是真的）。
+
+        为什么注入哈希而不是注入 IO：审查方指的缺陷正是"比对结果不一致之后什么都没做"，
+        所以要让**比对本身**失败，而不是让搬移失败——后者走的是另一条（已有回滚的）路径。
+        """
+        import fish_kb
+        real = fish_kb.kb_sha256_file
+        dst_key = os.path.normcase(str(dst))
+
+        def bogus(path):
+            if os.path.normcase(str(path)).startswith(dst_key):
+                return "0" * 64
+            return real(path)
+
+        fish_kb.kb_sha256_file = bogus
+        return real
+
+    def test_verify_failure_rolls_back_everything(self):
+        """**F-P1-5 核心**：哈希校验失败必须回滚——源文件全回、登记不变、note 记 rolled_back。
+
+        旧实现（`fish_kb.py` 校验段直接 `raise`）在这条上必红：
+          · 源目录已空（文件全在目标侧）→ 文件清单断言红；
+          · 登记仍指向源（那是空目录）；
+          · note 卡在 `moving` → 状态断言红，且下一次搬会被守卫永远挡住。
+        """
+        self._seed()
+        before = {p: p.read_bytes() for p in self.src.rglob("*") if p.is_file()}
+        self.assertGreaterEqual(len(before), 3, "种数据没生效")
+        dst = self.root / "目标库"
+
+        real = self._patch_bad_dst_hash(dst)
+        try:
+            with self.assertRaises(K.KBError) as ctx:
+                K.kb_vault_relocate(self.conn, "迁移库", dst,
+                                    move_files=True, dry_run=False, verify=True)
+        finally:
+            import fish_kb
+            fish_kb.kb_sha256_file = real
+
+        msg = str(ctx.exception)
+        self.assertIn("校验失败", msg, f"报错没说是校验失败：{msg[:160]}")
+        self.assertIn("已回滚", msg, "报错必须告诉人现场已经还原（否则只能猜）")
+
+        after = {p: p.read_bytes() for p in self.src.rglob("*") if p.is_file()}
+        self.assertEqual(sorted(after), sorted(before),
+                         f"回滚后源目录的文件清单变了\n  前 {sorted(before)}\n  后 {sorted(after)}")
+        for p, data in before.items():
+            self.assertEqual(after.get(p), data, f"回滚后内容不一致（搬回来的不是原件）：{p}")
+        leftovers = ([str(p) for p in dst.rglob("*") if p.is_file()]
+                     if dst.exists() else [])
+        self.assertEqual(leftovers, [],
+                         f"**源空目标有**：回滚后目标侧还留着文件 → {leftovers}")
+
+        seg = self._note()["relocate"]
+        self.assertEqual(seg["state"], "rolled_back", f"note 没记成 rolled_back：{seg}")
+        self.assertEqual(Path(K.kb_vault_get(self.conn, "迁移库")["path"]).resolve(),
+                         self.src.resolve(), "校验失败却改了登记（指向了没搬完的目标）")
+
+    def test_failed_verify_is_not_stuck_in_moving(self):
+        """回滚之后 note 不许停在 `moving`——否则下一次搬会被守卫**永远**挡住。
+
+        判据判的是"失败可以重试"：同一个库、同一个目标，去掉坏哈希后再搬一次必须成。
+        """
+        self._seed()
+        dst = self.root / "目标库"
+        real = self._patch_bad_dst_hash(dst)
+        try:
+            with self.assertRaises(K.KBError):
+                K.kb_vault_relocate(self.conn, "迁移库", dst,
+                                    move_files=True, dry_run=False, verify=True)
+        finally:
+            import fish_kb
+            fish_kb.kb_sha256_file = real
+
+        # 失败后的状态必须**不是** moving（是 rolled_back / failed 都能接受，但不能卡住）
+        self.assertNotEqual(self._note()["relocate"]["state"], "moving",
+                            "校验失败后 note 卡在 moving：这个库再也搬不动了")
+
+        out = K.kb_vault_relocate(self.conn, "迁移库", dst,
+                                  move_files=True, dry_run=False, verify=True)
+        self.assertEqual(out["verified"], out["files"], "重试后校验没通过")
+        self.assertEqual(self._note()["relocate"]["state"], "done", "重试没记成 done")
+
+    def test_copy_mode_verify_failure_removes_copies(self):
+        """copy 模式的回滚语义不同：源文件还在 → 回滚 = 删掉复制出去的副本。
+
+        这条防的是"把 move 的回滚逻辑照抄到 copy 模式"：那会把源文件再覆盖一遍，
+        而真正该清的副本留在目标侧。
+        """
+        self._seed()
+        before = {p: p.read_bytes() for p in self.src.rglob("*") if p.is_file()}
+        dst = self.root / "目标库"
+        real = self._patch_bad_dst_hash(dst)
+        try:
+            with self.assertRaises(K.KBError):
+                K.kb_vault_relocate(self.conn, "迁移库", dst, copy_files=True,
+                                    dry_run=False, verify=True)
+        finally:
+            import fish_kb
+            fish_kb.kb_sha256_file = real
+
+        after = {p: p.read_bytes() for p in self.src.rglob("*") if p.is_file()}
+        self.assertEqual(sorted(after), sorted(before), "copy 模式回滚把源文件弄丢了")
+        for p, data in before.items():
+            self.assertEqual(after.get(p), data, f"copy 模式回滚改动了源文件内容：{p}")
+        leftovers = ([str(p) for p in dst.rglob("*") if p.is_file()]
+                     if dst.exists() else [])
+        self.assertEqual(leftovers, [], f"copy 模式回滚没清掉复制出去的副本：{leftovers}")
+        self.assertEqual(self._note()["relocate"]["state"], "rolled_back")
+
+    def test_dst_inside_src_is_refused_before_anything_moves(self):
+        """**F-P1-5**：`dst` 落在 `src` 之内必须**动手前**拒绝（dry-run 也拒）。
+
+        为什么不接受"先搬再校验发现"：那种目标让迁移清单边搬边长
+        （`_kb_relocate_plan` 在搬的过程中会扫到刚搬进去的文件），
+        源目录永远删不掉，中途失败时回滚还会把目标侧当成源的一部分。
+        """
+        self._seed()
+        before = sorted(p for p in self.src.rglob("*") if p.is_file())
+        inner = self.src / "新位置"
+        for dry in (True, False):
+            with self.subTest(dry_run=dry):
+                with self.assertRaises(K.KBError) as ctx:
+                    K.kb_vault_relocate(self.conn, "迁移库", inner,
+                                        move_files=True, dry_run=dry)
+                self.assertEqual(ctx.exception.code, "bad_usage")
+                self.assertIn("之内", str(ctx.exception),
+                              f"报错没指出目标在库目录之内：{ctx.exception}")
+        self.assertEqual(sorted(p for p in self.src.rglob("*") if p.is_file()), before,
+                         "被拒绝的搬移动了文件")
+        self.assertFalse(inner.exists(), "被拒绝的搬移建了目标目录")
+        self.assertEqual(Path(K.kb_vault_get(self.conn, "迁移库")["path"]).resolve(),
+                         self.src.resolve(), "被拒绝的搬移改了登记")
+        self.assertNotEqual(K._relocate_state(K.kb_vault_get(self.conn, "迁移库")),
+                            "moving", "被拒绝的搬移留下了 moving 状态")
 
     # ------------------------------------------------------------- 解析器
     def test_relocate_state_does_not_guess(self):

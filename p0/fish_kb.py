@@ -688,7 +688,7 @@ def _relocate_state(vault_row) -> str:
     return str(seg.get("state") or "")
 
 
-def _relocate_journal(src, dst, moved, total, state) -> str:
+def _relocate_journal(src, dst, moved, total, state, *, residue=None) -> str:
     """迁移进度日志（存进 `kb_vault.note`）。
 
     为什么用 `note` 而不是新表：这是一次性运维状态，不是需要查询的业务数据；
@@ -696,12 +696,18 @@ def _relocate_journal(src, dst, moved, total, state) -> str:
     `SELECT note FROM kb_vault` 就够了。
 
     内容固定四项 + 状态字：崩了之后能一眼看出"从哪到哪、搬到第几个、卡在哪一步"。
+
+    `residue`（F-P1-5）：回滚**不完全**时没搬回去的相对路径清单。它只在 state=failed
+    时出现——**失败必须留下可执行的清单**，否则"回滚失败"与"回滚成功"在 note 里长得
+    一样，下一个人只能靠猜。
     """
     import json as _json
-    return _json.dumps({"relocate": {"from": str(src), "to": str(dst),
-                                     "moved": int(moved), "total": int(total),
-                                     "state": state}},
-                       ensure_ascii=False)
+    seg = {"from": str(src), "to": str(dst),
+           "moved": int(moved), "total": int(total),
+           "state": state}
+    if residue:
+        seg["residue"] = [str(r) for r in residue]
+    return _json.dumps({"relocate": seg}, ensure_ascii=False)
 
 
 def kb_vault_relocate(conn, key, new_path, *, move_files=False, copy_files=False,
@@ -727,6 +733,20 @@ def kb_vault_relocate(conn, key, new_path, *, move_files=False, copy_files=False
     搬前算源哈希、搬后算目标哈希，逐文件比对——这是唯一硬证据。
 
     `verify=False` 只给"只改登记、没动文件"的场景用（那时没有可比对的对象）。
+
+    ## 校验失败也必须回滚（F-P1-5，2026-11-25 外部审查）
+
+    旧实现里"搬移中断"有回滚，而"**哈希比对失败**"直接 `raise`：
+    于是源目录已空、目标侧有文件、登记仍指向源、note 卡在 `moving`——四件事同时成立，
+    对外表现是"库突然空了"，而且下一次搬会被 `moving` 守卫永远挡住。
+
+    现在两条失败走**同一条**回滚路径（本函数内那个 `except BaseException` 出口）：
+      · 回滚成功 → note `state=rolled_back`，登记未改（源目录恢复原样，还能接着用）；
+      · 回滚不完全 → note `state=failed` + `relocate.residue` 残留清单
+        （**不得假装成功**：`failed` 是给人看的运维指令）。
+
+    另外 `dst` **落在 `src` 之内**会在动手前被直接拒绝（真实路径的父链比较）：那种目标
+    让迁移清单边搬边长、源目录永远删不掉。
     """
     if move_files and copy_files:
         raise KBError("bad_usage", "move_files 与 copy_files 只能选一个")
@@ -749,6 +769,24 @@ def kb_vault_relocate(conn, key, new_path, *, move_files=False, copy_files=False
         raise KBError("bad_usage", f"新路径必须是绝对路径：{new_path!r}")
     if not src.is_dir():
         raise KBError("not_found", f"当前库路径不存在：{src}")
+    # **F-P1-5（2026-11-25 外部审查）**：`dst` 在 `src` 之内必须**动手前**拒绝。
+    # 否则迁移清单会在搬的过程中不断变长（目标子目录也在源树里），搬完
+    # `src.rmdir()` 永远失败，中途失败时回滚还会把目标侧当成源的一部分。
+    # 判真实路径（`realpath` + 父链比较），不信字符串前缀：`D:\kb` 与 `D:\kb2`
+    # 前缀相同却不是包含关系，大小写/`..`/junction 也会让字符串比较给出错答案。
+    # 解析不了（权限/坏盘）时**不拦**——判不到不等于包含，交给后面的真实搬移去报错。
+    try:
+        _c = Path(os.path.realpath(str(dst)))
+        _inside = _c != Path(os.path.realpath(str(src))) and (
+            Path(os.path.realpath(str(src))) in _c.parents)
+    except OSError:                  # A档：路径解析不了 = 判不到，不借这道门误拦
+        _inside = False
+    if _inside:
+        raise KBError(
+            "bad_usage",
+            f"新路径不能在当前库目录**之内**：src={src}，dst={dst}",
+            hint="把库搬进它自己的子目录会让迁移清单边搬边长、源目录永远删不掉；"
+                 "请选库外的位置（或先手工搬好，再只改登记）")
 
     key_new = os.path.normcase(os.path.realpath(str(dst)))
     clash = conn.execute(
@@ -797,6 +835,8 @@ def kb_vault_relocate(conn, key, new_path, *, move_files=False, copy_files=False
         conn.commit()
         journal_written = True
         moved_rels = []
+        preexisting = set()      # copy 模式下目标侧**原本就存在**的文件（回滚还原不了）
+        verify_bad = []          # 非空 = 校验失败（也在下面那个 try 里抛出 → 走同一条回滚）
         try:
             # ③ 搬（copy2 保 mtime——否则 Obsidian 的排序会乱）
             for idx, rel in enumerate(plan["rels"], 1):
@@ -804,6 +844,8 @@ def kb_vault_relocate(conn, key, new_path, *, move_files=False, copy_files=False
                 d_abs = dst / rel
                 d_abs.parent.mkdir(parents=True, exist_ok=True)
                 if copy_files:
+                    if d_abs.exists():
+                        preexisting.add(rel)
                     shutil.copy2(str(s_abs), str(d_abs))
                 else:
                     shutil.move(str(s_abs), str(d_abs))
@@ -817,48 +859,71 @@ def kb_vault_relocate(conn, key, new_path, *, move_files=False, copy_files=False
                         (_relocate_journal(src, dst, idx, len(plan["rels"]), "moving"),
                          now_utc(), row["vault_id"]))
                     conn.commit()
+            # ④ 搬后算目标哈希逐文件比对（**在 try 内**：校验失败与搬移中断走同一条
+            # 回滚路径。F-P1-5 的旧实现在这里直接 `raise` → 源已搬空、目标有文件、
+            # 登记仍指源、note 卡在 moving，四件事同时成立；下次再搬被守卫永远挡住）。
+            if verify:
+                for rel in plan["rels"]:
+                    d_abs = dst / rel
+                    if not d_abs.exists():
+                        verify_bad.append((rel, "missing"))
+                    elif kb_sha256_file(d_abs) != src_hash[rel]:
+                        verify_bad.append((rel, "hash_mismatch"))
+                if verify_bad:
+                    raise KBError(
+                        "bad_usage",
+                        f"搬运后校验失败 {len(verify_bad)} 个文件：{verify_bad[:5]}")
         except BaseException as exc:
-            # ④ 回滚：把已搬的按相反顺序搬回。**不掩盖原始异常。**
+            # ⑤ 回滚：把已搬的按相反顺序搬回。**不掩盖原始异常。**
+            # 两种模式的回滚语义不同：move 把目标侧搬回源侧；copy 的源还在，
+            # 回滚 = 删掉本次复制出去的副本（**目标侧原本就有的同名文件**已被 copy2
+            # 覆盖，那份内容不可还原 → 如实记进 residue，不假装删掉等于还原）。
             back_ok, back_fail = 0, []
             for rel in reversed(moved_rels):
                 try:
                     d_abs = dst / rel
                     s_abs = src / rel
-                    s_abs.parent.mkdir(parents=True, exist_ok=True)
-                    if d_abs.exists():
-                        shutil.move(str(d_abs), str(s_abs))
+                    if copy_files:
+                        if rel in preexisting:
+                            back_fail.append(rel)
+                            continue
+                        if d_abs.exists():
+                            d_abs.unlink()
+                    else:
+                        s_abs.parent.mkdir(parents=True, exist_ok=True)
+                        if d_abs.exists():
+                            shutil.move(str(d_abs), str(s_abs))
                     back_ok += 1
                 except OSError:
                     back_fail.append(rel)
+            # 失败**不许卡在 moving**：回滚成功记 `rolled_back`，不完整记 `failed`
+            # + 残留清单（`failed` 是给人看的运维指令，不是内部细节）。
             conn.execute(
                 "UPDATE kb_vault SET note=?, updated_at=? WHERE vault_id=?",
                 (_relocate_journal(src, dst, moved, len(plan["rels"]),
-                                   f"rolled_back ok={back_ok} fail={len(back_fail)}"),
+                                   "rolled_back" if not back_fail else "failed",
+                                   residue=back_fail or None),
                  now_utc(), row["vault_id"]))
             conn.commit()
             if back_fail:
                 raise KBError(
                     "bad_usage",
-                    f"迁移中断且回滚**不完全**：{len(back_fail)} 个文件没搬回去"
+                    f"迁移失败且回滚**不完全**：{len(back_fail)} 个文件没搬回原位"
                     f"（例：{back_fail[:3]}）。原始异常：{type(exc).__name__}: {exc}",
-                    hint="按 note 字段记录的 from/to 手工核对两侧") from exc
+                    hint="note 的 relocate.residue 是完整残留清单；"
+                         "按 from/to 手工核对两侧，**别把 failed 当 done**") from exc
+            if verify_bad:
+                raise KBError(
+                    "bad_usage",
+                    f"搬运后校验失败 {len(verify_bad)} 个文件（例：{verify_bad[:3]}）；"
+                    f"已回滚 {back_ok} 个文件，源目录恢复原样、登记未改"
+                    f"（note 的 relocate.state=rolled_back）。",
+                    hint="目标侧内容与源哈希不一致（坏道/杀软改写/并发写入）；"
+                         "确认目标盘健康后再搬一次") from exc
             raise
-        # ③ 搬后算目标哈希逐文件比对
         if verify:
-            bad = []
-            for rel in plan["rels"]:
-                d_abs = dst / rel
-                if not d_abs.exists():
-                    bad.append((rel, "missing"))
-                    continue
-                if kb_sha256_file(d_abs) != src_hash[rel]:
-                    bad.append((rel, "hash_mismatch"))
-            if bad:
-                raise KBError("bad_usage",
-                              f"搬运后校验失败 {len(bad)} 个文件：{bad[:5]}",
-                              hint="源文件可能仍在（copy 模式），请人工确认后重试")
             out["verified"] = len(plan["rels"])
-        # ④ 搬完才改登记（顺序不能反：先改登记再搬，中途失败会指向空目录）
+        # ⑥ 搬完才改登记（顺序不能反：先改登记再搬，中途失败会指向空目录）
         if not copy_files:
             try:
                 src.rmdir()      # 只在空目录时成功；非空说明有没搬到的

@@ -585,34 +585,61 @@ class PrivateWriteGuardTest(unittest.TestCase):
 
 
     def test_push_candidates_visibility(self):
-        """**判不到**：`build_push_candidates` 的内联可见性判定（fish_push.py:642-645）。
+        """**F-P1-3（2026-11-25 外部审查）**：situational 候选必须按可见性过滤。
 
-        评审官把它摘掉做变异，`28 passed`——判据为零。我这轮试图补一条，
-        但**造不出能触发那段代码的 fixture**：
+        这条判据的前身自认**造不出 fixture** 而 `skipTest`——审查方因此把它记成
+        "测试自己承认看不到"的零判据（评审官摘掉过滤代码后 `28 passed`）。
 
-        · 它是"别处读过但你没看"类候选，需要 `memory_access_log` 里有别的公民
-          的访问记录 + 打分过阈值 + 预算放行；
-        · 我插了访问日志（code / C-OTHER / recall），**候选仍是 0 条**。
+        造不出来的原因是一个真实的陷阱，不是"没法造"：
+        `build_push_candidates` 先取"本项目最近 3 条"当锚点（`ORDER BY code DESC`），
+        而旧 fixture 只写了一条——那条**既是候选又是锚点**，被 `skip` 吃掉，候选恒为 0 条。
+        在空列表上断言 `assertNotIn` 一定通过，那不是判据。
 
-        在空列表上断言 `assertNotIn(...)` 一定通过——那是假判据，
-        比没有判据更糟。所以这里**显式跳过**并写清缺什么。
+        现在 fixture 走三步：
+          ① 写 private（owner=C-OWNER）与一条 shared；
+          ② 再写 3 条 padding，把上面两条**挤出锚点位置**（锚点才是被排除的真原因）；
+          ③ 用**第三个公民**（C-READER）插访问日志——viewer 不能是"读过它的那个人"，
+             否则 `seen()` 会先把它挡掉，判据又会退化成空列表断言。
+
+        两个方向都要判：
+          · private 对别人 / 匿名**必须**不出现（这是修的那条泄露）；
+          · shared 对别人**必须**出现（正向对照——"候选生成整体坏了"也能让上面变绿）；
+          · private 对主人**必须**出现（过滤过头同样是缺陷）。
         """
         import fish_push
         self._enforce(True)
-        code, _ = self._write(title="ZZ推送私有ZZ", visibility="private",
-                              owner="C-OWNER")
-        self.conn.execute(
-            "INSERT INTO memory_access_log (code,citizen_id,session_key,project,"
-            "via,payload,accessed_at) VALUES (?,?,?,?,?,?,?)",
-            (code, "C-OTHER", "s1", "Q", "recall", None, fish.now_utc()))
+        private_code, _ = self._write(title="ZZ推送私有ZZ", visibility="private",
+                                      owner="C-OWNER")
+        shared_code, _ = self._write(title="ZZ推送公开ZZ")
+        for i in range(3):
+            self._write(title=f"锚点填充 {i}")
+        for code in (private_code, shared_code):
+            self.conn.execute(
+                "INSERT INTO memory_access_log (code,citizen_id,session_key,project,"
+                "via,payload,accessed_at) VALUES (?,?,?,?,?,?,?)",
+                (code, "C-READER", "s1", "Q", "recall", None, fish.now_utc()))
         self.conn.commit()
-        cands = fish_push.build_push_candidates(
+
+        other = fish_push.build_push_candidates(
+            self.conn, self.root, citizen_id="C-OTHER", project="P")
+        titles = [c.get("title") for c in other]
+        self.assertIn("ZZ推送公开ZZ", titles,
+                      "正向对照失败：shared 条目没进候选，这条判据会退化成空列表断言"
+                      f"（候选={titles}）")
+        self.assertNotIn("ZZ推送私有ZZ", str(other),
+                         "推送候选里出现了别人 private 记忆的标题")
+
+        anon = fish_push.build_push_candidates(
             self.conn, self.root, citizen_id=None, project="P")
-        if not cands:
-            self.skipTest(
-                "候选为 0 条（插了访问日志也没触发）——在空列表上断言恒过，"
-                "那是假判据。判不到，不是通过。")
-        self.assertNotIn("ZZ推送私有ZZ", str(cands), "推送候选里出现了私有标题")
+        self.assertNotIn("ZZ推送私有ZZ", str(anon),
+                         "无 viewer（匿名）时 private 标题泄露了")
+        self.assertIn("ZZ推送公开ZZ", [c.get("title") for c in anon],
+                      "无 viewer 时 shared 条目也没了——过滤过头")
+
+        owner = fish_push.build_push_candidates(
+            self.conn, self.root, citizen_id="C-OWNER", project="P")
+        self.assertIn("ZZ推送私有ZZ", str(owner),
+                      "主人自己看不到自己的 private 记忆——过滤过头")
 
 
     def test_mcp_tool_resolve_hides_private(self):
@@ -657,7 +684,10 @@ class PrivateWriteGuardTest(unittest.TestCase):
         主人必须看到自己的私有 lesson，别人必须看不到。
         """
         self._enforce(True)
-        self._write(title="公开的错题甲", mem_type="lesson")
+        # P0-1（2026-11-25 外部审查）：不给 owner 时 `record_memory` 会落到
+        # `resolve_owner()` 的兜底值 `'unknown'`，而那是**不可信作者**（不进注入包）。
+        # 本判据考的是可见性接线，不是作者信任门 → 两条都显式给 owner。
+        self._write(title="公开的错题甲", mem_type="lesson", owner="C-OWNER")
         self._write(title="主人私有的错题乙", visibility="private",
                     owner="C-OWNER", mem_type="lesson")
         own = fish.build_lesson_block(self.conn, project="P",

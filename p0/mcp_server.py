@@ -2068,6 +2068,53 @@ class FishServer:
             raise ValueError(f"{name} 必须是整数，收到 {raw!r}")
         return max(lo, min(value, hi))
 
+    def _kb_require_sensitive_grant(self, ident, *, surface):
+        """`allow_sensitive=true` 的**唯一**授权判定（F-P1-4，2026-11-25 外部审查）。
+
+        ## 修的是什么
+
+        审查方实测：**任何有效 token（含 visitor）**都能 `allow_sensitive=true` 读/写
+        敏感名单命中的文件（凭证/密钥/.env）。旧实现只判 `ident.status == IDENTITY_VALID`
+        ——那等于把"你登记过身份"当成"你有资格读凭证正文"。
+
+        而 visitor 是**自助登记**的：MCP 的 `session_start` 对任何调用方无门槛签发。
+        于是这条"二次授权"退化成**调用方给自己发钥匙**。这与 `fish_trust.py:161-184`
+        记的那条链路是同一个病（"有凭证 != 有授权"），修法也必须同源。
+
+        ## 为什么收成一个方法
+
+        `kb`（读）与 `kb_write`（写）是**两个权限位**（裁决 C2），但"谁能碰敏感面"是
+        **同一个事实**。两处各写一份判断，正是本项目反复记录的翻车形态
+        （"两份实现必然漂"）。判定本体仍只有一处：`fish_trust.citizen_kind_of` 读 kind、
+        `fish_trust.AUTHORIZED_CITIZEN_KINDS` 给白名单；本方法只做"查一次 + 一句能执行的
+        下一步"。
+
+        ## CLI 为什么不受影响
+
+        `fish kb open ... --allow-sensitive` 由 `fish_cli.py` 的 argparse 直连
+        `fish.kb_open`，**不经过本方法**。这不是漏洞而是两种面本来就是不同信任前提：
+        CLI 是**人在本机终端里的显式动作**（本地可信面），MCP 面是"模型可以自己调用的
+        通道"。给模型一把它自己就能签的钥匙才是不对称的地方。
+
+        ## 判不到 kind 为什么不放行
+
+        库异常 / 公民不在热表 → `citizen_kind_of` 返回 None → 拒绝。与
+        `enforce_mem_type_auth` 同口径：**判不到不是通过**，猜有利方向就是把上一次的
+        缺陷再造一遍。
+        """
+        kind = fish_trust.citizen_kind_of(self.conn, ident.citizen_id)
+        if str(kind or "").strip().lower() in fish_trust.AUTHORIZED_CITIZEN_KINDS:
+            return str(kind)
+        raise ValueError(
+            f"{surface}敏感文件需要 **resident / role** 公民；本次调用者是 "
+            f"{kind or '查不到 kind'}（citizen={ident.citizen_id}）。"
+            "visitor 是自助登记的身份（任何人 `session_start` 就有），"
+            "允许它用 `allow_sensitive` 等于让调用方自己给自己发钥匙。下一步二选一：\n"
+            "  ① 请主人在这台机器上执行 `fish citizen-set-kind "
+            f"{ident.citizen_id or '<citizen_id>'} resident` 升级后再调；\n"
+            "  ② 人就在本机操作的话走 CLI：`fish kb open <path> --allow-sensitive`"
+            "（CLI 是本地可信面，不受这道门限制）。")
+
     def tool_kb(self, a, ident):
         """知识库**只读**面：vaults / tree / open / search（§3.3 / §4.1-4.3）。
 
@@ -2161,6 +2208,10 @@ class FishServer:
                 raise ValueError(
                     "读敏感文件需要会话凭证（否则这次读取只能记成 unattributed、追不到人）。"
                     "先调 `session_start` 拿 token，这次调用带上 token=... 再 open。")
+            if allow_sensitive:
+                # F-P1-4（2026-11-25 外部审查）：**有凭证 != 有授权**。
+                # 上面那步只回答"你是哪个公民"；这一步回答"你有没有资格读凭证正文"。
+                self._kb_require_sensitive_grant(ident, surface="读")
             # MCP 默认 8000 字符（`kb` schema 里声明的默认值）：回执要进模型上下文。
             # 想读更长就**显式**传 max_chars——CLI 的默认是 64000，两个面的口径不同，这里如实说。
             res = fish.kb_open(self.conn, vault, rel, max_chars=max_chars,
@@ -2248,6 +2299,11 @@ class FishServer:
         # N7（第五轮 · 安全 🟡）：写面与读面共用同一解析（`fish._strict_bool`）——
         # `"false"` 是拒绝、模糊写法 `bad_usage`，不是"非空字符串即同意"。
         allow_sensitive = fish._strict_bool(a.get("allow_sensitive"), "allow_sensitive")
+        if allow_sensitive:
+            # F-P1-4（2026-11-25 外部审查）：写面与读面**同一道门**——写敏感文件比读
+            # 更强，没有"写要 resident、读不要"的道理。旧实现只在方法入口判过
+            # `IDENTITY_VALID`，于是 visitor 同样能改凭证文件。
+            self._kb_require_sensitive_grant(ident, surface="写")
         res = fish.kb_write(self.conn, self.root, vault, rel, action=action,
                             content=content, frontmatter=frontmatter,
                             base_sha256=(a.get("base_sha256") or "").strip() or None,
