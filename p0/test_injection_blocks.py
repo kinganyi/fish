@@ -127,10 +127,14 @@ class InjectionBlocksTest(unittest.TestCase):
 
     # ------------------------------------------------------------ 夹具
     def _citizen(self, cid, name, is_owner=0):
+        # P0-1（2026-11-25 外部审查）：作者可信度进了进包谓词——`kind='visitor'`
+        # 是**自助登记**的身份，它的 rule/lesson 默认不进包。本文件把这三个公民当
+        # "在本机被授予的行动者"用（判的是分栏口径，不是身份等级），所以一律 resident；
+        # 信任门自己的判据在 `test_inject_trust_gate.py`（用 visitor 与 resident 对照）。
         self.conn.execute(
             "INSERT INTO citizens (citizen_id,display_name,kind,role,host,status,created_at,"
             "is_owner) VALUES (?,?,?,?,?,?,?,?)",
-            (cid, name, "resident" if is_owner else "visitor", None, None, "active",
+            (cid, name, "resident", None, None, "active",
              fish.now_utc(), is_owner))
 
     def _mem(self, code, title, *, project="PROJA", owner=ACTOR, mem_type="fact",

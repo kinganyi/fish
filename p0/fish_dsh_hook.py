@@ -114,6 +114,11 @@ def _identity_anchor(session_id: str = "") -> dict:
     工作区里通常有多个会话（开发/评估/插件测试…），没有白名单就会把**所有**
     会话都签给同一个公民（2026-10-26 实测：三个会话被绑到 fish-主AI-3，
     撞车检测因此「自己撞自己」）。
+    **`sessions` 为空/缺失 → 整个锚作废（返回 `{}`），不再传 `--citizen`**
+    （P2-6#10，2026-11-25）。旧行为是"空 = 不限制"，而 `ensure` 侧的
+    `_prove_citizen_binding`（锚授权判定）对空白名单是**拒绝**——两边语义相反，
+    后果是每个会话的 `session ensure` 都因缺证明降级失败。语义统一成"锚必须点名
+    会话"：没点名就不算授权，hook 也就不传这个公民（会话照常按 host_session_key 走）。
     坏 JSON / 读失败一律当作"没有锚"——身份解析失败不该拖垮会话启动。
     """
     try:
@@ -124,10 +129,11 @@ def _identity_anchor(session_id: str = "") -> dict:
         if not isinstance(data, dict):
             return {}
         sessions = data.get("sessions")
-        if isinstance(sessions, list) and sessions:
-            key = ("dsh:" + session_id) if session_id else ""
-            if not any(key == str(s).strip() for s in sessions):
-                return {}
+        if not isinstance(sessions, list) or not sessions:
+            return {}
+        key = ("dsh:" + session_id) if session_id else ""
+        if not any(key == str(s).strip() for s in sessions):
+            return {}
         cid = str(data.get("citizen") or "").strip()
         if cid and not _citizen_exists(cid):
             return {}
@@ -317,7 +323,10 @@ def main() -> int:
     # 2026-10-26（身份锚，EVAL-261025-19 同族）：hook 必须能签给「工作区指定的身份」。
     # 没有锚时它会按 host_session_key 找到/新建一个 `dsh-session-<id>` 公民——而用户
     # 指定的身份可能是 `fish-主AI-3`，于是每次重启就分裂成两个公民（看板/归属各看各的）。
-    # 锚文件：p0/fish_identity.json（{"citizen": "<id>"} 或 {"alias": "<名字>"}，可选）。
+    # 锚文件：p0/fish_identity.json（{"citizen": "<id>", "sessions": ["dsh:<会话 id>"]}，
+    # 可选）。**sessions 必须非空且点名本会话**（P2-6#10）：锚是工作区级的，没有白名单
+    # 就会把整个工作区的会话都签给同一个人；而 `ensure` 侧对空白名单是拒绝的——所以
+    # "空 = 不限制"在两边都已被取消，这里拿不到锚就不传 --citizen（按 host_session_key 走）。
     # 为什么是文件而不是环境变量：WorkBuddy/DSH 两宿主的 hook 命令都没有 env 字段，
     # 而工作区级文件是两宿主都能读到、且改动即时生效（hook 每次执行现读）的落点。
     anchor = _identity_anchor(session_id)

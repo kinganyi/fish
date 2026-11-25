@@ -135,11 +135,14 @@ class _TempRoot(unittest.TestCase):
 
     # ------------------------------------------------------------------ 夹具
     def _citizen(self, name, *, host="cli", is_owner=0):
+        # P0-1（2026-11-25 外部审查）：`kind='visitor'` 是自助身份，它的 rule/lesson
+        # 默认不进注入包。这里的公民是"本机被授予的作者"，口径一律 resident；
+        # 信任门自己的判据在 `test_inject_trust_gate.py`。
         cid = fish.ulid()
         self.conn.execute(
             "INSERT INTO citizens (citizen_id,display_name,kind,role,host,status,"
             "created_at,is_owner) VALUES (?,?,?,?,?,?,?,?)",
-            (cid, name, "resident" if is_owner else "visitor", None, host,
+            (cid, name, "resident", None, host,
              "active", fish.now_utc(), is_owner))
         self.conn.commit()
         return cid

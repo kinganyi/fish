@@ -31,9 +31,11 @@ def identity_anchor_grants(citizen_id, session_key, *, anchor_path=None):
         出现在 `sessions` 里，那需要改这个文件；
       · **配合 ACL**：文件与 `data/` 收紧到当前用户后，同机其他用户也改不了。
 
-    与 `fish_dsh_hook.py` 的 `_identity_anchor` 差异是**有意保守**：
-      · hook 那边 `sessions` 为空 = 不限制（它只决定"用不用这个公民"）；
-      · 这里 `sessions` 为空 = **拒绝**。免证明是安全边界的让步，宁可不给。
+    与 `fish_dsh_hook.py` 的 `_identity_anchor` **同一语义**（P2-6#10，2026-11-25 统一）：
+      `sessions` 为空/缺失 = **没有授权**，两边都返回"不授权"。
+      旧版这里拒绝、hook 那边当成"不限制"，于是 hook 照样传 `--citizen` 而本函数拒绝 →
+      每个会话的 `session ensure` 都因缺证明降级失败（hook 白跑一趟）。
+      为什么统一到"拒绝"而不是"放行"：免证明是安全边界的让步，宁可不给。
 
     任何读取/解析失败都返回 False——锚坏了只意味着"不授权"，不该拖垮会话启动。
 

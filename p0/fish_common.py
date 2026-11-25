@@ -227,6 +227,9 @@ CONFIG_DEFAULTS = {
     # 理由：lesson 进错题本段，等于能影响所有 AI 的行为约束；而它免凭证写入，
     # 于是"陌生人能改教训"。改成 1 则允许进包，并在段里标记为「未认证」。
     "inject.allow_untrusted_lessons": (0, "int", None),
+    # P0-1（2026-11-25）：上一条键的**正式名**，口径扩到「规矩」段。打开只放行**无主**
+    # （NULL/unattributed/unknown），**不放行 visitor**（MCP 自助身份）；旧键保留为别名。
+    "inject.allow_untrusted": (0, "int", None),
     "dataplane.compress_enabled": (0, "int", None),
     "inject.budget_tokens": (1600, "int", None),
     # 注入风格：gentle 温和（只标注这是状态）/ strong 强化（要求回答前先参考）

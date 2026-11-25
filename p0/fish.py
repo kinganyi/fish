@@ -4613,17 +4613,9 @@ def start_session(conn, *, projects=None, project=None, account=None, alias=None
             conn, session_key=ident["session_key"], evidence=ident["evidence"],
             host=ident["host"], display_name=display_name, account_id=account_id,
             kind=kind, role=role)
-        if not who.get("created") and ident["session_key"].startswith(SELF_SESSION_PREFIX) \
-                and False:
-            # 2026-10-29（按外部审查 🔴1 收窄边界）：`self:` 认领**不再**要求证明。
-            # 理由：`session_key` 就是"同一个会话"的标识，"重跑 start 幂等"是 J7/T3
-            # 钉死的契约——要求证明会让所有既有夹具/正常重跑当场红（实测 14 条）。
-            # 真正的接管洞在**显式 `citizen=`** 那条路径：现在**任何**已有公民的
-            # `citizen=` 绑定都必须出示证明（含"从未签发过 token"的新公民）。
-            # `self:` 的猜名风险如实记录在审查处置里（不在本轮修）。
-            _prove_citizen_binding(conn, who["citizen_id"],
-                                   session_key=ident["session_key"],
-                                   bind_token=bind_token)
+        # 2026-10-29（外部审查 🔴1）：`self:` 认领**不再**要求证明——`session_key` 就是
+        # "同一个会话"（重跑 start 幂等由 J7/T3 钉死；接管洞在显式 `citizen=`）。P2-6#1：
+        # 原先这里还有一个 `and False:` 死分支（里面调证明），已删。
     # 轮换：同一会话的新凭证生效时，旧的活凭证立即作废。
     # 为什么轮换而不是"留着"：重跑 start 的语义是"拿到一条新的、能用的凭证"，
     # 留着旧的意味着泄露面随时间只增不减；轮换后任一时刻一个会话只有一条活凭证。
@@ -4885,6 +4877,7 @@ def ensure_session(conn, *, session_key, host, evidence, display_name=None,
     已经有活的就原样返回（`token=None` + `token_source='existing'`）。
       → 重跑 SessionStart 不会互踢（113 §5.4）
       → 首次启动仍有明文 token（hook 打印得出来）
+    **重绑是唯一的例外**（P1-6，2026-11-25）：本次要签给**另一个公民**时旧活凭证当场吊销——不是轮换，是收回。
 
     返回 `{token, token_source, citizen_id, session_key, evidence, channel, host,
     display_name, account_id, created, identity_origin, inherited_from, issued_at,
@@ -4954,6 +4947,7 @@ def ensure_session(conn, *, session_key, host, evidence, display_name=None,
             display_name = who["display_name"]
     # ---- 凭证（唯一的"写"）：有活的就复用，没有才签 ----
     alive = _alive_session_token(conn, key)
+    revoked = 0        # P1-6：重绑时吊销掉的旧活凭证数（事件与返回都要能看见）
     token_evidence, token_channel, parent_hash, parent_expires = evidence, channel, None, None
     if alive is not None and alive["citizen_id"] == citizen_id:
         issued = None
@@ -4961,6 +4955,8 @@ def ensure_session(conn, *, session_key, host, evidence, display_name=None,
         issued_at, expires_at = alive["issued_at"], alive["expires_at"]
         token_evidence, token_channel = alive["evidence"], alive["channel"]
     else:
+        # P1-6（2026-11-25）：**重绑不是重跑**——旧活凭证必须当场吊销，否则同一会话键有两条活凭证。
+        revoked = revoke_session_tokens(conn, session_key=key) if alive is not None else 0
         if origin == "inherited":
             ancestor_key = ancestor_key or inherited_from
             token_evidence, token_channel, parent_hash, parent_expires = \
@@ -4993,7 +4989,7 @@ def ensure_session(conn, *, session_key, host, evidence, display_name=None,
          "inherited_from": inherited_from, "evidence": token_evidence,
          "channel": token_channel, "token_source": token_source,
          "token_hash": (issued or {}).get("token_hash"), "expires_at": expires_at,
-         "citizen_created": created, "projects": project_list,
+         "revoked": revoked, "citizen_created": created, "projects": project_list,
          "stint_actions": [{"project": s["project"], "action": s["action"]}
                            for s in stints]})
     same_name = find_same_name_citizens(conn, display_name, citizen_id) if created else []
@@ -5003,7 +4999,7 @@ def ensure_session(conn, *, session_key, host, evidence, display_name=None,
             "host": host, "evidence": token_evidence, "channel": token_channel,
             "display_name": display_name, "account_id": account_id,
             "created": created, "identity_origin": origin,
-            "inherited_from": inherited_from, "rotated": 0,
+            "inherited_from": inherited_from, "rotated": revoked,
             "issued_at": issued_at, "expires_at": expires_at,
             "stint": stints[0] if stints else None, "stints": stints,
             "project": project_list[0] if len(project_list) == 1 else None,
@@ -9125,13 +9121,15 @@ def cmd_healthcheck(args):
     if not _db.exists():
         print(f"错误：库不存在（{_db}）——体检不会创建它", file=sys.stderr)
         raise SystemExit(2)
-    conn = connect(_root)
+    # P2-5（2026-11-25）：只读连接复用 `fish_ui.open_readonly`（mode=ro + query_only 唯一实现）。
+    import fish_ui as _ui          # 本地 import：只有体检需要，别让每次 CLI 启动都付
+    conn = _ui.open_readonly(str(_db))
     total = conn.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     memories = conn.execute("SELECT COUNT(*) FROM code_index WHERE status='active'").fetchone()[0]
     dormant = conn.execute("SELECT COUNT(*) FROM code_index WHERE dormant=1").fetchone()[0]
     withdrawn = conn.execute(
         "SELECT COUNT(*) FROM code_index WHERE status='withdrawn'").fetchone()[0]
-    broken = []
+    broken = None               # P1-9：None = **判不到**（不是"0 条断链"），见 exit 2
     root = Path(args.root)
     # 2026-11-21（A-3）：断链读数交给 `fish_purge.scan_broken`——它**只扫 active**，
     # 且给出日期结构。原来的内联循环扫所有行（含已作废），于是"清理完还报 318 条"，
@@ -9143,8 +9141,10 @@ def cmd_healthcheck(args):
     except Exception as exc:      # noqa: BLE001 —— 体检不能因为一项检查挂掉整体
         warn_ignored("fish.py healthcheck scan_broken", exc)
         _bi = {"by_date": {}, "by_project": {}}
+        # P1-9（2026-11-25）：原先只吞异常 → 打印"断链 0 条"→ exit 0（把判不到说成干净）。
+        print(f"  断链：判不到（{type(exc).__name__}: {exc}）")
     print(f"事件 {total} 条 / 活跃记忆 {memories} 条 / 休眠 {dormant} 条 / 作废 {withdrawn} 条"
-          f" / 断链 {len(broken)} 条")
+          f" / 断链 {'判不到' if broken is None else str(len(broken)) + ' 条'}")
     if _bi.get("by_date"):
         print("  断链按日期（连续多日 100% = 迁移/批量事故；零星 = 偶发删改）：")
         for _day, _n in _bi["by_date"].items():
@@ -9254,11 +9254,11 @@ def cmd_healthcheck(args):
     conn.close()
     # F-P1-6：**体检的结论必须能被机器读到**（退出码是脚本唯一可读的结论）。
     # 旧实现直接结束 → 永远 exit 0，于是「断链 1 条」在 && 链条里表现为成功。
-    # 0 = 干净 / 1 = 有问题（断链或幽灵归属）/ 2 = 判不到（库缺失）。
+    # 0 = 干净 / 1 = 有问题（断链或幽灵归属）/ 2 = 判不到（库缺失**或核心检查抛异常**）。
         # 判定口径**只按审查方声明的那条**：断链 / 幽灵归属 = 1。
     # 全文索引缺口（gap）不并入退出码——它属于另一条 P2 议题，混进来会让
     # 「exit 1」这个信号同时代表两件事，调用方无法区分该做什么。
-    raise SystemExit(1 if (broken or _ghost) else 0)
+    raise SystemExit(2 if broken is None else (1 if (broken or _ghost) else 0))
 
 
 def cmd_rebuild(args):
