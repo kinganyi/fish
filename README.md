@@ -6,8 +6,8 @@
 
 单机 · 单仓 · 事件溯源 —— SQLite + FTS5 + MCP + CLI + 宿主 hooks
 
-![criteria](https://img.shields.io/badge/criteria-2353%20total-brightgreen)
-![fish.py](https://img.shields.io/badge/fish.py-11169%20lines-blue)
+![criteria](https://img.shields.io/badge/criteria-2416%20total-brightgreen)
+![fish.py](https://img.shields.io/badge/fish.py-11249%20lines-blue)
 ![modules](https://img.shields.io/badge/domain%20modules-47-informational)
 ![mutants](https://img.shields.io/badge/mutants-27-blue)
 ![python](https://img.shields.io/badge/python-3.11%2B-3776ab)

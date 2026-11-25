@@ -69,6 +69,9 @@ FISH_GIT_SCHEMA = P0 / "fish_git_schema.py"
 # 2026-11-25（113 W1b）：会话树 DDL 叶子（W1 那三块常量从 fish_schema 抽出）。
 # 它必须比 `fish_schema` 更底层——零 import、零函数，只含字符串常量（同 fish_git_schema）。
 FISH_LINEAGE_SCHEMA = P0 / "fish_lineage_schema.py"
+# 2026-11-25（113 W6）：批量回填/对账层从 fish_lineage 抽出（否则投影层超 700 行窗口）。
+# 分层：backfill → fish_lineage（向下），只 import fish_common/fish_lineage，不 import fish。
+FISH_LINEAGE_BACKFILL = P0 / "fish_lineage_backfill.py"
 # 2026-11-20（Phase 3）：写库层从 fish_git 拆出（它一度六职责、589 行超窗）。
 # 分层：store → git 是向下（写层用读层的解析结果），反向禁止。
 FISH_GIT_STORE = P0 / "fish_git_store.py"
@@ -300,6 +303,9 @@ FISH_LINEAGE_SCHEMA_LINES_MAX = 200
 #: 留住 200–700 的真实区间，长成第二个巨石时这条会红）。
 FISH_LINEAGE_LINES_MIN = 200
 FISH_LINEAGE_LINES_MAX = 700
+#: 批量回填层（W6 从 fish_lineage 抽出）：scan/report/CLI，437 行。
+FISH_LINEAGE_BACKFILL_LINES_MIN = 250
+FISH_LINEAGE_BACKFILL_LINES_MAX = 700
 # Phase 3 拆出的写库层：当前 217 行 → 上界 380（还要容纳 Phase 4/5 的写入入口）
 FISH_GIT_STORE_LINES_MIN = 150
 FISH_GIT_STORE_LINES_MAX = 380
@@ -558,6 +564,14 @@ class SplitDependencyTest(unittest.TestCase):
                                                        "fish_board", "fish_common",
                                                        "fish_schema", "fish_db", "fish_lineage",
                                                        "fish_cli", "mcp_server"}),
+                                # 2026-11-25（113 W6）：批量回填层。依赖 fish_lineage 是**向下**
+                                # （投影层不依赖它）；它只许 import fish_common/fish_lineage，
+                                # 不许碰 fish 本体与任何上层（回填是 CLI 工具，不进 hook）。
+                                (FISH_LINEAGE_BACKFILL, {"fish", "fish_kb", "fish_push",
+                                                         "fish_trust", "fish_rebuild",
+                                                         "fish_profile", "fish_activity",
+                                                         "fish_board", "fish_schema", "fish_db",
+                                                         "fish_cli", "mcp_server"}),
                                 # Phase 3 拆出的写库层：依赖 fish_git（向下）+ schema/db，
                                 # 但不许碰 fish 本体与任何上层。
                                 (FISH_GIT_STORE, {"fish", "fish_kb", "fish_push",
@@ -908,6 +922,9 @@ class SplitSizeTest(unittest.TestCase):
                  FISH_LINEAGE_SCHEMA_LINES_MAX),
                 # 2026-11-25（113 W2/W3）：会话树投影层本体（懒加载注册表 + depth 重算）
                 ("fish_lineage.py", FISH_LINEAGE_LINES_MIN, FISH_LINEAGE_LINES_MAX),
+                # 2026-11-25（113 W6）：批量回填/对账层（从投影层抽出，回窗）
+                ("fish_lineage_backfill.py", FISH_LINEAGE_BACKFILL_LINES_MIN,
+                 FISH_LINEAGE_BACKFILL_LINES_MAX),
                 ("fish_git_store.py", FISH_GIT_STORE_LINES_MIN, FISH_GIT_STORE_LINES_MAX),
                 ("fish_git_link.py", FISH_GIT_LINK_LINES_MIN, FISH_GIT_LINK_LINES_MAX),
                 ("fish_purge.py", FISH_PURGE_LINES_MIN, FISH_PURGE_LINES_MAX),
