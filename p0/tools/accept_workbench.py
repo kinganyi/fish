@@ -942,8 +942,10 @@ def a08_mut(ctx) -> tuple[bool, str]:
     A = ctx["A"]
     original = A.make_item
 
-    def blanked(row, labels, board_names):
-        item = original(row, labels, board_names)
+    def blanked(row, labels, board_names, *args, **kwargs):
+        # W5 起 `make_item` 多了 lineage 参数（第 4 位）；变异器必须**透传**，
+        # 否则 A-8 变异跑不起来 → MUTATION-SKIP（判据没被自证，不能算通过）。
+        item = original(row, labels, board_names, *args, **kwargs)
         if item.get("src") == "post":
             item["project"] = None
         return item
