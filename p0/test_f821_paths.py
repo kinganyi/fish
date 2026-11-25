@@ -70,12 +70,17 @@ class CliDynamicGlobalsTest(unittest.TestCase):
     def test_install_copies_foreign_names_into_cli_globals(self):
         # install(namespace) 的语义：把 dict 里的名字补进本模块 globals（不覆盖已有定义）。
         sentinel = {"_F821_TEST_SENTINEL": 42, "sys": "must-not-overwrite"}
+        # install() 会改写模块级 `_f`/`_ns`（生产由 fish.py 在文件末尾调用一次）。
+        # 测试必须保存/恢复，否则后续用例拿到的是 sentinel 命名空间——这不是理论，
+        # 2026-11-26 全量跑出过 20 项 "全局污染" 红。
+        old_f, old_ns = getattr(fish_cli, "_f", None), getattr(fish_cli, "_ns", None)
         try:
             fish_cli.install(sentinel)
             self.assertEqual(fish_cli.__dict__.get("_F821_TEST_SENTINEL"), 42)
             # 已有名字不被覆盖（sys 是 fish_cli 自己 import 的模块）
             self.assertNotEqual(fish_cli.sys, "must-not-overwrite")
         finally:
+            fish_cli._f, fish_cli._ns = old_f, old_ns
             fish_cli.__dict__.pop("_F821_TEST_SENTINEL", None)
 
 

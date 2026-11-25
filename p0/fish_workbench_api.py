@@ -185,7 +185,14 @@ BOARD_KIND_WORD = {
     "left": "下板",
 }
 
-MEMORY_EVENT_TYPES = ("memory.recorded", "memory.accessed", "memory.retired")
+#: 工作台把哪些事件归到「记忆」类。必须是**全部真实的 memory.***——
+#: 只列 3 个会让 archived/relocated/superseded/dormant/owner_fixed/imported
+#: 在时间线上被误归为 system（P2-2 补 memory.imported 时发现的老口径）。
+MEMORY_EVENT_TYPES = (
+    "memory.recorded", "memory.imported", "memory.accessed", "memory.retired",
+    "memory.archived", "memory.relocated", "memory.superseded", "memory.dormant",
+    "memory.owner_fixed",
+)
 
 
 # ── 结构化日志（一行 JSON 到 stderr）────────────────────────────────────
