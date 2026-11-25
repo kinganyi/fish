@@ -316,20 +316,28 @@ class Jp2DshRoutingTest(RoutingBase):
     def test_JP2_wb_cross_delivery_is_not_judgeable_yet(self):
         """J-P2①（WB 那一半）：`codebuddy:%` 的推送是否落在父键上——**判不到**。
 
-        W4.6 落地后把它换成真判（110 §3.2 末的 join 口径）：
+        **跳过理由不是"W4.6 未落地"**（那是过期理由，2026-11-25 评审 🟠-1 点出）：
+        W4.6（`3f55e8f`）已落地 WB 身份 ensure（继承/幂等/防环/provisional），
+        `test_wb_identity` 17 条在跑；`test_JP2_wb_payload_is_not_corrected_in_w45`
+        也在跑。真正的原因是**键口径**，不是缺实现：
 
-            SELECT COUNT(*) FROM push_log p
-             WHERE p.session_key LIKE 'codebuddy:%'
-               AND p.session_key = 'codebuddy:' || (
-                     SELECT l.parent_session FROM session_lineage l
-                      WHERE l.host='workbuddy'
-                        AND p.session_key = 'codebuddy:' || l.parent_session)
+          · WB 宿主报的 `session_id` 就是**父会话** id（113 §7.1 明写"WB 侧不改口径"），
+            所以 WB 的会话键 `codebuddy:<父sid>` 与父键**是同一个字符串**；
+          · 子代理（`agent-*.jsonl`）根本没有独立会话键（实测 7d 推送键 12/12 都是
+            会话目录名，没有一个 `agent-*`）；
+          ⇒ "子推送落在**子键**上、且带父"这件事在 WB 侧**没有可构造的样本**。
+            拿它写判据，只会得到一个恒真的反连接——**绿是假的，比红更糟**。
 
-        今天 WB 的 `session_id` 还被宿主改写成父（`resolveHookSessionId`），
-        校正器不存在 ⇒ 这条永远是"已知串投"而不是"没串投"。**判不到不是通过**。
+        所以这里**如实标不可判**，而不是把它弄绿。要真判只有一条路：先定 WB 的真子键，
+        那等于推翻 §7.1 的"键口径不改"——**是设计裁决，不该由实现侧私了**（造一个
+        WB 子键就能让判据绿，代价是整条推送归属的口径跟着变）。113 §6.4 的判据表
+        已同步把 WB 半条标 `[判不到]` 并写明原因。
+
+        数据面今天是诚实的：生产 `push_log` 里 `codebuddy:%` 行的 `agent_id` /
+        `parent_session` 全 NULL（不写假父、不串投）——那一半由
+        `test_JP2_wb_payload_is_not_corrected_in_w45` 与生产读数守着。
         """
-        self.skipTest("W4.6 未落地：WB 侧父子不串投判不到，不是通过"
-                      "（校正器在 fish_lineage_wb，W4.5 明确不做）")
+        self.skipTest("WB 键即父键（113 §7.1 键口径不改）⇒ J-P2① 在 WB 侧在本设计下不可判")
 
 
 # ============================================================== J-P3（闸门）

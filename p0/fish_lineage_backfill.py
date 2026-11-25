@@ -21,7 +21,8 @@ J4 窗口：`fish_lineage.py` 的上界是 700 行（`test_split_contract.FISH_L
 
 ## 两个入口，一份格式化
 
-  · `scan(host, ...)`    —— 批量回填（缺省 dry-run：全流程跑在内存影子库上，生产零写）；
+  · `scan(host, ...)`    —— 批量回填（缺省 dry-run：全流程跑在内存影子库上，
+                            不改任何行数据；`ensure_tables` 的建表 DDL 幂等除外）；
   · `report(conn, host)` —— 只读对账（行数 / 分布 / 三份清单）。
 
 为什么 dry-run 要"跑全流程"而不是只数一数：只数文件数的话，"回填之后会不会出现
@@ -40,7 +41,8 @@ import fish_lineage
 # ================================================================ W6 · 回填与对账
 #
 # 两个入口，**同一份格式化**（"0 行也要打印"只许有一处实现）：
-#   · `scan(host, ...)`   —— 批量回填（缺省 dry-run：全流程跑在内存影子库上，生产零写）；
+#   · `scan(host, ...)`   —— 批量回填（缺省 dry-run：全流程跑在内存影子库上，
+#                            不改任何行数据；`ensure_tables` 的建表 DDL 幂等除外）；
 #   · `report(conn, host)`—— 只读对账（行数 / 分布 / 三份清单）。
 #
 # 为什么 dry-run 要"跑全流程"而不是只数一数：只数文件数的话，"回填之后会不会出现
@@ -206,9 +208,17 @@ def scan(host: str, *, since: str | None = None, limit: int | None = None,
          root=None) -> dict:
     """**W6 回填入口**（113 §10.1 步 1–4）：批量 `upsert_node` → 重算深度 → 检测三清单。
 
-    `dry_run=True`（**缺省**）时生产库**一个字节都不写**：节点写入、深度重算、环标记
-    全部发生在内存影子库上（`_shadow_of`），报告里给出"真跑会是什么样"的读数。
+    `dry_run=True`（**缺省**）时**不改任何行数据**（`ensure_tables` 的建表 DDL 幂等
+    除外）：节点写入、深度重算、环标记全部发生在内存影子库上（`_shadow_of`），
+    报告里给出"真跑会是什么样"的读数。
     `dry_run=False` 时先备份（`_backup_index`）再写，并返回前后计数。
+
+    **为什么留这条例外**（123 评审 🟡-4）：dry-run 的第一步是对**生产连接**跑
+    `fish_lineage.ensure_tables`（表不存在就建），在全新/半旧的库上那就是一次写。
+    今天生产两张表都在、`CREATE TABLE IF NOT EXISTS` 是空操作（实测前后内容指纹
+    相同），但**表述不能比实现更宽**——"一个字节都不写"是错的，"不改任何行数据"
+    才是这条路径的真实承诺。要连这一次也不写，就得把 `ensure_tables` 也搬到 shadow
+    上，而"投影表存在且可读"恰恰是影子库从生产复制的**前提**，所以例外留在明面上。
 
     扫描委托宿主适配器（`fish_lineage.get_adapter(host).scan`）——**不新增第三套目录扫描**：
     DSH 的发现走 `fish_corpus_dsh.discover`、WB 走 `fish_corpus_wb.discover`，
@@ -364,7 +374,8 @@ def format_report(reports, *, title: str = "会话树 · 回填与对账") -> st
         if rep.get("missing_table"):
             lines.append(f"  判不到：投影表不存在或读不出来（{rep.get('error', '')}）")
         if "dry_run" in rep:
-            mode = "dry-run（生产库零写；以下读数来自内存影子库）" if rep["dry_run"] \
+            mode = ("dry-run（不改任何行数据；`ensure_tables` 的建表 DDL 幂等除外；"
+                    "以下读数来自内存影子库）") if rep["dry_run"] \
                 else "apply（已写库）"
             lines.append(f"  模式：{mode}")
             window = []

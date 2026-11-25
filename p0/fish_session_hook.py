@@ -58,9 +58,13 @@ WorkBuddy prompt 推送 243/317 行「无身份」（2026-11-25 02:5x 设计快�
   "docstring 与实现各写一遍"才出现 501 行假绿）。
 
 闸门（W4.7）**没有切**——这是取证结论，不是拖延：`_audit/hook-calls.jsonl` 里
-`ensured` 记录 = 0（W4.6 落地后还没有任何真实 SessionStart 走过 ensure），而
-7d 内 WB prompt 推送 238/312 行无身份，此刻切 `skip` 会把这 238 行全挡掉。
-所以档位保持 `allow`，等宿主重启后的首批真实 ensure 记录再按「≥95%」判据决定。
+**WB hook** 的 `ensured` 记录 = 0（W4.6 落地后还没有任何真实 **WB** SessionStart
+走过 ensure）。**反证不是空白，别读成"ensure 从没在真实环境跑过"**：生产 `events`
+已有 **18 条 `session.ensured`**（2026-11-24T23:10:51Z 起，全部来自 **DSH** hook、
+`origin=inherited`、`from=父会话键`，17 条已产生推送）——那正是 W4.0 生效的证据，
+也说明这条 ensure 路径本身是通的；**判不到的是 WB 那一侧**（宿主未重启）。
+而 7d 内 WB prompt 推送 238/312 行无身份，此刻切 `skip` 会把这 238 行全挡掉。
+所以档位保持 `allow`，等宿主重启后首批真实 **WB** ensure 记录再按「≥95%」判据决定。
 开关与判据都已落地（"ready, awaiting host restart"）。
 组合告警 J-W46-3：`identity.wb_ensure=false` × `push.no_identity=skip` 会
 让 WB 推送面归零——由 `fish_common.config_combo_warnings` 判定，本文件负责

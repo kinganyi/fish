@@ -331,6 +331,54 @@ FISH_IDENTITY_DIAG_LINES_MAX = 420
 FISH_CONFIG_GUARD_LINES_MIN = 80
 FISH_CONFIG_GUARD_LINES_MAX = 260
 
+# ---------------------------------------------------------------- 非 ratchet 窗口的追溯
+#
+# 123 评审 🟡-3（2026-11-25）的原话："本轮 3 个窗口抬升（fish_schema 700→712、
+# fish_db 800→990、fish_activity 1900→1920）只在行内注释留理由，不进
+# `j4_ratchet.json`、没有哈希链——也就是说'抬窗必须有理由'对大多数模块只是自觉。"
+#
+# 那句话是对的，而且它说的不是"数字不对"，是**纪律不对称**：`fish.py` 的每一次抬窗
+# 都要过哈希链 + 测试里钉死的链头，其余 26 个窗口却只靠写的人自觉留一句话。
+# 这 26 个窗口没法全搬进 `j4_ratchet.json`（那份是 fish.py 的棘轮，搬进去会把
+# "唯一出处"变成一份大杂烩），所以给它们一张**同一形状、可被判据读**的表：
+#
+#   · 一条 = 一次窗口变更：常量名 / 模块 / 旧值 / 新值 / 日期 / 理由（六件都要）；
+#   · 当前常量值必须等于该常量**最后一条**的"新值"——改大不记 = 红（改小不同步也红）；
+#   · 同一常量的多条记录必须首尾相接（`old` == 上一条的 `new`），不许各说各话；
+#   · 表里出现一个本文件里不存在的常量名 = 红（防"账落在已改名的常量上"的假账）。
+#
+# **这是一本滚动账**：以后哪个窗口被抬，就追加一条 + 把常量名加进
+# `NON_RATCHET_MANAGED`（两个清单互为对照，只改一边也会红）。今天只登记 113
+# （W4/W4.5）这一波真正被抬过的三个——没变的窗口不凭空造一条"没发生的记录"，
+# 表记的是变更史，不是窗口清单。
+NON_RATCHET_WINDOWS = (
+    {"const": "FISH_SCHEMA_LINES_MAX", "module": "fish_schema.py",
+     "old": 700, "new": 712, "date": "2026-11-25",
+     "why": "113 W4.5（推送路由）：`push_log` 的两列 `agent_id` / `parent_session` + "
+            "部分索引 `ix_push_agent`（113 §6.1 明文要求的那三行 SQL）。**只加表结构、"
+            "不加逻辑**——DDL 常量正是本模块的唯一职责，塞到别处就是制造第二处表结构。"
+            "实测 708（窗口 712，余量 4 行）。"},
+    {"const": "FISH_DB_LINES_MAX", "module": "fish_db.py",
+     "old": 800, "new": 990, "date": "2026-11-25",
+     "why": "113 W4（身份 ensure/继承）：`session_tokens.evidence` 的 CHECK 约束只能靠"
+            "**12 步重建**改（备份 → 事务 → 行数守恒 → 索引重放 → 外键 → 重建后再探），"
+            "函数按施工图放在 fish_db（113 §5.3）；同族还有 provisional 档需要的补列夹具。"
+            "**是新能力（provisional 档）不是把旧逻辑挪回长窗口**。实测 946。"},
+    {"const": "FISH_ACTIVITY_LINES_MAX", "module": "fish_activity.py",
+     "old": 1900, "new": 1920, "date": "2026-11-25",
+     "why": "113 W4（§5.2）：`resolve_citizen` 加**第三级**（`session_identity`）——"
+            "子会话继承父公民后，凭证失效时归属不能掉成 None。父链只认投影/会话头，"
+            "判不到就是 None（不猜）。实测 1,910。"},
+)
+
+#: 受上面这张表管的窗口。**显式登记**，而不是"表里出现什么就管什么"——
+#: 否则删掉整段就等于取消了监管，而删记录正是这张表要防的事。
+NON_RATCHET_MANAGED = (
+    "FISH_SCHEMA_LINES_MAX",
+    "FISH_DB_LINES_MAX",
+    "FISH_ACTIVITY_LINES_MAX",
+)
+
 
 def _read(path: Path) -> str:
     return path.read_bytes().decode("utf-8")
@@ -712,9 +760,10 @@ class SplitDependencyTest(unittest.TestCase):
 #
 # 这不是密码学意义上的防篡改（人能重算并改字面量），但它把"改一个数字"
 # 变成"必须动一个看起来就不是数据文件的测试文件"。**诚实地说，这是威慑，不是证明。**
-EXPECTED_CHAIN_HEAD = "d28b269ce22dda158bffd6ff2fb8667b9ab0dcd02ad4a1cf29bf5f8c27451c39"
-EXPECTED_HISTORY_LEN = 9
+EXPECTED_CHAIN_HEAD = "5a4e7c14ff96607f7b88f1ed434ea22a2e252118fd4d8fce3eb489e06c43803c"
+EXPECTED_HISTORY_LEN = 10
 # 与上面链头同一时刻的 max。新增历史前，max 不许偏离它。
+# 第 10 条是**补记**（W6 的 +18 记账、上限未动），所以这条锚值不变。
 EXPECTED_RATCHET_MAX_AT_ANCHOR = 11250
 
 class J4RatchetTest(unittest.TestCase):
@@ -846,6 +895,72 @@ class J4RatchetTest(unittest.TestCase):
                 d["max"], EXPECTED_RATCHET_MAX_AT_ANCHOR,
                 "在**没新增历史**的情况下 max 变了——抬窗必须写一条新记录")
 
+
+class NonRatchetWindowTraceTest(unittest.TestCase):
+    """🟡-3（123 评审）：**非 ratchet 窗口**的抬升也要可追溯。
+
+    评审的原话是"抬窗必须有理由"这条纪律**对大多数模块只是自觉**：`fish.py` 有
+    `j4_ratchet.json`（哈希链 + 测试里钉死的链头 + 长度只增），而 schema/db/activity
+    三个窗口只在行内注释里留了一句理由——同一批抬升，两种强度。这里把自觉变成判据。
+
+    三条能红的方向（缺一条，这张表就只是注释的另一种写法）：
+      ① **改大而不记账**：当前常量值必须等于该常量最后一条的 `new`——不一致就红。
+         这一条两侧都咬：改小却不同步也红，因为历史同样失真。
+      ② **账自相矛盾**：同一常量的 `old` 必须等于上一条的 `new`（抬窗是连续的，
+         不是三次互不相干的孤立事件）；理由是空串也红。
+      ③ **账落在不存在的常量上**：`const` 必须是本文件里真实存在的名字（改名/写错 =
+         一条永远没人核的假账），`module` 指向的文件也必须真的在。
+
+    **变异自证**（2026-11-25，`%TEMP%` 的 p0 副本，生产树一个字节没动）：
+      · 对照：`pytest test_split_contract.py -q -k NonRatchet` → **2 passed**；
+      · M1 抬窗不记账（`FISH_SCHEMA_LINES_MAX = 712` → `= 730`，不动表）→ **1 failed**，
+        红的那句是 `AssertionError: 730 != 712 : FISH_SCHEMA_LINES_MAX: 当前 730 ≠
+        表里最后一条记录 712（抬窗没记账）`；
+      · M2 降窗不记账（`712` → `= 700`）→ 同样 **1 failed**（`700 != 712`）——
+        这一条不是只守"往上"，是守"值变了而历史没跟上"；
+      · 还原后复跑 **2 passed**。同一条判据没有读空——它在两个方向的坏输入下都有牙。
+    """
+
+    def test_managed_windows_match_the_trace(self):
+        """当前值 == 最后一条 `new`；链首尾相接；理由/日期/模块都要在。"""
+        seen = {}
+        for idx, row in enumerate(NON_RATCHET_WINDOWS):
+            name = row["const"]
+            self.assertIn(name, globals(),
+                          f"追溯表第 {idx} 条记的 {name} 在本文件里不存在（改名了？）")
+            self.assertTrue(str(row.get("why") or "").strip(),
+                            f"{name} 第 {idx} 条没写理由——那就是没记账")
+            self.assertRegex(str(row.get("date")), r"^\d{4}-\d{2}-\d{2}$",
+                             f"{name} 第 {idx} 条的日期不是 YYYY-MM-DD：{row.get('date')}")
+            module = row.get("module")
+            if module:
+                self.assertTrue((P0 / module).exists(),
+                                f"{name} 记的模块 {module} 不存在——窗口守的是谁要能对上号")
+            self.assertNotEqual(row["new"], row["old"],
+                                f"{name} 第 {idx} 条的 old == new：没变化的条目不算一次变更")
+            if name in seen:
+                self.assertEqual(row["old"], seen[name],
+                                 f"{name} 的记账链断了：第 {idx} 条 old={row['old']} "
+                                 f"≠ 上一条 new={seen[name]}")
+            seen[name] = row["new"]
+        for name in NON_RATCHET_MANAGED:
+            self.assertIn(name, seen,
+                          f"{name} 在追溯表里一条记录都没有——那它又回到「自觉」了")
+            self.assertEqual(int(globals()[name]), int(seen[name]),
+                             f"{name}: 当前 {globals()[name]} ≠ 表里最后一条记录 "
+                             f"{seen[name]}（抬窗没记账）")
+
+    def test_trace_has_no_orphan_constants(self):
+        """反向：表里的常量名必须都在 `NON_RATCHET_MANAGED` 里。
+
+        两个清单互为对照：只改一边（加了记录但没纳管、或纳管了却没记录）
+        都说明"这张表"和"真正被判的值"已经开始漂。
+        """
+        names = {row["const"] for row in NON_RATCHET_WINDOWS}
+        self.assertEqual(sorted(names - set(NON_RATCHET_MANAGED)), [],
+                         "追溯表里有没纳管的常量：" + str(sorted(names - set(NON_RATCHET_MANAGED))))
+        self.assertEqual(sorted(set(NON_RATCHET_MANAGED) - names), [],
+                         "纳管了却没有记录的常量：" + str(sorted(set(NON_RATCHET_MANAGED) - names)))
 
 
 class SplitSizeTest(unittest.TestCase):

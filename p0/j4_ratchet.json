@@ -75,6 +75,14 @@
       "new": "10300,11250",
       "reason": "113 W5（读取路由与 UI）落在 fish.py 的两块：`cmd_session_tree`（`session tree` 的 CLI 壳：读 session_lineage 投影、缺行时现读宿主会话头）+ `_retire_presence_agent_ids` / `_RETIRE_STEPS`（113 §9.2 的 presence.agent_id 三步清退：搬列 / 清假代理 / 标 legacy，幂等、有 `_backups` 快照）。净增 63 行（11,169 → 11,232）。**这是功能增长不是注释膨胀**，而且落点被逼到 fish.py：`fish_board.py` 只剩 3 行余量（窗口 2440 / 实测 2,437），树视图因此落在无行数窗口的 `fish_workbench_api.py`（W5 的读取面本体），清退则只在 `migrate` 段有合法落点。窗口 11,200 → 11,250，留 18 行给 W4.7。",
       "sha256": "d28b269ce22dda158bffd6ff2fb8667b9ab0dcd02ad4a1cf29bf5f8c27451c39"
+    },
+    {
+      "date": "2026-11-25",
+      "field": "audit",
+      "old": "11250",
+      "new": "10300,11250",
+      "reason": "113 W6（`3f85fb4`）的净增补记，**上限不动**（11,250）：fish.py 11,231 → **11,249**（+18）。这 18 行是 1 行 `import fish_lineage_backfill` + `cmd_lineage` 17 行（开连接/兜异常/定退出码，回填本体在新模块）——**是功能的最小落点，不是注释膨胀**，且落点被逼在 fish.py：`fish_cli.py` 的 handler 表按既有惯例指回 fish 的命令函数。**余量 1 行**（内容行口径；判据数的是 `split('\\n')` 计数 11,250，与上限相等 ⇒ 按判据口径已顶格）：**下一条单行改动即红**。下一波的第一件事应该是从 fish.py **搬出一段**（优先 `cmd_session_tree` 的渲染层或 `_print_session_ensure` 的表现层），而不是先来这里抬窗。另：上一条记的 11,232 是 `split` 计数、11,169 是内容行，两次混了口径（W5 净增实为 +62 不是 +63）；按 append-only 规则不改旧条，口径差在此说明——评审读到的 11,231 与这里一致。",
+      "sha256": "5a4e7c14ff96607f7b88f1ed434ea22a2e252118fd4d8fce3eb489e06c43803c"
     }
   ],
   "_chain_note": "history 每条带 sha256，且把上一条的 sha256 串进去（哈希链）。就地改任何一条历史，它以及它之后所有的 hash 都会对不上——而 test_history_is_append_only 会逐条验。这不是密码学意义上的防篡改（人能重算整条链），但它把「改一个数字」从一行编辑变成了必须重写整条历史，而那在评审里藏不住。"
