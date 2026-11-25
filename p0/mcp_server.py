@@ -622,6 +622,12 @@ TOOLS = [
                 "max_chars": {"type": "integer", "default": 8000},
                 "ranker": {"type": "string",
                            "description": "排序算法（缺省 default；未登记的名字会响亮失败）"},
+                # P2-4（2026-11-26）：交互式 top-K 不需要全库 COUNT（5 万段库上 ≈0.5s+）。
+                # 默认 false；要精确总数（面板/统计）显式传 true。`total_matched=None`
+                # 表示本次没统计，不是 0。
+                "count": {"type": "boolean", "default": False,
+                          "description": "search 时是否统计全库命中总数（默认 false："
+                                         "交互式 top-K 不需要；精确总数给面板/统计用）"},
             },
             "required": ["action"],
         },
@@ -2404,10 +2410,14 @@ class FishServer:
                 limit=self._kb_int_arg(a, "limit", default=8, lo=1,
                                        hi=fish_corpus.SEARCH_MAX_LIMIT),
                 ranker=(a.get("ranker") or "default"), root=self.root,
-                citizen_id=citizen, session_key=session_key, via="mcp:corpus")
+                citizen_id=citizen, session_key=session_key, via="mcp:corpus",
+                # P2-4：MCP 交互面默认不统计全库总数；显式 count=true 才统计。
+                count=bool(a.get("count", False)))
             meta = res["meta"]
+            total_text = ("未统计" if meta["total_matched"] is None
+                          else str(meta["total_matched"]))
             lines = self._corpus_header(
-                f"hits={meta['returned']} total={meta['total_matched']} "
+                f"hits={meta['returned']} total={total_text} "
                 f"ranker={meta['ranker']} truncated={str(meta['truncated']).lower()}") + [""]
             if not res["hits"]:
                 lines.append("- （没有命中：换个词，或这台机器还没采过语料）")

@@ -78,6 +78,7 @@ import sqlite3
 import sys
 import threading
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
@@ -154,7 +155,21 @@ LIMIT_MAX = 500
 MOTION_WINDOW_MIN = 30          # 「在跑」窗口（96 §七①：近 30 分钟）
 FOLD_ITEMS_MAX = 100            # 单组折叠最多带多少条明细（24h 实测最大组 72）
 
-CACHE_TTL_S = {"facets": 10.0, "stats": 60.0, "entry": 30.0, "streamcount": 10.0}
+CACHE_TTL_S = {
+    "facets": 10.0,
+    "stats": 60.0,
+    "entry": 30.0,
+    "streamcount": 10.0,
+    # P2-4（2026-11-26）：宿主探测一次 5 个宿主 ~0.7s；设置页打开会连读，
+    # 2–5 秒足够挡住连点，又不会把「刚卸载」藏到分钟级。显式 refresh 会清这一档。
+    "hosts": 3.0,
+    # P2-4：推送概览 ~0.8s；10 秒内重复打开设置页复用同一份读数，
+    # POST /api/push/config|preset 写完后立刻失效（见 cache_invalidate）。
+    "push_overview": 10.0,
+}
+#: 进程内缓存条数上限（P2-5）：长跑进程里每换一个 win/days/entry key 就多一条，
+#: 没有上限就是慢性内存泄漏。LRU 淘汰最久未用的条目。
+CACHE_MAX_ENTRIES = 256
 
 #: 当前进程读的库（缓存键的一部分：同一进程换库不会串读数）。
 _CURRENT_DB = ""
@@ -234,25 +249,49 @@ class Sources:
     # `partial` 也从前端类型里删掉，见 `ui/README.md` §六「本期不支持 partial」。
 
 
-# ── 小缓存（facets 10s / stats 60s / entry 30s）──────────────────────────
-_CACHE: dict[tuple, tuple[float, dict]] = {}
+# ── 小缓存（facets 10s / stats 60s / entry 30s / hosts 3s / push_overview 10s）
+#: 用 OrderedDict 维护 LRU：`cache_get` 命中时 move_to_end，`cache_put` 超上限时
+#: 从队头淘汰最久未用的条目（P2-5：_CACHE 无上限 = 长跑进程的慢性内存泄漏）。
+_CACHE: "OrderedDict[tuple, tuple[float, dict]]" = OrderedDict()
 _CACHE_LOCK = threading.Lock()
 
 
 def cache_get(scope: str, key: tuple):
+    cache_key = (scope, key)
     with _CACHE_LOCK:
-        hit = _CACHE.get((scope, key))
-    if not hit:
-        return None
-    ts, value = hit
-    if time.time() - ts > CACHE_TTL_S.get(scope, 0):
-        return None
+        hit = _CACHE.get(cache_key)
+        if not hit:
+            return None
+        ts, value = hit
+        if time.time() - ts > CACHE_TTL_S.get(scope, 0):
+            # 过期即删：不删的话过期条目会一直占着 LRU 名额。
+            del _CACHE[cache_key]
+            return None
+        _CACHE.move_to_end(cache_key)
     return value
 
 
 def cache_put(scope: str, key: tuple, value: dict) -> None:
+    cache_key = (scope, key)
     with _CACHE_LOCK:
-        _CACHE[(scope, key)] = (time.time(), value)
+        _CACHE[cache_key] = (time.time(), value)
+        _CACHE.move_to_end(cache_key)
+        while len(_CACHE) > CACHE_MAX_ENTRIES:
+            _CACHE.popitem(last=False)
+
+
+def cache_invalidate(scope: str) -> int:
+    """清掉一个 scope 的全部条目，返回清掉的条数。
+
+    P2-4：`POST /api/push/config|preset` 写完配置后必须让 `push_overview` 立即失效，
+    否则 10 秒窗口里读到的还是写前读数——「改了但没变」会被误判成写失败。
+    `POST /api/hosts/<id>/refresh` 用同一入口清 `hosts` 档。
+    """
+    with _CACHE_LOCK:
+        doomed = [key for key in _CACHE if key[0] == scope]
+        for key in doomed:
+            del _CACHE[key]
+        return len(doomed)
 
 
 # ── 连接 ────────────────────────────────────────────────────────────────
@@ -2314,19 +2353,34 @@ def api_meta(db_path: str) -> dict:
     }
 
 
-# ── 宿主接入层（设置页的读口）：**每次现探，不落库、不缓存、不写盘** ──────────
-def api_hosts(db_path: str) -> dict:
+# ── 宿主接入层（设置页的读口）：**短 TTL 缓存，不落库、不写盘** ────────────
+def api_hosts(db_path: str, host_id: str | None = None, *,
+              host: str | None = None) -> dict:
     """`GET /api/hosts`：只列**探测到安装痕迹**的宿主，按注册表顺序。
 
     三条口径写死在这里：
-      1. **不缓存**：探测结果是「当下」，缓存会变成「看起来装了、其实早卸了」；
+      1. **短 TTL 缓存（3 秒）**：探测结果是「当下」，但一次列表要探 5 个宿主
+         （实测 689–753 ms）；3 秒只挡住连点与并发读，又不会把「刚卸载」藏成分钟级。
+         `POST /api/hosts/<id>/refresh` 会清空这一档，强制下一次列表重探。
+         缓存键含 `db_path` 与 `host` 过滤参数——过滤后的子集不能复用全量读数。
       2. **只读**：`fish_hosts` 里没有一处写文件；这个端点也不碰库（只读连接查最后活跃）；
       3. **列表口径 = installed**：装了但没接 fish 的宿主也要出现（空心点那档），
          否则用户永远看不到「这台机器上还有谁没接」。
     """
+    # `host` 是 HTTP 查询参数名；`host_id` 是内部调用名。`all` 等同不过滤。
+    filter_id = (host_id or host or "").strip().lower() or None
+    if filter_id == "all":
+        filter_id = None
+    cache_key = (os.path.abspath(db_path), filter_id or "")
+    cached = cache_get("hosts", cache_key)
+    if cached is not None:
+        log("cache_hit", scope="hosts", host=filter_id or "all")
+        return cached
     started = time.perf_counter()
     now = now_dt()
     items = fish_hosts.installed_statuses(db_path=db_path)
+    if filter_id is not None:
+        items = [item for item in items if str(item.get("id") or "") == filter_id]
     consistency = fish_hosts.consistency()
     elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
     with_seen = sum(1 for item in items if item["lastSeenAt"])
@@ -2341,21 +2395,26 @@ def api_hosts(db_path: str) -> dict:
             "ms": elapsed_ms,
         },
     ]
-    return envelope(
+    payload = envelope(
         {"items": items, "generatedAt": iso(now), "consistency": consistency},
         as_of=iso(now),
         availability={"state": "ok" if items else "empty",
                       "detail": None if items else "本机没有探测到任何已安装的宿主"},
         sources=sources,
     )
+    cache_put("hosts", cache_key, payload)
+    return payload
 
 
-def api_host(db_path: str, host_id: str) -> dict | None:
+def api_host(db_path: str, host_id: str, *, refresh: bool = False) -> dict | None:
     """`GET /api/hosts/<id>`（也用于 `POST .../refresh`）：单个宿主的详情，**每次现探**。
 
-    注意：**refresh 与 GET 详情是同一条实现**——本读口本来就不缓存探测结果，所以
-    「刷新」不需要另一条代码路径（写两条只会让两条慢慢漂开）。动作面显式的意义在
+    注意：**refresh 与 GET 详情是同一条实现**——本读口本来就不缓存单个宿主的探测结果，
+    所以「刷新」不需要另一条代码路径（写两条只会让两条慢慢漂开）。动作面显式的意义在
     HTTP 层：刷新是 `POST`，它明确表示「允许重探」，而 GET 只是读。
+
+    `refresh=True` 时额外清空 `hosts` 列表缓存：列表是 3 秒 TTL 的批量探测，
+    刚点过「刷新」的用户不该在下一屏看到刷新前的缓存（P2-4）。
     """
     started = time.perf_counter()
     now = now_dt()
@@ -2363,6 +2422,9 @@ def api_host(db_path: str, host_id: str) -> dict | None:
         return None
     item = fish_hosts.detect(host_id, db_path=db_path)
     elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+    if refresh:
+        cleared = cache_invalidate("hosts")
+        log("cache_invalidate", scope="hosts", host=host_id, entries=cleared)
     return envelope(
         item,
         as_of=iso(now),
@@ -2399,10 +2461,22 @@ def push_envelope(data: dict, *, as_of: str, sources: list) -> dict:
 
 
 def api_push_overview(db_path: str, days: int) -> dict:
-    """`GET /api/push/overview`：诊断概览（`totals` 来自 `fish.push_stats`，不重算）。"""
+    """`GET /api/push/overview`：诊断概览（`totals` 来自 `fish.push_stats`，不重算）。
+
+    P2-4：一次概览实测 ~797 ms，10 秒 TTL 挡住设置页的连续打开；
+    `POST /api/push/config|preset` 写完配置后调用 `cache_invalidate("push_overview")`，
+    保证「改了值 → 立刻看到新读数」。
+    """
+    cache_key = (os.path.abspath(db_path), int(days))
+    cached = cache_get("push_overview", cache_key)
+    if cached is not None:
+        log("cache_hit", scope="push_overview", days=days)
+        return cached
     data = fish_push_audit.overview(db_path, days=days)
     sources = data.pop("sources", [])
-    return push_envelope(data, as_of=data.get("asOf") or iso(now_dt()), sources=sources)
+    payload = push_envelope(data, as_of=data.get("asOf") or iso(now_dt()), sources=sources)
+    cache_put("push_overview", cache_key, payload)
+    return payload
 
 
 def api_push_events(db_path: str, *, limit: int, channel: str | None,
@@ -2442,6 +2516,8 @@ def api_push_write_config(db_path: str, key, value) -> dict:
     data = fish_push_audit.write_config(db_path, key, value)
     log("push_config_written", key=data["key"], old=data["old"], new=data["new"],
         changed=data["changed"], audit=data["auditAt"])
+    cleared = cache_invalidate("push_overview")
+    log("cache_invalidate", scope="push_overview", reason="push_config", entries=cleared)
     return push_envelope(data, as_of=iso(now_dt()), sources=[
         {"source": "config", "ok": True, "rows": 1 if data["changed"] else 0,
          "error": None, "ms": None},
@@ -2454,6 +2530,8 @@ def api_push_apply_preset(db_path: str, preset) -> dict:
     data = fish_push_audit.apply_preset(db_path, preset)
     log("push_preset_applied", preset=data["preset"], changed=data["changedCount"],
         audit=data["auditAt"])
+    cleared = cache_invalidate("push_overview")
+    log("cache_invalidate", scope="push_overview", reason="push_preset", entries=cleared)
     return push_envelope(data, as_of=iso(now_dt()), sources=[
         {"source": "config", "ok": True, "rows": data["changedCount"], "error": None,
          "ms": None},
@@ -2708,7 +2786,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_error(503, "busy", "并发连接已满（上限 8）", "等一秒再重试")
                 return
             try:
-                payload = api_host(self.db_path, host_id)
+                payload = api_host(self.db_path, host_id, refresh=True)
             finally:
                 self.semaphore.release()
             self._send_json(200, payload, allow_origin=origin)
@@ -2872,7 +2950,8 @@ class Handler(BaseHTTPRequestHandler):
 
         # ── 宿主接入层（设置页）：列表 / 详情；重探走 POST ──────────────
         if path == "/api/hosts":
-            self._send_json(200, api_hosts(self.db_path), allow_origin=origin)
+            host_filter = (query.get("host") or [""])[0].strip() or None
+            self._send_json(200, api_hosts(self.db_path, host_filter), allow_origin=origin)
             return 200
 
         host_match = re.fullmatch(r"/api/hosts/([a-z][a-z0-9-]{1,31})", path)

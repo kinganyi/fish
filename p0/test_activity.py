@@ -485,9 +485,13 @@ class FrozenCitizensSqlTest(unittest.TestCase):
     EXPECTED_FUNCS = {"_presence_entries", "activity_sessions"}
     # 挂在模块常量上的两条（`resolve_citizen` 用）：逐字冻结，改一个空格都算变更。
     FROZEN_SQL = {
+        # P2-5（2026-11-26）：有效性增加 `citizens_all.status='active'` JOIN——
+        # 与 `fish.validate_session_token` 同判定（退役公民的活 token 不再算有效）。
         "SQL_SESSION_TOKEN_CITIZEN": (
-            "SELECT citizen_id FROM session_tokens WHERE session_key=? AND "
-            "revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) "
+            "SELECT session_tokens.citizen_id FROM session_tokens "
+            "JOIN citizens_all c ON c.citizen_id=session_tokens.citizen_id "
+            "AND c.status='active' WHERE session_key=? AND revoked_at IS NULL "
+            "AND (expires_at IS NULL OR expires_at > ?) "
             "ORDER BY issued_at DESC LIMIT 1"),
         "SQL_HOST_SESSION_CITIZEN": (
             "SELECT citizen_id FROM citizens_all WHERE host_session_key=? AND "

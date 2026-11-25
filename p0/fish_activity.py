@@ -238,8 +238,15 @@ def make_session_key(host, session_id) -> str:
 # ⚠️ 下面两条 SQL 是本模块**唯一**的 citizens 读点，由 `test_activity` 逐条冻结
 #    （设计 T02 §7：新模块自己的 citizens 查询不许悄悄增删）。查不到就是 None，
 #    「不知道是谁」不等于「谁都可以」。
+# P2-5（2026-11-26）：凭证有效 = 未吊销 + 未过期 + **公民仍是 active**。
+# 旧 SQL 只看前两条，退役公民的活 token 仍会被解析成公民（与
+# `fish.validate_session_token` 的 `citizens.status == 'active'` 判定漂移）。
+# 这里 JOIN `citizens_all`（热表 ∪ 归档表的视图）而不是 import fish：
+# `fish_activity` 是 hook 热路径叶子，SQL 里 JOIN 不引入 import。
 SQL_SESSION_TOKEN_CITIZEN = (
-    "SELECT citizen_id FROM session_tokens WHERE session_key=? AND revoked_at IS NULL "
+    "SELECT session_tokens.citizen_id FROM session_tokens "
+    "JOIN citizens_all c ON c.citizen_id=session_tokens.citizen_id AND c.status='active' "
+    "WHERE session_key=? AND revoked_at IS NULL "
     "AND (expires_at IS NULL OR expires_at > ?) ORDER BY issued_at DESC LIMIT 1")
 SQL_HOST_SESSION_CITIZEN = (
     "SELECT citizen_id FROM citizens_all WHERE host_session_key=? AND status='active' "

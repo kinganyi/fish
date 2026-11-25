@@ -108,8 +108,9 @@ BASELINE_TOOL_PROPS = {
                  "base_sha256", "reason", "allow_sensitive"},
     # 2026-10-27（语料层 T03）：18 → 19，新增 `corpus`（search/read/stats 三读动作）。
     # 与其它工具同一口径：token 由 `_attach_token` 统一补，这里只列业务字段。
+    # 2026-11-26（P2-4）：可选 `count`（默认 false；交互式 top-K 不统计全库总数）。
     "corpus": {"action", "host", "limit", "max_chars", "pointer", "project",
-               "query", "ranker", "role"},
+               "query", "ranker", "role", "count"},
     # 2026-11-11（序2 主人画像）：两个工具，**没有 profile_set**——
     # 画像是人写的，AI 只能 propose（R1-2 写权分离落在接口层）。
     "profile_show": {"group"},

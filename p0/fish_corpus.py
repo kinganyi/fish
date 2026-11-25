@@ -1571,7 +1571,10 @@ def run_cli(action, *, root=None, target=None, host=None, limit=None, dry_run=Fa
             _f["citizen"] = [_actor]
         res = search(target or "", filters=_f or None,
                      limit=limit or SEARCH_DEFAULT_LIMIT, root=root, via="cli:corpus",
-                     session_key=session_key)
+                     session_key=session_key,
+                     # 面板/CLI 要显示「命中 N 条」——精确总数是展示项，显式统计。
+                     # MCP 交互面则默认 count=False（P2-4）。
+                     count=True)
         if json_out:
             return 0, [json.dumps(res, ensure_ascii=False, indent=2)], []
         lines = ["命中 %d 条 / 返回 %d 条（ranker=%s%s）"

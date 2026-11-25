@@ -754,8 +754,9 @@ CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, src TEXT NOT NULL,
                          "base_sha256", "reason", "allow_sensitive"},
             # 2026-10-27（语料层 T03）：18 → 19，新增 `corpus`（三读动作）。
             # token 由 `_attach_token` 统一补；这里只列业务字段。
+            # 2026-11-26（P2-4）：可选的 `count`（默认 false；交互式 top-K 不统计全库总数）。
             "corpus": {"action", "host", "limit", "max_chars", "pointer", "project",
-                       "query", "ranker", "role"},
+                       "query", "ranker", "role", "count"},
             # 2026-11-20（P4-4）：两个只读 git 工具。token 同样由 _attach_token 补，
             # 这里只列业务字段。**没有写仓库的工具**（方案 §6）。
             "git_repo_status": {"path", "repo_id"},
