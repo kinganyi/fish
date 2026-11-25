@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""W4.5 判据 · 推送路由 + 三开关（113 §6.4 · 2026-11-25）。
+"""W4.5 / W4.7 判据 · 推送路由 + 三开关 + 闸门切换（113 §6.4 · 2026-11-25）。
 
-## 这一波只建开关，**不切闸门**
+## W4.5 只建开关，**不切闸门**
 
 `push.no_identity=allow` + `push.target_mode=session` 就是今天的实现行为：prompt 侧
 无身份照推（`citizen_id` 为空的 prompt 推送 = 501 条读数即证）、投递按会话键去重。
@@ -10,11 +10,25 @@ W4.5 只做三件事：两个键登记进 `CONFIG_DEFAULTS`、`push_log` 写对�
 docstring 同源。`skip` 档是 **W4.7**、WB 侧父子校正（`agent_id` + `transcript_path`）
 是 **W4.6**——顺序反了会挡掉 76.7% 的 WB prompt 推送（110 §3.5.3）。
 
-## 三条判据（每条都带反面）
+## W4.7 来了，但**没切**——这是取证结论，不是拖延
+
+W4.7 规定：先取证"有没有真实 WB SessionStart 走过 `ensured`"，没有就**不许切**。
+2026-11-25T01:42Z 取证结果：`_audit/hook-calls.jsonl` 140 行里 **`ensured` 记录 =
+0 条**（最后一条发生在 W4.6 落地 **之前**，还是 `ERROR 该会话尚未登记`）；同时 7d 内
+`codebuddy:%` prompt 推送 **312 行 / 无身份 238 行（76.3%）**，此刻切 `skip` 会
+挡掉这 238 行。⇒ 开关与判据落地，档位保持 `allow`，回执写 "ready, awaiting host
+restart"。
+
+所以本文件的 J-P5 判的是"**能不能**切"而不是"切了没有"：它是条件判据——线上档位
+是 `allow` 就守"不挡行"，是 `skip` 就守"挡 0 行 + 量 ≥95%"。变异体（WB 未 ensure
+就切 `skip`）必须让它红，那就是"今天不能切"的可执行证据。
+
+## 判据（每条都带反面）
 
   J-P1  未命名公民推送**停止新增**（**时间窗**，不是恒 0）+ 7d 回放的 would_block
   J-P2  父子不串投：**DSH 真判**（子会话的推送落在子键、并带父）；WB 标 `[判不到]`
   J-P3  `push.no_identity` 两档行为 + docstring 与实现同源（三件都要）
+  J-P5  闸门切换的前置条件（**条件判据**：allow 恒绿 / skip 时挡 0 行且量 ≥95%）
 
 ## 冻结读数（2026-11-24T23:48Z，生产库 `mode=ro`）
 
@@ -392,6 +406,184 @@ class Jp3GateTest(RoutingBase):
         # 那样变异体把参数改成 False 时判据仍然绿——本判据自己就吃过这个亏）
         self.assertIn("push_gate_no_identity(conn, citizen_id, strict_anonymous=True)", src,
                       "hook 没有按同一口径读开关（或改成了放宽）")
+
+
+# ============================================================== J-P5（闸门切换）
+#
+# W4.7 的判据形态与前面几条不同：前面判的是"开关行为对不对"，这里判的是
+# "**能不能**把闸门真切到 skip"。切换是**生产配置动作**（`fish config set`），
+# 不是改代码，所以判据必须能在"切之前"回答"切了会怎样"——这就是回放的意义。
+
+#: 切换前 7d 的 WB prompt 推送量（`codebuddy:%`，`channel='prompt'`）。
+#: **不锚死数字**：判据只用它算"≥95%"，活读数每跑一次现取。活数据会漂——
+#: 110 §3.5 记的 317 是设计快照，2026-11-25T01:42Z 实测已漂到 312（无身份 238）。
+#: `FISH_WB_BASELINE_7D` 可覆盖：真切之后应把基线钉到"切换那一刻的前 7d"。
+WB_BASELINE_7D = int(os.environ.get("FISH_WB_BASELINE_7D", "317"))
+#: 判据只锚这条**比例**（317 → ≥302 就是这么来的：`317 × 0.95 = 301.15`）。
+WB_KEEP_RATIO = 0.95
+#: 2026-11-25T01:42Z 实测的分子/分母：312 行里 **238 行无身份**（76.3%）。
+#: 变异判据用它复现"此刻切 skip 会挡 238 行"——这是**证据读数**，不是阈值。
+WB_ANON_ROWS = 238
+WB_NAMED_ROWS = 74        # 312 - 238
+
+
+def _wb_7d(conn, *, since=REPLAY_SINCE):
+    """7d 窗口里 WB prompt 推送的 `(总行数, 无身份行数)`。"""
+    row = conn.execute(
+        "SELECT COUNT(*), SUM(CASE WHEN citizen_id IS NULL OR citizen_id='' "
+        "THEN 1 ELSE 0 END) FROM push_log "
+        "WHERE channel='prompt' AND session_key LIKE 'codebuddy:%' AND pushed_at >= ?",
+        (since,)).fetchone()
+    return int(row[0] or 0), int(row[1] or 0)
+
+
+def jp5_verdict(conn, *, mode, wb_total, wb_anon, baseline=None):
+    """J-P5 的判定表：按 `push.no_identity` 的档位选**该守哪条**。
+
+    返回 `(读数 dict, 失败项 list)`；`失败项 == []` 才算过。
+
+      · `allow`（今天的行为）→ 闸门**不挡任何行**：没切的时候不许悄悄生效。
+      · `skip`（切了）→ 两条**同时**成立：
+          ① 回放挡 0 行（WB 都有身份了，闸门无事可挡）；
+          ② 7d 量 ≥ 基线 95%（挡 0 行但量塌了同样是事故：通道死了，闸门再干净也没意义）。
+
+    回放一律调 `fish.push_gate_no_identity`（**应用自己的函数**）——"多少行算无身份"
+    不许在这里另写一份。而"≥95%"不属于应用行为（它是发布判据），所以住在这里。
+    """
+    baseline = WB_BASELINE_7D if baseline is None else int(baseline)
+    blocked = _replay_blocked(conn, mode)
+    named = max(0, int(wb_total) - int(wb_anon))
+    verdict = {"mode": mode, "would_block": blocked, "wb_total": int(wb_total),
+               "wb_named": named,
+               "kept_ratio": (named / int(wb_total)) if wb_total else 0.0,
+               "baseline": baseline, "volume_floor": WB_KEEP_RATIO * baseline}
+    failures = []
+    if mode == "skip":
+        if blocked:
+            failures.append(
+                f"skip 档回放挡掉 {blocked}/{wb_total} 行 WB 推送"
+                f"（WB 还没 ensure 就切闸门 = {blocked} 行凭空消失）")
+        if int(wb_total) < WB_KEEP_RATIO * baseline:
+            failures.append(
+                f"7d WB 推送 {wb_total} 行 < 基线 {baseline} 的 {WB_KEEP_RATIO:.0%}"
+                f"（{WB_KEEP_RATIO * baseline:.0f} 行）——通道量塌了")
+    elif blocked:
+        failures.append(f"allow 档回放挡掉了 {blocked} 行——闸门在未切换时就生效了")
+    return verdict, failures
+
+
+class Jp5SwitchCriterionTest(RoutingBase):
+    """J-P5：闸门切换的**前置条件**判据（W4.7）。
+
+    这一组不判"切了没有"，判的是"**能不能**切"：同一张判定表在两种档位下各守一条，
+    而变异体（WB 未 ensure 就切 skip）必须让它红——这就是 W4.7 第 1 步取证的可执行形式。
+    """
+
+    TOTAL = WB_ANON_ROWS + WB_NAMED_ROWS
+
+    def _seed_wb(self, anon=0, named=0):
+        for i in range(anon):
+            fish.append_push_log(self.conn, [f"PJ-261196-{i:03d}"], channel="prompt",
+                                 session_key=f"codebuddy:anon-{i}", citizen_id=None)
+        for i in range(named):
+            fish.append_push_log(self.conn, [f"PJ-261195-{i:03d}"], channel="prompt",
+                                 session_key=f"codebuddy:named-{i}", citizen_id=CID)
+
+    def test_JP5_allow_mode_never_blocks(self):
+        """`allow` 恒绿：闸门没切的时候，回放一行都不该挡。"""
+        self._seed_wb(anon=WB_ANON_ROWS, named=WB_NAMED_ROWS)
+        self.assertEqual(fish.get_config(self.conn, "push.no_identity"), "allow")
+        verdict, failures = jp5_verdict(self.conn, mode="allow",
+                                        wb_total=self.TOTAL, wb_anon=WB_ANON_ROWS)
+        self.assertEqual(verdict["would_block"], 0, f"{verdict}")
+        self.assertEqual(failures, [], f"allow 档被判红：{failures}")
+
+    def test_JP5_mutation_switch_before_ensure_goes_red(self):
+        """**变异（W4.7 的核心）**：WB 还没 ensure 就切 `skip` → 回放挡 238 行 → 判据必红。
+
+        这条同时是"为什么今天不切"的**可执行证据**：不是"感觉还没准备好"，而是
+        "切了会挡掉 76.3% 的 WB prompt 推送"。
+        """
+        self._seed_wb(anon=WB_ANON_ROWS, named=WB_NAMED_ROWS)
+        fish.set_config(self.conn, "push.no_identity", "skip")      # ← 变异：提前开闸
+        verdict, failures = jp5_verdict(self.conn, mode="skip",
+                                        wb_total=self.TOTAL, wb_anon=WB_ANON_ROWS)
+        self.assertEqual(verdict["would_block"], WB_ANON_ROWS,
+                         f"变异没生效：提前切闸门只挡了 {verdict['would_block']} 行")
+        self.assertTrue(failures, "提前切闸门被判过了——J-P5 没有判别力")
+        self.assertIn("凭空消失", " ".join(failures))
+        # 还原档位后必须立刻复绿：证明红来自**档位**，不是这批行本身
+        fish.set_config(self.conn, "push.no_identity", "allow")
+        verdict2, failures2 = jp5_verdict(self.conn, mode="allow",
+                                          wb_total=self.TOTAL, wb_anon=WB_ANON_ROWS)
+        self.assertEqual((verdict2["would_block"], failures2), (0, []),
+                         "还原 allow 后没复绿——判据红的原因不是档位")
+
+    def test_JP5_skip_passes_once_identity_is_complete(self):
+        """对照组：WB **都**有身份后切 `skip` → 挡 0 行 + 量 100% → 绿（这时候可以切）。"""
+        self._seed_wb(anon=0, named=self.TOTAL)
+        verdict, failures = jp5_verdict(self.conn, mode="skip",
+                                        wb_total=self.TOTAL, wb_anon=0)
+        self.assertEqual(verdict["would_block"], 0, f"{verdict}")
+        self.assertGreaterEqual(verdict["kept_ratio"], WB_KEEP_RATIO, f"{verdict}")
+        self.assertEqual(failures, [], f"该绿的时候被判红：{failures}")
+
+    def test_JP5_volume_collapse_alone_goes_red(self):
+        """第二条臂也要有牙：挡 0 行、但量掉到基线 78% → 判据**照样红**。
+
+        没有这一条，`skip` 档就只剩"挡 0 行"——而"推送通道整个死掉"同样挡 0 行。
+        """
+        thin = int(WB_BASELINE_7D * 0.78)      # 317 × 0.78 ≈ 247 行 < 95%
+        self._seed_wb(anon=0, named=thin)
+        verdict, failures = jp5_verdict(self.conn, mode="skip", wb_total=thin, wb_anon=0)
+        self.assertEqual(verdict["would_block"], 0, f"{verdict}")
+        self.assertTrue(failures, "量塌了却判过——「≥95%」这条臂没有判别力")
+        self.assertIn("通道量塌了", " ".join(failures))
+
+
+class Jp5LiveSwitchTest(unittest.TestCase):
+    """J-P5 的**真实读数**（生产库 `mode=ro`）：线上那个档位能否过它自己那条判据。
+
+    只读：`get_config` / `push_gate_no_identity` / `push_log` 全是 SELECT，档位也
+    从**生产配置表**读——判的是"线上那个值"，不是代码里的默认值。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        if not _prod_db_is_real(PROD_DB):
+            raise unittest.SkipTest(f"没有真实生产库：{PROD_DB}——判不到，不是通过")
+        cls.conn = sqlite3.connect(f"file:{PROD_DB}?mode=ro", uri=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        try:
+            cls.conn.close()
+        except Exception:      # noqa: BLE001
+            pass
+
+    def test_JP5_baseline_is_not_vacuous(self):
+        """反面控制：窗口里必须真有人推 WB prompt，否则"挡 0 行"可能只是没有行。"""
+        total, _anon = _wb_7d(self.conn)
+        self.assertGreater(total, 0, "7d 窗口里没有 WB prompt 推送——J-P5 判不到，不是通过")
+
+    def test_JP5_live_mode_passes_its_own_criterion(self):
+        """线上档位必须过它自己那条：`allow` 不挡行 / `skip` 挡 0 行且量 ≥95%。"""
+        try:
+            mode = fish.get_config(self.conn, "push.no_identity")
+        except sqlite3.Error as exc:
+            self.skipTest(f"生产库读不到 push.no_identity（判不到线上档位）：{exc}")
+        total, anon = _wb_7d(self.conn)
+        verdict, failures = jp5_verdict(self.conn, mode=mode, wb_total=total, wb_anon=anon)
+        would = _replay_blocked(self.conn, "skip")
+        named = max(0, total - anon)
+        rate = (named / total) if total else 0.0
+        print(f"\n[W4.7 读数] 线上档位={mode}；7d WB prompt 推送 {total} 行"
+              f"（无身份 {anon}，有身份 {named} = {rate:.1%}）；"
+              f"当前档位回放挡 {verdict['would_block']} 行；"
+              f"若此刻切 skip 会挡 {would} 行；"
+              f"基线 {WB_BASELINE_7D} 的 {WB_KEEP_RATIO:.0%} = "
+              f"{WB_KEEP_RATIO * WB_BASELINE_7D:.0f} 行")
+        self.assertEqual(failures, [], f"线上档位没过 J-P5：{failures}\n读数：{verdict}")
 
 
 # ============================================================== 表结构（§6.1）

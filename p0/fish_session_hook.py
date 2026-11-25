@@ -50,9 +50,24 @@ WorkBuddy prompt 推送 243/317 行「无身份」（2026-11-25 02:5x 设计快�
     父链整条都判不到 → `provisional`，**绝不造 machine**（宁可不推，不串推）。
   · **判不到任何父** → 当根会话 ensure（`direct`/machine，宿主 session_id 是机器事实）。
 
-紧急关停：`FISH_WB_ENSURE=0` → 退回"只查不签"（不建 config 键；闸门是 W4.7 的事）。
+紧急关停（两级，方向单一）：
+  · `identity.wb_ensure=false`（配置键，W4.6b 登记，默认 true）；
+  · `FISH_WB_ENSURE=0`（环境变量，应急口——**只能关，不能开**）。
+  判定只有一处：`fish_common.wb_ensure_enabled`。本文件不再自己解析一遍
+  "0/false/off"——两份解析就是两次漂移的机会（W4.5 的闸门就是因为
+  "docstring 与实现各写一遍"才出现 501 行假绿）。
+
+闸门（W4.7）**没有切**——这是取证结论，不是拖延：`_audit/hook-calls.jsonl` 里
+`ensured` 记录 = 0（W4.6 落地后还没有任何真实 SessionStart 走过 ensure），而
+7d 内 WB prompt 推送 238/312 行无身份，此刻切 `skip` 会把这 238 行全挡掉。
+所以档位保持 `allow`，等宿主重启后的首批真实 ensure 记录再按「≥95%」判据决定。
+开关与判据都已落地（"ready, awaiting host restart"）。
+组合告警 J-W46-3：`identity.wb_ensure=false` × `push.no_identity=skip` 会
+让 WB 推送面归零——由 `fish_common.config_combo_warnings` 判定，本文件负责
+**把它喊出来**（stderr + 审计 note），而不是让它在库里躺着。
 """
-from fish_common import warn_ignored
+import fish_common              # 开关的唯一判定点（`wb_ensure_enabled`）
+from fish_common import config_combo_warnings, warn_ignored
 from hook_io import log_child_stderr  # noqa: F401
 import json
 import os
@@ -75,8 +90,6 @@ MODE = os.environ.get("FISH_HOOK_MODE", "inject")
 #: hook 调的会话子命令（113 W4.6）。**只此一处**：`test_wb_identity` 的变异 M1
 #: 把它换成 `start` 来证明"退回轮换口径 → 同会话两公民 → J4 必红"。
 ENSURE_VERB = "ensure"
-#: 关停开关（环境变量，不是 config 键）：`0`/`false` → 退回"只查不签"。
-ENSURE_ENV = "FISH_WB_ENSURE"
 #: 父链跳数上限。WB 树只有"会话 → 子代理"一层，上限是给防环/防病态数据用的
 #: （与 `fish_lineage.ancestor_sessions(max_hops=64)` 同口径）。
 MAX_PARENT_HOPS = 64
@@ -171,9 +184,21 @@ def _payload_facts(req):
             "transcript": transcript, "same_dir": same_dir}
 
 
-def _ensure_enabled() -> bool:
-    """`FISH_WB_ENSURE` 关停开关（缺省开）。"""
-    return (os.environ.get(ENSURE_ENV) or "").strip().lower() not in ("0", "false", "off")
+def _ensure_enabled(conn) -> tuple:
+    """`(能不能 ensure, 关掉的原因)` —— 判定**委托** `fish_common.wb_ensure_enabled`。
+
+    为什么需要 `conn`：开关是一个配置键（`identity.wb_ensure`），要读库。这正是
+    W4.6b 与 W4.6 的差别——W4.6 只有环境变量，读不到"用户想不想开"。
+
+    为什么不在本文件实现：判定写两遍，就会有一遍在读配置、另一遍在读环境变量，
+    然后某天两遍给出相反答案。本仓为这类"同一决定多份实现"付过三次账
+    （`hook_io.py` 头记着那四次 `json.dumps`）。
+    """
+    try:
+        return fish_common.wb_ensure_enabled(conn)
+    except Exception as exc:      # noqa: BLE001 —— 判不到开关按缺省（开）
+        warn_ignored('fish_session_hook.py:_ensure_enabled', exc)
+        return True, ""
 
 
 def _fields_of(stdout: str) -> dict:
@@ -266,12 +291,27 @@ def _session_citizen(req):
             if cid:
                 return cid, None, f"existing citizen={cid}"
             plan, anchor = _plan_chain(conn, sid, facts["parent"])
+            # W4.6b：开关与组合体检都要**读库**，所以在连接还开着的时候判——放在
+            # `finally: conn.close()` 之后就只能再开一次库（或干脆硬编码，那更糟）。
+            enabled, why_off = _ensure_enabled(conn)
+            combos = config_combo_warnings(conn)
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 —— 查身份失败不能拖垮会话
         return None, f"{type(exc).__name__}: {exc}", ""
-    if not _ensure_enabled():
-        return None, f"该会话尚未登记（{ENSURE_ENV}=0：ensure 已关）", "ensure-disabled"
+    if not enabled:
+        # J-W46-3：组合告警**必须出声**。它是"再点一次会归零"的唯一提醒，
+        # 只写进库或只写进 note 都等于没喊——stderr 进 `hook-stderr.jsonl`，
+        # note 进 `hook-calls.jsonl`，两条都可 grep。
+        warn = "；".join(str(c.get("why") or "") for c in combos if c.get("why"))
+        note = f"ensure-disabled {why_off}"
+        if warn:
+            sys.stderr.write(f"⚠ 危险配置组合：{warn}\n")
+            sys.stderr.flush()
+            note += f" | ⚠ 危险配置组合：{warn}"
+        # 只给**原因**：`main()` 会再套一层「该会话尚未登记（…）」。旧写法在这里
+        # 又写了一遍整句，日志里于是出现「该会话尚未登记（该会话尚未登记（…））」。
+        return None, f"ensure 已关：{why_off}", note
 
     cwd = str((req or {}).get("cwd") or "").strip()
     previous = anchor

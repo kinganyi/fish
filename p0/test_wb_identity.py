@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""W4.6 · WorkBuddy 身份路径（113 §7 · J-W46-1/2 · 2026-11-25）。
+"""W4.6 / W4.6b · WorkBuddy 身份路径（113 §7 · J-W46-1/2/3 · 2026-11-25）。
 
 ## 这一批判据守什么
 
@@ -23,6 +23,18 @@
 
 实测（2026-11-25T00:3xZ，只读）：7d 内 WB prompt 推送的 12 个会话键**全部**是
 宿主会话目录名，没有一个 `agent-*` —— 键口径改了就会与推送侧分叉。
+
+## W4.6b（本批）：一个持久开关 + J-W46-3 的**组合**判据
+
+ensure 现在有一个可配开关 `identity.wb_ensure`（默认 `true` = W4.6 已经上线的行为），
+环境变量 `FISH_WB_ENSURE=0` 退为应急口（**只能关，不能开**）。判定只有一处：
+`fish_common.wb_ensure_enabled`——两份解析就是两次漂移的机会。
+
+J-W46-3 守的是**组合**：`identity.wb_ensure=false` × `push.no_identity=skip` 会让
+WorkBuddy 的推送面归零（拿不到身份 + 无身份不推 = 全挡，实测 7d 238/312 行）。
+两个键各自都合理，组合是事故——这类事故单键校验永远绿，只能靠组合体检抓住。
+告警由 `fish_common.config_combo_warnings` 判定，由 hook **喊出来**
+（stderr 进 `hook-stderr.jsonl`、note 进 `hook-calls.jsonl`）。
 
 ## 三条写法纪律
 
@@ -47,6 +59,8 @@ if str(HERE) not in sys.path:
 
 import fish           # noqa: E402
 import fish_activity  # noqa: E402
+import fish_common    # noqa: E402 —— W4.6b 的判定点（`wb_ensure_enabled` /
+#                       `config_combo_warnings`）：判据调**应用自己的函数**，不另写一份
 
 PY = sys.executable
 FISH_PY = HERE / "fish.py"
@@ -381,10 +395,16 @@ class KeyContractTest(_WbBase):
         self.assertNotRegex(src, r"subagents.*\[\^", "hook 里不许再出现第二份 transcript 正则")
 
     def test_push_gate_default_is_untouched(self):
-        """W4.7 才开闸门：本波不许把 `push.no_identity` 默认值改成 skip。"""
+        """W4.7 已到但**未切**：默认值仍是 `allow`。
+
+        切换是**生产配置动作**（`fish config set push.no_identity skip`），不是改默认值
+        ——改默认值会让每一台新部署的机器都直接进 skip 档，而它们可能压根没有 WB 流量。
+        W4.7 的取证结论见 `test_push_routing.Jp5SwitchCriterionTest`：
+        此刻切 skip 会挡掉 7d 内 238/312 行 WB 推送，所以**不切**。
+        """
         conn = self.conn()
         self.assertEqual(fish.get_config(conn, "push.no_identity"), "allow",
-                         "W4.6 不许动闸门默认值（W4.7 的事）")
+                         "默认值不许改成 skip（切换只走生产配置）")
 
     def test_session_start_still_rotates(self):
         """`start` 的轮换语义一个字节不改（ensure 的存在不改变人驱动那条路）。"""
@@ -441,6 +461,164 @@ class MutationTest(_WbBase):
                            "变异没生效：start 的凭证必须是 machine")
         with self.assertRaises(AssertionError, msg="J4 失去判别力：同会话两公民没被抓住"):
             self.assertEqual(self.placeholder(conn) - before, 0, "继承不该新增未命名公民（J4）")
+
+
+# ============================================================ W4.6b · ensure 开关
+
+
+class EnsureSwitchTest(_WbBase):
+    """W4.6b：`identity.wb_ensure` 是**唯一**的持久开关（默认 true），环境变量只能关。
+
+    每条都**真跑 hook**（不是调 `_ensure_enabled` 看返回值）：要看的是"配置改了，
+    行为跟没跟着变"，而不是"函数返回了 True"。判据真跑 hook 也能顺带守住
+    "开关读不到库时不炸会话"这条底线（hook 恒 0 是 `_WbBase.hook` 的断言）。
+    """
+
+    SID = "cfg-session-1"
+
+    def _cfg(self, value):
+        conn = self.conn()
+        fish.set_config(conn, "identity.wb_ensure", value)
+        return conn
+
+    def test_key_is_registered_and_defaults_true(self):
+        """键必须**登记**且默认 true。未登记时 `get_config` 第一行就抛 KeyError，
+        开关会变成"永远缺省"——用户设了也不生效（本仓已有两次同类缺陷的档案）。"""
+        self.assertEqual(fish_common.CONFIG_DEFAULTS["identity.wb_ensure"][:2], (True, "bool"),
+                         "必须是 (默认 True, 类型 bool) 三元组的前两项")
+        conn = self.conn()
+        self.assertIs(fish.get_config(conn, "identity.wb_ensure"), True)
+        # 缺省不靠"配置表里必须有一行"：全新库（没有这一行）也必须是 true
+        self.assertEqual(conn.execute(
+            "SELECT COUNT(*) FROM config WHERE key='identity.wb_ensure'").fetchone()[0], 0,
+            "缺省值不许依赖「有人先写过一行」——全新库也必须是 true")
+        # 可写：字符串 'false' 也要能写进去并读成 False（bool 键的既有手法）
+        fish.set_config(conn, "identity.wb_ensure", "false")
+        self.assertIs(fish.get_config(conn, "identity.wb_ensure"), False)
+
+    def test_default_behavior_is_unchanged_ensure(self):
+        """不写配置、不设环境变量 → 与 W4.6 逐字节相同（走 ensure）。"""
+        conn = self.conn()
+        self.hook({"session_id": self.SID, "cwd": "i:/proj"})
+        row = self.identity(conn, "codebuddy:" + self.SID)
+        self.assertIsNotNone(row, "默认必须仍是 ensure（W4.6 的行为一个字都不改）")
+        self.assertEqual(row[1], "direct")
+        self.assertEqual(row[3], "machine")
+        self.assertIn("ensured", " ".join(self.notes()), "审计行要能看出走了 ensure")
+
+    def test_config_false_turns_ensure_off(self):
+        """`identity.wb_ensure=false` → 退回"只查不签"：一条凭证都不许签。"""
+        conn = self._cfg("false")
+        self.hook({"session_id": self.SID, "cwd": "i:/proj"})
+        key = "codebuddy:" + self.SID
+        self.assertIsNone(self.identity(conn, key), "关掉后仍在签身份")
+        self.assertEqual(self.tokens(conn, key), [], "关掉后不许有任何凭证行")
+        self.assertEqual(self.citizens(conn), 0, "只查不签不许造公民")
+        note = " ".join(self.notes())
+        self.assertIn("ensure-disabled", note)
+        self.assertIn("identity.wb_ensure", note, "note 必须点出**是哪个键**关的")
+
+    def test_config_true_ensures(self):
+        """`identity.wb_ensure=true` → ensure（与缺省同一条路）。"""
+        conn = self._cfg("true")
+        self.hook({"session_id": self.SID, "cwd": "i:/proj"})
+        row = self.identity(conn, "codebuddy:" + self.SID)
+        self.assertIsNotNone(row, "显式 true 必须 ensure")
+        self.assertEqual(row[3], "machine")
+
+    def test_env_still_overrides_to_false(self):
+        """环境变量是**应急口**：配置开着 + `FISH_WB_ENSURE=0` → 仍然关。"""
+        conn = self._cfg("true")
+        self.hook({"session_id": self.SID, "cwd": "i:/proj"}, FISH_WB_ENSURE="0")
+        self.assertIsNone(self.identity(conn, "codebuddy:" + self.SID),
+                          "应急关断失效了——库坏掉时就没有停 ensure 的手段了")
+        self.assertIn("FISH_WB_ENSURE", " ".join(self.notes()))
+
+    def test_env_cannot_force_ensure_on(self):
+        """方向**不许反**：配置 false + 环境变量=1 → 仍然关。
+
+        允许反方向会让"配置文件里写着 false"变成一句谎话；而应急口的用途是
+        "立刻停"，它从来不需要"开"（默认就是开）。
+        """
+        conn = self._cfg("false")
+        self.hook({"session_id": self.SID, "cwd": "i:/proj"}, FISH_WB_ENSURE="1")
+        self.assertIsNone(self.identity(conn, "codebuddy:" + self.SID),
+                          "环境变量把配置关掉的开关又打开了——两个开关从此互相打架")
+
+    def test_switch_does_not_touch_manual_start(self):
+        """关掉 ensure **不影响**人驱动的 `start`（那是另一条路，轮换语义不变）。"""
+        conn = self._cfg("false")
+        out = fish.start_session(conn, environ={"CODEBUDDY_SESSION_ID": "manual-1"})
+        self.assertTrue(out["citizen_id"])
+        self.assertEqual(self.live(conn, "codebuddy:manual-1"), 1,
+                         "人驱动的 start 被 ensure 开关带坏了")
+
+
+# ============================================================ J-W46-3 · 危险组合
+
+
+class UnsafeComboTest(_WbBase):
+    """J-W46-3：`wb_ensure=false` × `no_identity=skip` **必须被拒绝或告警**。
+
+    本波选"告警"而不是"拒绝"：写入口 `set_config` 在 `fish_db`（W5 正在改，禁碰），
+    而且同一个库会被多进程共写——写入侧拦一次也拦不住第二次（`fish config set`
+    之外还有 MCP / UI / 手工 SQL 三条路）。所以判定放在**读侧**：谁消费这两个键，
+    谁喊。
+
+    判据调的是**应用自己的函数** `fish_common.config_combo_warnings`，不在这里另写
+    一份"什么组合算危险"——自建的绿不算绿，也不会随实现漂。
+    """
+
+    def test_clean_combos_are_silent(self):
+        """对照组：三种**各自合理**的组合都必须静默（否则告警会被训练成噪音）。"""
+        conn = self.conn()
+        self.assertEqual(fish_common.config_combo_warnings(conn), [], "缺省组合不该被告警")
+        fish.set_config(conn, "identity.wb_ensure", "false")
+        self.assertEqual(fish_common.config_combo_warnings(conn), [],
+                         "只关 ensure 不被告警（应急口是合法的）")
+        fish.set_config(conn, "identity.wb_ensure", "true")
+        fish.set_config(conn, "push.no_identity", "skip")
+        self.assertEqual(fish_common.config_combo_warnings(conn), [],
+                         "只切 skip 不被告警（WB 有身份时它是安全档）")
+
+    def test_unsafe_combo_is_reported_with_both_keys(self):
+        """正面对照：两个键同时命中 → 必须报出，且**两个键都点名**（人才知道改哪个）。"""
+        conn = self.conn()
+        fish.set_config(conn, "identity.wb_ensure", "false")
+        fish.set_config(conn, "push.no_identity", "skip")
+        warns = fish_common.config_combo_warnings(conn)
+        self.assertEqual(len(warns), 1, f"危险组合没被报出来：{warns}")
+        self.assertEqual(set(warns[0]["keys"]),
+                         {"identity.wb_ensure", "push.no_identity"},
+                         "告警不点名两个键，人不知道该改哪个")
+        self.assertIn("238", warns[0]["why"], "后果要带量（不是「看起来不对」）")
+
+    def test_hook_surfaces_the_warning(self):
+        """消费侧：真跑 hook → 告警必须进 **stderr** 与**审计 note**（两条都可 grep）。"""
+        conn = self.conn()
+        fish.set_config(conn, "identity.wb_ensure", "false")
+        fish.set_config(conn, "push.no_identity", "skip")
+        proc = self.hook({"session_id": "combo-1", "cwd": "i:/proj"})
+        self.assertIn("危险配置组合", proc.stderr, "告警没出现在 stderr（等于没喊）")
+        self.assertIn("identity.wb_ensure", proc.stderr)
+        self.assertIn("危险配置组合", " ".join(self.notes()),
+                      "审计 note 里没有告警（事后无法复盘这次组合）")
+
+    def test_mutation_silencing_the_check_goes_red(self):
+        """变异：把体检换成"永远空" → 上面的断言必红（证明它不是恒真）。"""
+        conn = self.conn()
+        fish.set_config(conn, "identity.wb_ensure", "false")
+        fish.set_config(conn, "push.no_identity", "skip")
+        self.assertTrue(fish_common.config_combo_warnings(conn), "对照组必须绿")
+        original = fish_common.config_combo_warnings
+        try:
+            fish_common.config_combo_warnings = lambda *a, **k: []
+            with self.assertRaises(AssertionError, msg="J-W46-3 失去判别力：静音后仍是绿"):
+                self.assertTrue(fish_common.config_combo_warnings(conn),
+                                "危险组合必须被报出来")
+        finally:
+            fish_common.config_combo_warnings = original
+        self.assertTrue(fish_common.config_combo_warnings(conn), "还原后必须复绿")
 
 
 # ============================================================ 验收回放（只读生产库）
