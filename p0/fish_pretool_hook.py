@@ -24,6 +24,20 @@
      → **零输出 = 放行**。绝不 `deny`。
   3. **可解释**：原因里带名字 + 项目 + 路径 + 分钟数；**不含 ULID、不含内容**。
 
+## 撞车面上的**代理维**（113 §9.3 · W5）
+
+命中行多一列 `agent_role`（来自 `session_lineage.agent_role`）：同一个人名下两个代理
+改同一块时，"是谁的哪个代理"比"是谁"更接近该找谁协调。它有两处刻意的**限制**：
+
+  · **离线投影**：读的是 `session_lineage`（宿主日志的投影），不是实时状态；
+  · **三态分明**：`agent_role_basis='projection'` = 查过投影（值可能 `None` = 投影里
+    没这一行）；`'missing'` = **没查**（无会话键 / 前缀不属已知宿主 / 表不存在）。
+    两者都不许用会话键或 `main` 冒充代理。
+
+为什么这里自己写一条 SQL 而不 import `fish_workbench_api.lineage_of`：那条路 import
+**390 ms**（实测：拖进 http.server / fish_hosts / fish_push_audit），而本 hook 每次工具
+调用都要跑。撞车命中是稀有路径，但把 390 ms 装进 hook 是拿热路径换复用。
+
 ## 审计
 
 每次"决定要问/要提醒"都往 `_audit/hooks/pretool-asks.jsonl` 追加一行
@@ -94,6 +108,10 @@ def describe_hits(hits, target_abs, *, limit: int = 2, question: bool = True) ->
         # 而不标注的后果正是把假撞车当成真撞车。
         if hit.get("repo_unanchored"):
             note += "（未锚定仓库，可能是误报：两边至少一侧没有仓库信息）"
+        # 113 §9.3（W5）：代理维**只在判得到时**说，且必须标"离线投影·非实时"——
+        # 拿一张定期回填的投影当实时状态报，就是在制造"刚才明明是它"的争论。
+        if hit.get("agent_role"):
+            note += f"（代理：{hit['agent_role']}·离线投影，非实时）"
         parts.append(f"{hit['label']}{suffix}{where} {when}写过 {surface}{note}")
     if len(hits) > limit:
         parts.append(f"另有 {len(hits) - limit} 个会话")
@@ -190,8 +208,12 @@ def evaluate(payload, *, host="dsh", data_dir=None, now=None) -> dict:
     # 「同一公民的另一会话」**不排除**（两个窗口同改一个文件是真撞车），但要标出来，
     # 否则人会怀疑"我怎么会跟我自己撞"。
     own_citizen = own_citizen_of(data_dir, session_key)
+    # 113 §9.3（W5）：撞车面的**代理维**（离线投影，非实时；判不到就是 None）。
+    roles, role_basis = _agent_roles_of(data_dir, [h.get("session_key") for h in hits])
     for hit in hits:
         hit["another_session"] = bool(own_citizen) and hit.get("citizen_id") == own_citizen
+        hit["agent_role"] = roles.get(hit.get("session_key") or "")
+        hit["agent_role_basis"] = role_basis
     result["hits"] = hits
     result["decision"] = "ask" if mode == "ask" else "warn"
     result["reason"] = describe_hits(hits, target_abs, question=result["decision"] == "ask")
@@ -218,6 +240,55 @@ def own_citizen_of(data_dir, session_key):
                 conn.close()
             except sqlite3.Error as exc:
                 warn_ignored('fish_pretool_hook.py:195 own_citizen_of', exc)
+
+
+#: 会话键前缀 → 会话树宿主。与 `fish_workbench_api._LINEAGE_HOSTS` 同一口径，但刻意
+#: 各存一份：那个模块 import 390 ms（拖进 HTTP 面），而本文件是每条工具调用都要跑的 hook。
+_LINEAGE_HOSTS = {"dsh": "dsh", "workbuddy": "workbuddy", "codebuddy": "workbuddy"}
+
+
+def _agent_roles_of(data_dir, session_keys):
+    """撞车面上的一列 `agent_role`（113 §9.3）：**离线投影，非实时**。
+
+    返回 `(roles, basis)`：`basis='projection'` = 查过（值可以是 `None`，= 投影里没有
+    这一行）；`basis='missing'` = **没查**（没有会话键 / 前缀不属已知宿主 / 库或表不在）。
+    只读连接、只查一列，失败一律落到 `missing`（hook 绝不能因为这张表挂了而阻塞工具）。
+    """
+    keys = [k for k in dict.fromkeys(session_keys or ()) if k]
+    if not keys:
+        return {}, "missing"
+    pairs = []
+    for key in keys:
+        proto, _sep, ident = str(key).partition(":")
+        table_host = _LINEAGE_HOSTS.get(proto.strip().lower())
+        if table_host and ident.strip():
+            pairs.append((key, table_host, ident.strip()))
+    if not pairs:
+        return {}, "missing"
+    conn = None
+    try:
+        import sqlite3
+        db = Path(data_dir) / "index.sqlite"
+        if not db.exists():
+            return {}, "missing"
+        conn = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True, timeout=2.0)
+        where = " OR ".join("(host = ? AND session_id = ?)" for _ in pairs)
+        params = [v for _k, host, ident in pairs for v in (host, ident)]
+        rows = conn.execute(
+            f"SELECT host, session_id, agent_role FROM session_lineage "
+            f" WHERE {where}", params).fetchall()
+        index = {(r[0], r[1]): r[2] for r in rows}
+        roles = {key: index.get((host, ident))
+                 for key, host, ident in pairs}
+        return roles, "projection"
+    except (sqlite3.Error, OSError):
+        return {}, "missing"
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error as exc:
+                warn_ignored('fish_pretool_hook.py:_agent_roles_of', exc)
 
 
 def main(argv=None) -> int:
@@ -282,7 +353,8 @@ def _run(argv=None) -> int:
         "decision": res["decision"],
         "hits": [{"label": h.get("label"), "project": h.get("project"),
                   "surface": h.get("surface"), "minutes_ago": h.get("minutes_ago"),
-                  "kind": h.get("kind")} for h in res["hits"]],
+                  "agent_role": h.get("agent_role"), "kind": h.get("kind")}
+                 for h in res["hits"]],
     })
     if res["decision"] == "ask":
         _emit_decision(res["reason"])

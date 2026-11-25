@@ -503,8 +503,51 @@ def _ensure_kb_tables(conn: sqlite3.Connection):
     _ensure_kb_views(conn)
 
 # ------------------------------------------------------ 身份层 P1-a：建表 / 补列 / 视图
+# 113 §9.2（W5）：`presence.agent_id` 三步清退。三条谓词**共用一份**，①的"形如会话键"
+# 直接复用当初回填用的 `_PRESENCE_SESSION_BACKFILL`——口径写第二份就会漂。
+#: ③ 的**存量截点**：只标本波上线之前就存在的"无键无代理"行。没有它，之后任何
+#: "手工签到没带会话键"的新行都会被标成 `legacy`——那是**给它安一个它没有的来历**，
+#: 而且会让 `board render` 这类命令在测试里莫名多出一份备份（`test_board_home_root`
+#: 的"render 不许改 data_root"就是这么红的）。截点取 W5 上线当天（整日，按 UTC）。
+_RETIRE_LEGACY_BEFORE = "2026-11-25"
+
+_RETIRE_STEPS = (
+    ("session_key=agent_id, agent_id=NULL",
+     "COALESCE(session_key,'')='' AND ({}) <> ''".format(_PRESENCE_SESSION_BACKFILL)),
+    # ② 的 `agent_id <> ''` 不能省：两列都空时 `'' = ''` 也成立，会把 ③ 要标 legacy 的
+    # 21 行当成"假代理"清掉（计数就说不清到底搬了几行）。
+    ("agent_id=NULL", "agent_id IS NOT NULL AND agent_id <> '' AND agent_id = session_key"),
+    ("auto_source='legacy'",
+     "COALESCE(session_key,'')='' AND COALESCE(agent_id,'')='' "
+     "AND COALESCE(auto_source,'')='' AND COALESCE(first_seen_at,'') <> '' "
+     f"AND first_seen_at < '{_RETIRE_LEGACY_BEFORE}'"),
+)
+
+
+def _retire_presence_agent_ids(conn) -> dict:
+    """113 §9.2：`presence.agent_id` 存量清退（幂等、可中断、有备份）。
+
+    三步见 `_RETIRE_STEPS`：① 列空且旧列形如会话键 → 搬进 `session_key`；② `agent_id`
+    抄的就是会话键 → 清空（上线前 599 行假代理）；③ 两列都空 → `auto_source='legacy'`。
+
+    **没有待清退的行就不备份**：migrate 每条命令都跑，动不动复制一份 38MB 的库不行。
+    有变化才备份，且在 UPDATE **之前**；回退 = 用 `_backups/` 里那份快照替换。
+    """
+    where = " OR ".join(cond for _set, cond in _RETIRE_STEPS)
+    if not conn.execute(f"SELECT COUNT(*) FROM presence WHERE {where}").fetchone()[0]:
+        return {"backup": None, "counts": [0, 0, 0]}
+    root = _presence_data_root(conn)
+    if root is None:                  # 内存库 / 拿不到目录：宁可不迁移，也不无备份就改数据
+        return {"backup": None, "counts": [0, 0, 0], "skipped": "no_data_root"}
+    backup = _presence_backup(conn, root)
+    counts = [conn.execute(f"UPDATE presence SET {set_} WHERE {cond}").rowcount
+              for set_, cond in _RETIRE_STEPS]
+    conn.commit()
+    return {"backup": backup, "counts": counts}
+
+
 def migrate(conn: sqlite3.Connection):
-    """旧库升级：缺列则补，不动已有数据。"""
+    """旧库升级：缺列则补 + **幂等**数据迁移（数据迁移段在函数末，逐段带注释）。"""
     cols = {r[1] for r in conn.execute("PRAGMA table_info(code_index)")}
     additions = [
         ("last_accessed_at", "TEXT"),
@@ -593,6 +636,11 @@ def migrate(conn: sqlite3.Connection):
     # 两段都幂等：连跑两次，第二次是空操作。
     _ensure_boards_home_paths(conn)
     _kb_backfill_mandatory_globs(conn)
+    # 113 §9.2（W5）：presence.agent_id 存量清退（幂等；回退 = `_backups/` 的库快照）
+    try:
+        _retire_presence_agent_ids(conn)
+    except PresenceMigrationError as exc:
+        print(f"警告：presence.agent_id 清退未完成（下次启动重试）：{exc}", file=sys.stderr)
     conn.commit()
     try: fish_meta.stamp(conn)   # F-P2-5：补完列后盖章
     except sqlite3.OperationalError: pass   # A档：只读库写不了版本号
@@ -8461,6 +8509,20 @@ def cmd_session_status(args):
         sys.exit(2)
     _print_session_status(res)
     conn.close()
+
+
+def cmd_session_tree(args):
+    """`session tree <session_id> [--depth 1]`（113 §9.3）：读投影，缺行时现读宿主头。"""
+    import fish_workbench_api      # 局部 import（同 fish_purge）：HTTP 面不拖进每条命令
+    conn = connect(Path(args.root))
+    conn.executescript(SCHEMA)
+    migrate(conn)
+    try:
+        tree = fish_workbench_api.session_tree(conn, args.session_id, depth=args.depth)
+    finally:
+        conn.close()
+    print(fish_workbench_api.session_tree_text(tree), end="")
+    sys.exit(0 if tree.get("rows") else 2)
 
 
 def cmd_session_end(args):

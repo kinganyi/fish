@@ -662,10 +662,10 @@ class SplitDependencyTest(unittest.TestCase):
 #
 # 这不是密码学意义上的防篡改（人能重算并改字面量），但它把"改一个数字"
 # 变成"必须动一个看起来就不是数据文件的测试文件"。**诚实地说，这是威慑，不是证明。**
-EXPECTED_CHAIN_HEAD = "57dd658c701d6a61ae38bc9eef5368be1440aa2e49e6d7ccbaa7909e0a83a71c"
-EXPECTED_HISTORY_LEN = 8
+EXPECTED_CHAIN_HEAD = "d28b269ce22dda158bffd6ff2fb8667b9ab0dcd02ad4a1cf29bf5f8c27451c39"
+EXPECTED_HISTORY_LEN = 9
 # 与上面链头同一时刻的 max。新增历史前，max 不许偏离它。
-EXPECTED_RATCHET_MAX_AT_ANCHOR = 11200
+EXPECTED_RATCHET_MAX_AT_ANCHOR = 11250
 
 class J4RatchetTest(unittest.TestCase):
     """J4 窗口的**棘轮**（F-P1-10，2026-11-18 外部审查）。

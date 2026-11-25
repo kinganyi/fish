@@ -818,6 +818,8 @@ def board_checkin(conn, citizen_id, doing="", surface="", scope="project",
     为什么 `doing` 必填（哪怕只给空字符串也记一行）：看板的核心价值就是
     **别人靠这一句判断"我会不会跟它撞车"**。没有 doing 的在场行等于没签到。
 
+    ## `agent_id`（113 §9.2 · W5）：只写**真代理 id**，判不到就 NULL——旧实现
+    `agent_id or sk or None` 把会话键抄进代理列（601 行里 575 行假代理，J-W5-legacy）。
     ## `session_key`（仅关键字、默认 `''`）
 
     `''` = 无会话归属（CLI 手工签到 / 无凭证路径）。此时行为与今天**逐字节相同**：
@@ -843,11 +845,12 @@ def board_checkin(conn, citizen_id, doing="", surface="", scope="project",
             # 自动刷新只写 auto_* 三列、绝不碰 doing——「手工行不被自动刷新覆盖」
             # 这条红线靠"doing 是否是自动占位"再兜一层（见 `_is_auto_doing`）。
             "  auto_source=NULL",
-            (board["id"], citizen_id, sk, agent_id or sk or None, status, doing, surface,
+            (board["id"], citizen_id, sk, agent_id or None, status, doing, surface,
              now, now))
     else:
         # 两列主键（迁移未跑 / 故障降级）：**与今天逐字节相同**，且不写 session_key 列
         # （那列可能压根不存在）。这是故障兜底，不是第二套语义。
+        # 113 §9.2（W5）：降级分支同样只写真代理 id——110 漏了这第四处
         conn.execute(
             "INSERT INTO presence (board_id, citizen_id, agent_id, status, doing, surface, "
             "first_seen_at, last_seen_at) VALUES (?,?,?,?,?,?,?,?) "
@@ -855,7 +858,7 @@ def board_checkin(conn, citizen_id, doing="", surface="", scope="project",
             "  agent_id=excluded.agent_id, status=excluded.status, doing=excluded.doing, "
             "  surface=excluded.surface, last_seen_at=excluded.last_seen_at, "
             "  auto_source=NULL",
-            (board["id"], citizen_id, agent_id or sk or None, status, doing, surface,
+            (board["id"], citizen_id, agent_id or None, status, doing, surface,
              now, now))
     conn.commit()
     return board
@@ -938,7 +941,9 @@ def board_auto_checkin(conn, citizen_id, *, project=None, session_key=None,
                 values.append(sk)
             cols += ["agent_id", "status", "doing", "surface", "first_seen_at",
                      "last_seen_at", "auto_surface", "auto_seen_at", "auto_source"]
-            values += [sk or None, "active", _auto_doing_text(source), "", now, now, "",
+            # 113 §9.2（W5）：自动行没有代理证据（SessionStart payload 里就没有 `agent_id`）
+            # → 写 NULL。旧实现写 `sk or None` = 拿会话键冒充代理。
+            values += [None, "active", _auto_doing_text(source), "", now, now, "",
                        now, source]
             conn.execute(
                 f"INSERT INTO presence ({', '.join(cols)}) VALUES "
@@ -957,10 +962,7 @@ def board_auto_checkin(conn, citizen_id, *, project=None, session_key=None,
             conn.execute(
                 "UPDATE presence SET auto_seen_at=?, auto_source=? "
                 f"WHERE {where}", (now, source) + key_params)
-        conn.execute(
-            f"UPDATE presence SET agent_id=? WHERE {where} "
-            "AND agent_id IS NULL AND ? IS NOT NULL",
-            (sk or None,) + key_params + (sk or None,))
+        # 113 §9.2（W5）：原「反向回填」把 `sk` 抄进 `agent_id`（575 个假代理的产出点），已删
         conn.commit()
         return {"board": board, "created": False, "refreshed": True, "skipped": None}
     except (sqlite3.Error, ValueError) as exc:
@@ -1639,7 +1641,7 @@ def board_presence_rows(conn, board):
         out.append({
             "citizen_id": cid,
             "session_key": sk,
-            "session_key_source": sk_src,
+            "session_key_source": ("legacy_readonly" if sk_src == "agent_id:legacy" else sk_src),
             "session_short": fish_naming.session_short(sk),
             "agent_id": agent,
             "display_name": dname or "", "kind": ckind or "", "host": chost or "",

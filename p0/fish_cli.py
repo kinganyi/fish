@@ -651,6 +651,14 @@ def main():
     sp.add_argument("--token", default=None, help="查某条凭证（缺省=用 env 定位当前会话）")
     sp.set_defaults(func=_f.cmd_session_status)
 
+    # 2026-11-25（113 §9.3 · W5）：会话树。读 `session_lineage` 投影；投影里没有这一行时
+    # 现读宿主会话头（只读、不写投影）——W6 回填之前投影可能是 0 行（本机实测就是 0 行）。
+    sp = sess.add_parser("tree", help="会话树：父 / 代理 / 关系（默认只展 1 层，懒加载）")
+    sp.add_argument("session_id", help="会话 id（`dsh:xxx` 或裸 id）")
+    sp.add_argument("--depth", type=int, default=1,
+                    help="向下展开几层（默认 1；0 = 只看根）")
+    sp.set_defaults(func=_f.cmd_session_tree)
+
     sp = sess.add_parser("end", help="吊销凭证 + 关档期 + 刷新活跃时间（幂等）")
     sp.add_argument("--token", default=None, help="吊销这条凭证（缺省=吊销当前会话的全部）")
     sp.set_defaults(func=_f.cmd_session_end)

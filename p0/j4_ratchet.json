@@ -2,7 +2,7 @@
   "_why": "J4 行数窗口的**唯一出处**。test_split_contract.py 从这里读，不再在测试里写死数字。",
   "_rule": "方向只许降。任何一次改动都必须在 history 里写清楚：改了什么、为什么必须改。没有理由的改动算违规。",
   "min": 10300,
-  "max": 11200,
+  "max": 11250,
   "history": [
     {
       "date": "2026-11-18",
@@ -67,6 +67,14 @@
       "new": "10300,11200",
       "reason": "113 W4.6（WorkBuddy 身份路径）落在 fish.py：`ensure_session` 新增 `parent_session` / `agent_id` 两个入参（父证据直接来自宿主 payload，不再过一遍 lineage IO）、`_explicit_parent_key`（键形态归一 + 自指折成 None）、`cmd_session_ensure` 透传。净增 40 行（11,129 → 11,169）。**这是功能增长不是注释膨胀**：少了它 WB 会话永远拿不到身份（7d 内 238 行 prompt 推送「无身份」，2026-11-25T00:3xZ 只读读数）。窗口 11,150 → 11,200，留 31 行余量给 W4.7。",
       "sha256": "57dd658c701d6a61ae38bc9eef5368be1440aa2e49e6d7ccbaa7909e0a83a71c"
+    },
+    {
+      "date": "2026-11-25",
+      "field": "max",
+      "old": "11200",
+      "new": "10300,11250",
+      "reason": "113 W5（读取路由与 UI）落在 fish.py 的两块：`cmd_session_tree`（`session tree` 的 CLI 壳：读 session_lineage 投影、缺行时现读宿主会话头）+ `_retire_presence_agent_ids` / `_RETIRE_STEPS`（113 §9.2 的 presence.agent_id 三步清退：搬列 / 清假代理 / 标 legacy，幂等、有 `_backups` 快照）。净增 63 行（11,169 → 11,232）。**这是功能增长不是注释膨胀**，而且落点被逼到 fish.py：`fish_board.py` 只剩 3 行余量（窗口 2440 / 实测 2,437），树视图因此落在无行数窗口的 `fish_workbench_api.py`（W5 的读取面本体），清退则只在 `migrate` 段有合法落点。窗口 11,200 → 11,250，留 18 行给 W4.7。",
+      "sha256": "d28b269ce22dda158bffd6ff2fb8667b9ab0dcd02ad4a1cf29bf5f8c27451c39"
     }
   ],
   "_chain_note": "history 每条带 sha256，且把上一条的 sha256 串进去（哈希链）。就地改任何一条历史，它以及它之后所有的 hash 都会对不上——而 test_history_is_append_only 会逐条验。这不是密码学意义上的防篡改（人能重算整条链），但它把「改一个数字」从一行编辑变成了必须重写整条历史，而那在评审里藏不住。"

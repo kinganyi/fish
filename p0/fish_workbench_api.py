@@ -88,6 +88,7 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 import fish_common  # noqa: E402  可见性谓词 `_visibility_sql` / 主人解析 `resolve_owner` / `warn_ignored`
+import fish_lineage  # noqa: E402  会话树注册表（树视图缺投影时现读宿主头的唯一入口）
 import fish_naming  # noqa: E402  人类面取名唯一实现
 import fish_push_vocab  # noqa: E402  推送采纳率的唯一实现（112 W-B · N-3）
 import fish_hosts   # noqa: E402  宿主接入层（只读探测：装没装/接没接/接的哪条通道）
@@ -738,23 +739,319 @@ def host_label_for_protocol(protocol: str | None) -> str:
                     for host in fish_hosts.hosts_for_protocol(key))
 
 
-def actor_of(row, labels: dict) -> dict:
+# ── 会话树三键（113 §9.1 · W5）：父 / 代理 / 关系 ─────────────────────────
+#
+# 三个键**只在读时叠加**在 actor 上，`events.actor`（库内 JSON 列）**一个键都不加**。
+# 理由不是洁癖：那张表的三种老形状（`{citizen_id,evidence_level}` 2,793 /
+# `{kind,id,session_key}` 349 / `{system}` 21，113 §1-3）各有消费方，而父链是
+# **宿主日志派生**的事实——把它写进不可变表等于把"派生"变成"原始"，将来宿主头变了
+# 也回不去了。所以它是 `actor_of` 的读时装饰，不是事件结构的一部分。
+
+#: 从 `session_lineage` 取的四列（父 / 代理 id / 代理角色 / 关系）。
+LINEAGE_COLS = ("parent_session", "agent_id", "agent_role", "relation")
+
+#: 会话键前缀 → 会话树宿主（`session_lineage.host` 只认 dsh / workbuddy）。
+#: `codebuddy:` 前缀下的 26,200 行其实属于 WorkBuddy（`host_label_for_protocol` 记的那条坑），
+#: 而树表按**宿主**分，所以这里归一到 workbuddy。
+_LINEAGE_HOSTS = {"dsh": "dsh", "workbuddy": "workbuddy", "codebuddy": "workbuddy"}
+
+
+def protocol_of(session_key: str) -> tuple:
+    """会话键 → `(protocol, session_id)`；空/非法 → `("", "")`（**不猜**）。"""
+    return fish_naming.split_session_key(session_key or "")
+
+
+def _rows_as_dicts(cursor) -> list:
+    """把结果集转成 dict 列表——**不依赖 `conn.row_factory`**。
+
+    为什么：面板的连接是 `sqlite3.Row`（`fish_ui.open_readonly`），而 CLI / 测试用
+    `fish.connect`（返回 tuple）。`lineage_of` 两边都要能调，靠下标会静默错位。
+    """
+    cols = [d[0] for d in (cursor.description or ())]
+    return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+
+def lineage_of(conn, session_keys, *, host: str | None = None) -> dict:
+    """批量取 `{会话键: {parent_session, agent_id, agent_role, relation}}`。
+
+    四类"判不到"都**不写键**（调用方渲染成 null）：没有会话键、前缀不是已知协议、
+    投影表里没有这一行（W6 回填之前这是常态）、老库还没建投影表（`sqlite3.Error`）。
+    **绝不拿 main / 空串冒充**——"判不到"与"它是根"在树上长得一样，但语义相反。
+
+    一次查询取整页（`WHERE (host,session_id) IN (...)`），不做 per-row 查询：
+    `collect_stream` 一页最多 500 条，逐条查是 500 次索引命中。
+    """
+    pairs, out = [], {}
+    for key in dict.fromkeys(k for k in (session_keys or ()) if k):
+        proto, sid = protocol_of(key)
+        table_host = _LINEAGE_HOSTS.get(proto)
+        if not table_host or (host and table_host != host) or not sid:
+            continue
+        pairs.append((key, table_host, sid))
+    if not pairs:
+        return out
+    where = " OR ".join("(host = ? AND session_id = ?)" for _ in pairs)
+    params = [value for _key, table_host, sid in pairs for value in (table_host, sid)]
+    try:
+        rows = _rows_as_dicts(conn.execute(
+            f"SELECT host, session_id, {', '.join(LINEAGE_COLS)} "
+            f"  FROM session_lineage WHERE {where}", params))
+    except sqlite3.Error:                  # 老库没有投影表：判不到，不炸
+        return out
+    index = {(r["host"], r["session_id"]): r for r in rows}
+    for key, table_host, sid in pairs:
+        row = index.get((table_host, sid))
+        if row is not None:
+            out[key] = {col: row[col] for col in LINEAGE_COLS}
+    return out
+
+
+def _lineage_keys(row, lineage: dict | None) -> dict:
+    """父 / 代理 / 关系三键（113 §9.1）。判不到就是 `None`，**绝不用 main/空串冒充**。
+
+    `agent` 的形状是 `{id, role}`，两列**都为空时给 `None`**——挂一个
+    `{"id": None, "role": None}` 上去，前端会渲染成"有代理但没名字"，
+    而真相是"这一行没有代理信息"（DSH 侧 `agent_id` 恒 NULL，见 113 §2.3）。
+    """
+    node = (lineage or {}).get(row["session_key"] or "")
+    if not node:
+        return {"parentSession": None, "agent": None, "relation": None}
+    agent = None
+    if node.get("agent_id") or node.get("agent_role"):
+        agent = {"id": node.get("agent_id"), "role": node.get("agent_role")}
+    return {"parentSession": node.get("parent_session"), "agent": agent,
+            "relation": node.get("relation")}
+
+
+def actor_of(row, labels: dict, *, lineage: dict | None = None) -> dict:
+    """一行 → 界面上的"谁"。四档判定（system / 公民 / 会话 / 未命名）**一个不改**，
+    末端统一叠三键（113 §9.1：唯一一处 `out.update`，四档分支不各写一遍）。
+
+    `lineage` 是 `lineage_of()` 的返回值（缺省 `None` = 判不到）：折叠阶段只用
+    `actor["sessionTag"]`，不需要为它查库，所以 stub 侧刻意不传。
+    """
     cid = (row["citizen_id"] or "") if row["citizen_id"] else ""
     session_key = row["session_key"] or ""
     tag = session_tag(session_key)
     host = host_from_session(session_key)
     label = labels.get(cid) if cid else None
     if cid == "system":
-        return {"name": "系统", "labelKind": "system", "citizenId": "system",
-                "host": host, "sessionTag": tag}
-    if label:
-        return {"name": label, "labelKind": "citizen", "citizenId": cid,
-                "host": host, "sessionTag": tag}
-    if tag:
-        return {"name": f"会话 {tag}", "labelKind": "session", "citizenId": cid or None,
-                "host": host, "sessionTag": tag}
-    return {"name": "未命名", "labelKind": "none", "citizenId": cid or None,
-            "host": host, "sessionTag": tag}
+        out = {"name": "系统", "labelKind": "system", "citizenId": "system",
+               "host": host, "sessionTag": tag}
+    elif label:
+        out = {"name": label, "labelKind": "citizen", "citizenId": cid,
+               "host": host, "sessionTag": tag}
+    elif tag:
+        out = {"name": f"会话 {tag}", "labelKind": "session", "citizenId": cid or None,
+               "host": host, "sessionTag": tag}
+    else:
+        out = {"name": "未命名", "labelKind": "none", "citizenId": cid or None,
+               "host": host, "sessionTag": tag}
+    out.update(_lineage_keys(row, lineage))      # 唯一一处叠加（113 §9.1）
+    return out
+
+
+# ── 会话树视图（113 §9.3 · W5）：递归 CTE + LIMIT 懒加载 ──────────────────
+#
+# 为什么树视图在**这个**文件而不在 `fish_board.py`（113 §9.3 原写 board）：
+# `fish_board.py` 的行数窗口 `FISH_BOARD_LINES_MAX=2440`、实测 2,437——只剩 3 行。
+# 树视图（查询 + 渲染）放进去必须抬 `test_split_contract.py` 的窗口常量，那不在 W5 的
+# 允许面；而本文件是 W5 的**读取面本体**（"读取路由与 UI"），且没有行数窗口。
+# 偏差已在交付里列名，**落点变了、语义没变**。
+
+#: 一屏最多渲染多少行。懒加载的口径：**先给近的**，超出的用 `truncated` 如实报出，
+#: 不静默截断（静默截断会让"树只有 3 个孩子"看起来像事实）。
+TREE_ROW_LIMIT = 200
+
+#: 向下展开的递归 CTE（每个节点 1 行，`d` = 相对根的层数）。
+#:
+#: 两个守卫都必须在 SQL 里，不能靠 Python 事后剪枝：
+#:   · `instr` 路径守卫：**未标 cycle 的环**（W6 之前是常态）会无限递归；
+#:   · `d.rel <> 'cycle'`：113 §9.3 明写"`relation='cycle'` 的行不展开"——它自己
+#:     照常出现（读者要知道这里成环了），只是不再往下走。
+_TREE_DOWN_SQL = """
+WITH RECURSIVE down(sid, rel, d, path) AS (
+  SELECT session_id, COALESCE(relation, ''), 0, '/' || session_id || '/'
+    FROM session_lineage WHERE host = :host AND session_id = :sid
+  UNION ALL
+  SELECT c.session_id, COALESCE(c.relation, ''), d.d + 1,
+         d.path || c.session_id || '/'
+    FROM down d
+    JOIN session_lineage c ON c.host = :host AND c.parent_session = d.sid
+   WHERE d.d < :depth
+     AND d.rel <> 'cycle'
+     AND instr(d.path, '/' || c.session_id || '/') = 0
+)
+SELECT sid, d FROM down ORDER BY d, sid LIMIT :limit
+"""
+
+#: 树视图每行要带的列（`depth` / `relation` / `basis` 是 113 §9.3 点名的三列）。
+TREE_COLS = ("session_id", "parent_session", "depth", "relation", "basis", "origin",
+             "agent_id", "agent_role", "agent_label", "cwd", "lineage_path",
+             "depth_host", "source", "observed_at")
+
+
+def _tree_host_of(conn, session: str) -> tuple:
+    """`session tree <x>` 的 x → `(host, 裸 id, 是否推断)`。
+
+    三条判据，**顺序即优先级**：会话键前缀（机器证据）→ 投影表里这一行的 host →
+    都判不到才按 `dsh` 现读，且**标成推断**。裸 id 在 DSH 是常态（113 §0.3：668 裸 /
+    114 带 `session-`），所以这里不能因为"没有前缀"就当错误。
+    """
+    proto, sid = protocol_of(session)
+    if proto:
+        return _LINEAGE_HOSTS.get(proto, ""), sid, False
+    bare = str(session or "").strip()
+    if not bare:
+        return "", "", False
+    try:
+        rows = _rows_as_dicts(conn.execute(
+            "SELECT host FROM session_lineage WHERE session_id=? LIMIT 1", (bare,)))
+    except sqlite3.Error:
+        rows = []
+    if rows:
+        return rows[0]["host"], bare, False
+    return "dsh", bare, True
+
+
+def _tree_rows_projection(conn, host: str, sid: str, depth: int,
+                          limit: int) -> tuple:
+    """投影表优先：CTE 拿到 `(sid, 层数)` → 再取整行。返回 `(rows, truncated)`。"""
+    walk = _rows_as_dicts(conn.execute(
+        _TREE_DOWN_SQL, {"host": host, "sid": sid, "depth": max(int(depth), 0),
+                         "limit": int(limit) + 1}))
+    truncated = len(walk) > int(limit)
+    walk = walk[:int(limit)]
+    if not walk:
+        return [], False
+    ids = [r["sid"] for r in walk]
+    marks = ", ".join("?" * len(ids))
+    detail = {r["session_id"]: r for r in _rows_as_dicts(conn.execute(
+        f"SELECT {', '.join(TREE_COLS)} FROM session_lineage "
+        f" WHERE host=? AND session_id IN ({marks})", [host] + ids))}
+    rows = []
+    for item in walk:
+        node = dict(detail.get(item["sid"]) or {"session_id": item["sid"]})
+        node["depth"] = int(item["d"])
+        node["live"] = False
+        rows.append(node)
+    return rows, truncated
+
+
+def _tree_rows_live(host: str, sid: str, depth: int, limit: int) -> tuple:
+    """投影表没这一行时**现读宿主会话头**（只读、不写投影）。返回 `(rows, truncated)`。
+
+    为什么允许现读：W6 回填之前 `session_lineage` 可能是 0 行（本机实测就是 0 行），
+    只读投影的话 `session tree` 在任何真实会话上都会返回空树——那不是"没有父子关系"，
+    那是"没投影"。`fish_lineage.parent_of` 早就是这个口径（投影优先、缺行现读）。
+    代价写在返回值的 `note` 里：**离线投影，非实时**。
+    """
+    try:
+        adapter = fish_lineage.get_adapter(_LINEAGE_HOSTS.get(host, host))
+    except KeyError:
+        return [], False
+    root = adapter.resolve(sid)
+    if root is None:
+        return [], False
+    children: dict = {}
+    truncated = False
+    if int(depth) > 0:
+        try:
+            for node in adapter.scan():
+                parent = node.get("parent_session")
+                if parent:
+                    children.setdefault(parent, []).append(node)
+        except (RuntimeError, OSError):     # 宿主日志读不动：只剩根一行（不猜子）
+            children = {}
+    rows = [dict(root, depth=0, live=True)]
+    seen = {root.get("session_id")}
+    frontier = [root.get("session_id")]
+    for level in range(1, max(int(depth), 0) + 1):
+        nxt = []
+        for parent in frontier:
+            for node in children.get(parent) or ():
+                node_sid = node.get("session_id")
+                if not node_sid or node_sid in seen:
+                    continue
+                if len(rows) >= int(limit):
+                    truncated = True
+                    break
+                seen.add(node_sid)
+                rows.append(dict(node, depth=level, live=True))
+                nxt.append(node_sid)
+        frontier = nxt
+        if truncated:
+            break
+    return rows, truncated
+
+
+def session_tree(conn, session: str, *, depth: int = 1,
+                 limit: int = TREE_ROW_LIMIT) -> dict:
+    """会话子树（113 §9.3）：**投影优先 → 缺行现读宿主头**，默认只展 1 层。
+
+    返回的结构就是 CLI 的输出契约（`session_tree_text` 只做渲染）：
+    `{session, host, session_id, host_inferred, depth, limit, source, rows, truncated, note}`。
+    `rows` 每行带 `depth` / `relation` / `basis`（113 §9.3 点名的三列）+ `agent_id` /
+    `agent_role` / `origin` / `live`。**判不到根时 `rows=[]` 且 `note` 说明原因**，
+    不编一个"根"出来。
+    """
+    try:
+        depth = max(int(depth), 0)
+    except (TypeError, ValueError):
+        depth = 1
+    try:
+        limit = max(int(limit), 1)
+    except (TypeError, ValueError):
+        limit = TREE_ROW_LIMIT
+    host, sid, inferred = _tree_host_of(conn, session)
+    out = {"session": str(session or ""), "host": host, "session_id": sid,
+           "host_inferred": inferred, "depth": depth, "limit": limit,
+           "source": "none", "rows": [], "truncated": False, "note": ""}
+    if not host or not sid:
+        out["note"] = "判不到会话：需要 `host:会话id` 或一个能查到的裸会话 id"
+        return out
+    try:
+        rows, truncated = _tree_rows_projection(conn, host, sid, depth, limit)
+    except sqlite3.Error:                 # 老库没有投影表：退现读，不炸
+        rows, truncated = [], False
+    if rows:
+        out.update(source="projection", rows=rows, truncated=truncated)
+        if truncated:
+            out["note"] = f"已按 limit={limit} 截断：还有更深/更多的行没显示"
+        return out
+    rows, truncated = _tree_rows_live(host, sid, depth, limit)
+    if not rows:
+        out["note"] = ("会话树投影里没有这一行，宿主日志也判不到它"
+                       "（不是'它是根'——是判不到）")
+        return out
+    out.update(source="live", rows=rows, truncated=truncated,
+               note="离线投影（现读宿主会话头）：**非实时**，父子关系以宿主日志为准")
+    return out
+
+
+def session_tree_text(tree: dict) -> str:
+    """把 `session_tree()` 的结构渲染成 CLI 文本：**每行都带 depth/relation/basis**。"""
+    head = (f"会话树 {tree.get('session') or '(空)'}  host={tree.get('host') or '?'}"
+            f"  来源={tree.get('source')}  层数={tree.get('depth')}")
+    if tree.get("host_inferred"):
+        head += "（宿主按裸 id 推断为 dsh：判不到就是判不到）"
+    lines = [head]
+    for row in tree.get("rows") or ():
+        pad = "  " * int(row.get("depth") or 0)
+        relation = row.get("relation") or "-"
+        basis = row.get("basis") or "-"
+        origin = row.get("origin") or "-"
+        role = row.get("agent_role") or "-"
+        agent = row.get("agent_id") or "-"
+        live = " ·live" if row.get("live") else ""
+        lines.append(f"{pad}- {row.get('session_id')}  depth={row.get('depth')}"
+                     f"  relation={relation}  basis={basis}{live}")
+        lines.append(f"{pad}    origin={origin}  agent_role={role}  agent_id={agent}")
+    if tree.get("truncated"):
+        lines.append(f"（已截断：只显示前 {len(tree.get('rows') or ())} 行）")
+    if tree.get("note"):
+        lines.append(f"（{tree['note']}）")
+    return "\n".join(lines) + "\n"
 
 
 def json_obj(raw) -> dict:
@@ -792,11 +1089,11 @@ def path_label(row) -> str:
     return ""
 
 
-def make_item(row, labels: dict, board_names: dict) -> dict:
+def make_item(row, labels: dict, board_names: dict, lineage: dict | None = None) -> dict:
     src = row["src"]
     ts = row["ts"] or ""
     sk = f"{ts}|{9 - int(row['rk'])}|{int(row['pk']):012d}" if ts else ""
-    actor = actor_of(row, labels)
+    actor = actor_of(row, labels, lineage=lineage)
     project = (row["project"] or "") if row["project"] else ""
     item = {
         "key": f"{src}:{int(row['pk'])}",
@@ -1086,14 +1383,19 @@ def _stub_item(row, labels: dict) -> dict:
     }
 
 
-def _materialize(item: dict, rows_by_key: dict, labels: dict, board_names: dict) -> dict:
+def _materialize(item: dict, rows_by_key: dict, labels: dict, board_names: dict,
+                 lineage: dict | None = None) -> dict:
     """把 stub（或折叠组）补成完整条目：单个条目、折叠组里的明细都在这里做 make_item。"""
     if not item.get("fold"):
         row = rows_by_key.get(item["key"])
-        return make_item(row, labels, board_names) if row is not None else item
-    inner = [make_item(rows_by_key[sub["key"]], labels, board_names)
+        return make_item(row, labels, board_names, lineage) if row is not None else item
+    inner = [make_item(rows_by_key[sub["key"]], labels, board_names, lineage)
              for sub in item["fold"]["items"] if sub["key"] in rows_by_key]
-    return {**item, "fold": {"count": item["fold"]["count"], "items": inner}}
+    # 折叠条的 `actor` 原本抄自 stub（折叠阶段不查库），这里用**已带三键**的明细头替换：
+    # 否则同一条流水里"展开的明细有父、折叠头没有"，读起来像两种事实。
+    head = inner[0]["actor"] if inner else item.get("actor")
+    return {**item, "actor": head,
+            "fold": {"count": item["fold"]["count"], "items": inner}}
 
 
 # ── 端点实现 ────────────────────────────────────────────────────────────
@@ -1172,7 +1474,9 @@ def collect_stream(conn: sqlite3.Connection, *, scope_kind: str, project: str | 
         sql_ms += (time.perf_counter() - t0) * 1000
         rows_total += len(rows)
         labels = load_citizen_labels(conn, [r["citizen_id"] for r in rows if r["citizen_id"]])
-        items = [make_item(r, labels, board_names) for r in rows]
+        # 三键一次查整批（113 §9.1）：per-row 查会让一页 500 条变成 500 次索引命中。
+        lineage = lineage_of(conn, [r["session_key"] for r in rows])
+        items = [make_item(r, labels, board_names, lineage) for r in rows]
         display, _ = fold_items(items)
         shown = display[:limit]
     elif direction != "older":
@@ -1184,7 +1488,9 @@ def collect_stream(conn: sqlite3.Connection, *, scope_kind: str, project: str | 
         sql_ms += (time.perf_counter() - t0) * 1000
         rows_total += len(rows)
         labels = load_citizen_labels(conn, [r["citizen_id"] for r in rows if r["citizen_id"]])
-        items = [make_item(r, labels, board_names) for r in rows]
+        # 三键一次查整批（113 §9.1）：per-row 查会让一页 500 条变成 500 次索引命中。
+        lineage = lineage_of(conn, [r["session_key"] for r in rows])
+        items = [make_item(r, labels, board_names, lineage) for r in rows]
         display, _ = fold_items(items)
         shown = display[:limit]
     else:
@@ -1235,7 +1541,8 @@ def collect_stream(conn: sqlite3.Connection, *, scope_kind: str, project: str | 
             if len(safe) >= limit or not rows or not caps or batches >= 12:
                 break
         rows_by_key = {f"{r['src']}:{int(r['pk'])}": r for r in accumulated}
-        shown = [_materialize(it, rows_by_key, labels, board_names)
+        lineage = lineage_of(conn, [r["session_key"] for r in accumulated])
+        shown = [_materialize(it, rows_by_key, labels, board_names, lineage)
                  for it in safe[:limit]]
 
     src.add("tool_activity,board_posts,push_log,events", rows=rows_total, ms=sql_ms)
@@ -1717,7 +2024,7 @@ def collect_entry(conn: sqlite3.Connection, key: str) -> dict | None:
         return None
 
     labels = load_citizen_labels(conn, [row["citizen_id"]] if row["citizen_id"] else [])
-    entry = make_item(row, labels, board_names)
+    entry = make_item(row, labels, board_names, lineage_of(conn, [row["session_key"]]))
     citizen_id = row["citizen_id"] or ""
 
     # ── 这个人 ────────────────────────────────────────────────────

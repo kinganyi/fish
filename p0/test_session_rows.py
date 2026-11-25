@@ -114,7 +114,14 @@ class TwoSessionsSameCitizenTest(SessionRowsBase):
                         f"同公民多会话的标签要带会话短标识：{[r['label'] for r in rows]}")
 
     def test_S1_auto_row_carries_session_key(self):
-        """自动签到同样要写会话键（否则"自动行"落在 `''` 上，签到的仍是同一个坑）。"""
+        """自动签到同样要写会话键（否则"自动行"落在 `''` 上，签到的仍是同一个坑）。
+
+        ⚠️ 2026-11-25（113 §9.2 · W5）改了后半句：`agent_id` **不再**同步写会话键。
+        旧实现靠它给"外部读者"兜底，代价是 601 行里 575 行的 `agent_id` 就是
+        `session_key`（= 575 个假代理，代理维上线第一天全是假的）。现在判不到代理
+        就写 NULL；要读旧列的老读者照旧能读（`entry_session_key` 的兜底保留只读），
+        只是不再有新写入产生这种行——判据 J-W5-legacy 钉的就是"这种行 = 0"。
+        """
         res = fish.board_auto_checkin(self.conn, CID_A, project="PJ",
                                       session_key="dsh:ccc3333")
         self.assertTrue(res["created"], f"自动行没建出来：{res}")
@@ -122,7 +129,7 @@ class TwoSessionsSameCitizenTest(SessionRowsBase):
             "SELECT session_key, agent_id, doing FROM presence WHERE citizen_id=?",
             (CID_A,)).fetchone()
         self.assertEqual(row[0], "dsh:ccc3333")
-        self.assertEqual(row[1], "dsh:ccc3333", "agent_id 同步带上（外部读者一直按它读）")
+        self.assertIsNone(row[1], "113 §9.2：判不到代理就 NULL，不许拿会话键冒充")
         self.assertIn("自动登记", row[2])
 
 
