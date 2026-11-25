@@ -165,16 +165,15 @@ def _settle(conn, rep, *, apply):
 # dict，重放时会抛 TypeError——而且是在 DELETE 之后。这和 🟠-1 当初是同一个
 # 失败形状（只修了表面）。所以按事件类型声明字段契约：重放怎么用它，预检就怎么验它。
 _PRECHECK_FIELD_TYPES = {
-    "memory.recorded": {"code": (str,)},
+    "memory.recorded": {"code": (str,)}, "memory.imported": {"code": (str,)},
     "memory.superseded": {"old": (str,), "new": (str,)},
     "memory.retired": {"code": (str,), "status": (str,)},
     "memory.accessed": {"codes": (list, tuple)},
     "memory.dormant": {"codes": (list, tuple)},
 }
 
-_PRECHECK_TYPES = ("memory.recorded", "memory.superseded", "memory.retired",
-                   "memory.accessed", "memory.dormant")
-
+_PRECHECK_TYPES = ("memory.recorded", "memory.imported", "memory.superseded",
+                   "memory.retired", "memory.accessed", "memory.dormant")
 
 
 def rebuild_projection(conn, root: Path, *, apply: bool = True) -> dict:
@@ -215,6 +214,7 @@ def rebuild_projection(conn, root: Path, *, apply: bool = True) -> dict:
         "access_from_events": 0, "dormant_from_events": 0,
         "atts_from_projection": 0, "atts_degraded": 0,
         "recorded_at_normalized": 0, "recovered": [], "mismatch": [], "snapshot_size": 0,
+        "duplicate_codes": [], "duplicate_events": 0,
     }
 
     # ---- 0a. 写前快照（P1-1）：**必须在任何写动作之前** ----
@@ -303,8 +303,8 @@ def rebuild_projection(conn, root: Path, *, apply: bool = True) -> dict:
     # 否则"我预检过了"永远只是"我预检了我想到的那部分"。
     # 提成模块级：判据要能读到它，否则"预检覆盖哪些类型"只能靠人肉核对。
     PRECHECK_TYPES = _PRECHECK_TYPES
-    # 只有 `memory.recorded` 必须带 code（其余按 code 集合或 id 定位，不强求）
-    NEEDS_CODE = ("memory.recorded",)
+    # 只有 `memory.recorded` / `memory.imported` 必须带 code（其余按 code 集合或 id 定位，不强求）
+    NEEDS_CODE = ("memory.recorded", "memory.imported")
 
     marks = ",".join("?" for _ in PRECHECK_TYPES)
     bad_events = []
@@ -371,11 +371,13 @@ def rebuild_projection(conn, root: Path, *, apply: bool = True) -> dict:
         valid_citizen_ids = citizen_ids_known(conn)
         sys_owner = resolve_owner(conn)
 
-        # ---- 2. 重放 memory.recorded ----
+        # ---- 2. 重放 memory.recorded / memory.imported ----
         rows = conn.execute(
-            "SELECT ts,actor,payload FROM events WHERE type='memory.recorded' ORDER BY seq"
+            "SELECT ts,actor,payload,type FROM events "
+            "WHERE type IN ('memory.recorded','memory.imported') ORDER BY seq"
         ).fetchall()
-        for ts, actor_s, payload_s in rows:
+        seen_codes = {}
+        for ts, actor_s, payload_s, ev_type in rows:
             p = json.loads(payload_s)
             try:
                 actor = json.loads(actor_s or "{}")
@@ -387,6 +389,13 @@ def rebuild_projection(conn, root: Path, *, apply: bool = True) -> dict:
             if code in rename_map:
                 code = rename_map[code]
                 rep["renamed_applied"] += 1
+            if code in seen_codes:
+                rep["duplicate_events"] += 1
+                if code not in rep["duplicate_codes"]:
+                    rep["duplicate_codes"].append(code)
+                rep["corrected_codes"].add(code)   # 重复编码的时间取最后一条，对账豁免
+                rep["recovered"].append(f"{code}: 重复编码，按事件顺序保留最后一条")
+            seen_codes[code] = seen_codes.get(code, 0) + 1
             old = snap.get(code, {})
 
             # 时间事实的兜底链（2026-10-22 调整顺序）：
@@ -489,19 +498,20 @@ def rebuild_projection(conn, root: Path, *, apply: bool = True) -> dict:
                     rep["atts_degraded"] += 1
 
             conn.execute(
-                "INSERT OR IGNORE INTO code_index (code,title,project,owner,mem_type,visibility,"
+                "INSERT INTO code_index (code,title,project,owner,mem_type,visibility,"
                 "status,tags,file_path,occurred_at,recorded_at,session_actor,attachments) "
-                "VALUES (?,?,?,?,?,?,'active',?,?,?,?,?,?)",
-                (code, p.get("title"), project, owner,
-                 p.get("mem_type", "fact"),
-                 # G-06（安全审计 2026-10-29）：旧版 `p.get("visibility", "shared")`
-                 # 在事件**缺键或为 null** 时兜底成 shared —— 生产 322 条事件里有 7 条
-                 # 没有 visibility 键（2.2%），一次 rebuild 就会把 private **静默公开**。
-                 # 回落到重建前快照里的历史值（owner/attachments 都是这么做的），
-                 # 只有"历史也没有"时才用 shared。
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(code) DO UPDATE SET "
+                "title=excluded.title,project=excluded.project,owner=excluded.owner,"
+                "mem_type=excluded.mem_type,visibility=excluded.visibility,"
+                "status=excluded.status,tags=excluded.tags,file_path=excluded.file_path,"
+                "occurred_at=excluded.occurred_at,recorded_at=excluded.recorded_at,"
+                "session_actor=excluded.session_actor,attachments=excluded.attachments",
+                (code, p.get("title"), project, owner, p.get("mem_type", "fact"),
+                 # G-06：事件缺 visibility 时回落到快照，别把 private 静默公开。
                  (p.get("visibility")
                   or (snap.get(code) or {}).get("visibility")
                   or "shared"),
+                 (p.get("status") or "active") if ev_type == "memory.imported" else "active",
                  json.dumps(p.get("tags", []), ensure_ascii=False), file_path,
                  occurred, ts, session_actor, atts_s))
             rep["projected"] += 1
@@ -747,7 +757,7 @@ def render_report(rep) -> None:
     if rep["recorded_at_normalized"]:
         print(f"  recorded_at 归一到事件时间：{rep['recorded_at_normalized']} 条（预期内）")
     if rep["recovered"]:
-        print(f"  ✓ 从事件恢复投影丢失字段 {len(rep['recovered'])} 处：")
+        print(f"  ✓ 从事件恢复/校正投影 {len(rep['recovered'])} 处：")
         for m in rep["recovered"][:10]:
             print(f"    - {m}")
     if rep["owner_normalized"]:

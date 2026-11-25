@@ -852,11 +852,26 @@ def locate_body(root, code, file_path):
     return "missing", None
 
 
-def read_body_path(conn, root, code, *, viewer_citizen_id=None):
+def _recorded_body_sha(conn, code):
+    """P2-2：该编码最近一条 recorded/imported 事件的 body_sha256（含改名折算）；None = 无事件/旧数据。"""
+    try:
+        ren = load_rename_map(conn)
+        cands = {code} | {old for old, new in ren.items() if new == code}
+        row = conn.execute(
+            "SELECT payload FROM events WHERE type IN ('memory.recorded','memory.imported') "
+            "AND json_extract(payload,'$.code') IN (%s) ORDER BY seq DESC LIMIT 1"
+            % ",".join("?" * len(cands)), tuple(cands)).fetchone()
+        return (json.loads(row[0]).get("body_sha256") or None) if row else None
+    except Exception:      # noqa: BLE001 —— 读路径不抛；判不到按旧数据（unverified）
+        return None
+
+
+def read_body_path(conn, root, code, *, viewer_citizen_id=None, verify=True):
     """读正文的**唯一入口**（CLI 与 MCP 共用）——永远返回 `(text, info)`，**不抛异常**。
 
-    `info` 是给人看的状态：`{"state": "exact"|"relocated"|"missing",
+    `info` 是给人看的状态：`{"state": "exact"|"relocated"|"missing"|"corrupt"|"unverified",
     "path": 实际读到的路径或 None, "healed": 是否顺手修回了 file_path}`。
+    `verify=False` 关闭正文哈希校验（默认校验）。
 
     ## 核心纪律：**文件不在 ≠ 系统崩**
 
@@ -938,7 +953,20 @@ def read_body_path(conn, root, code, *, viewer_citizen_id=None):
                     "hint": (f"正文存在但读不出来：{rel}\n"
                              f"　原因：{type(e).__name__}: {e}\n"
                              "　人类可能改过编码或权限——文件是权威，系统不覆盖它")}
-    return text, {"state": state, "path": rel, "healed": healed}
+    info = {"state": state, "path": rel, "healed": healed, "location": state}
+    if not verify:
+        info["verify"] = "skipped"
+        return text, info
+    sha = _recorded_body_sha(conn, code)
+    if not sha:
+        info.update(state="unverified", verify="absent")
+        return text, info
+    if sha != fish_atomic.sha256_of_file(p):
+        info.update(state="corrupt", verify="mismatch")
+        info["hint"] = f"正文 body_sha256 与事件记录不一致：{code}（文件可能被外部改坏）"
+        text = "<!-- ⚠ 正文校验失败（body_sha256 不一致），以下原文仍照常返回 -->\n\n" + text
+        return text, info
+    return text, {**info, "verify": "ok"}
 
 
 def next_code(conn: sqlite3.Connection, prefix: str) -> str:
