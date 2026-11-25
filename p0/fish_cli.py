@@ -87,10 +87,12 @@ def install(namespace):
 def _cmd_rebuild(a):
     """`fish rebuild [--apply]`（P1-1，2026-11-25 外部审查）。
 
-    为什么包装在本文件而实现住 `fish_rebuild`：`fish.py:cmd_rebuild` 本轮被另一路修复
-    锁着，而"缺省 dry-run / `--apply` 才写"必须由**参数层**决定——实现层去偷看
-    `sys.argv` 是最坏的接法（测试无法显式表达意图）。这里只做装配：把 `fish` 命名空间
-    注入给实现（本模块不 import fish 的同一理由，见文件头），退出码 0/2 由实现给。
+    为什么包装在本文件而实现住 `fish_rebuild`：`fish.py` 顶在 J4 行数窗口上，且
+    "缺省 dry-run / `--apply` 才写"必须由**参数层**决定——实现层去偷看 `sys.argv`
+    是最坏的接法（测试无法显式表达意图）。这里只做装配：把 `fish` 命名空间注入给
+    实现（本模块不 import fish 的同一理由，见文件头），退出码 0/2 由实现给。
+
+    2026-11-26：`fish.py:cmd_rebuild`（旧的"缺省即写"实现）已删除；本函数是唯一入口。
     """
     return _rebuild.cmd_rebuild(a, fish=_f)
 
