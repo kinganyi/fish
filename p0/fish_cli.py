@@ -638,6 +638,13 @@ def main():
     sp.add_argument("--alias", default=None, help="会话别名（没有宿主 session id 时它是幂等键）")
     sp.add_argument("--cwd", default=None, metavar="PATH",
                     help="当前工作目录：按 workspace_map 解析成项目并自动开档期")
+    # 2026-11-25（113 W4.6 · §7.1）：WorkBuddy hook 在 payload 里就能看到父证据
+    # （`transcript_path` = `<父>/subagents/agent-<uuid>.jsonl`、`agent_id` = storeId），
+    # 所以"父是谁"由 hook 反解后传进来，CLI 不猜、也不去读宿主会话头。
+    sp.add_argument("--parent-session", dest="parent_session", default=None,
+                    metavar="SID", help="父会话 id 或完整会话键（子代理身份继承用）")
+    sp.add_argument("--agent-id", dest="agent_id", default=None,
+                    help="宿主报的子代理 id（只作『这是子代理』的信号，不拿来当会话键）")
     sp.set_defaults(func=_f.cmd_session_ensure)
 
     sp = sess.add_parser("status", help="当前会话的身份 / 档期 / 凭证状态")

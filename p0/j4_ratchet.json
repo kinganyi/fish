@@ -2,7 +2,7 @@
   "_why": "J4 行数窗口的**唯一出处**。test_split_contract.py 从这里读，不再在测试里写死数字。",
   "_rule": "方向只许降。任何一次改动都必须在 history 里写清楚：改了什么、为什么必须改。没有理由的改动算违规。",
   "min": 10300,
-  "max": 11150,
+  "max": 11200,
   "history": [
     {
       "date": "2026-11-18",
@@ -59,6 +59,14 @@
       "new": "10300,11150",
       "reason": "113 W4（身份 ensure/继承 + 递归吊销 + W4.0 触发路径）整波落在 fish.py：`ensure_session` / `rotate_token` / `evidence_root` / `_forced_citizen`（自 start_session 提出） / `_prove_citizen_binding` / `cmd_session_ensure` / `_print_session_ensure`、`find_session_citizen` 两级解析、`revoke_session_tokens` 递归 CTE、`assert_agent_parent_allowed` 放开一跳。净增 465 行（+547/−82）。**这是功能增长不是注释膨胀**：每一项都有判据（test_identity_inherit 14 条 / test_revoke_recursive 6 条 / test_identity_p1b 判据 E 变异）。窗口 10,600 → 11,150，留 88 行余量；W4.5/W5/W6 还要各自记账。",
       "sha256": "52a99efed99b433c94f94fbbf8fd62c56683666611090d878ac2a5a9ce6f57e5"
+    },
+    {
+      "date": "2026-11-25",
+      "field": "max",
+      "old": "11150",
+      "new": "10300,11200",
+      "reason": "113 W4.6（WorkBuddy 身份路径）落在 fish.py：`ensure_session` 新增 `parent_session` / `agent_id` 两个入参（父证据直接来自宿主 payload，不再过一遍 lineage IO）、`_explicit_parent_key`（键形态归一 + 自指折成 None）、`cmd_session_ensure` 透传。净增 40 行（11,129 → 11,169）。**这是功能增长不是注释膨胀**：少了它 WB 会话永远拿不到身份（7d 内 238 行 prompt 推送「无身份」，2026-11-25T00:3xZ 只读读数）。窗口 11,150 → 11,200，留 31 行余量给 W4.7。",
+      "sha256": "57dd658c701d6a61ae38bc9eef5368be1440aa2e49e6d7ccbaa7909e0a83a71c"
     }
   ],
   "_chain_note": "history 每条带 sha256，且把上一条的 sha256 串进去（哈希链）。就地改任何一条历史，它以及它之后所有的 hash 都会对不上——而 test_history_is_append_only 会逐条验。这不是密码学意义上的防篡改（人能重算整条链），但它把「改一个数字」从一行编辑变成了必须重写整条历史，而那在评审里藏不住。"

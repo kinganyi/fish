@@ -4781,6 +4781,25 @@ def _nearest_identity_ancestor(conn, *, host, session_key):
     return None, None
 
 
+def _explicit_parent_key(session_key, parent_session):
+    """调用方给的父（裸 id 或完整键）→ 完整会话键；**自指/空 → None**。
+
+    只做**键形态归一**，不判存在性（判不到父就不许编，113 §7.1「宁可不推，不串推」）。
+    自指必须折成 None：宿主把本会话自己的 id 报成父时（WB 子代理会话报父 sid 的形态），
+    当父用会让 `inherited_from` 指向自己，`inherited` 的 CHECK 与祖先遍历都会绕圈。
+    """
+    parent = str(parent_session or "").strip()
+    key = str(session_key or "").strip()
+    if not parent or not key:
+        return None
+    parent_key = parent if ":" in parent else (
+        f"{key.split(':', 1)[0]}:{parent}" if ":" in key else "")
+    if not parent_key:
+        return None
+    same = fish_lineage.identity_key_of(parent_key) == fish_lineage.identity_key_of(key)
+    return None if same else parent_key
+
+
 def _inherited_token_shape(conn, ancestor_key, *, channel):
     """继承链上的凭证口径：`(evidence, channel, parent_hash, parent_expires_at)`。
 
@@ -4797,7 +4816,8 @@ def _inherited_token_shape(conn, ancestor_key, *, channel):
 
 def ensure_session(conn, *, session_key, host, evidence, display_name=None,
                    account_id=None, kind="visitor", role=None, ttl_hours=None,
-                   channel="cli", projects=None, citizen=None, bind_token=None) -> dict:
+                   channel="cli", projects=None, citizen=None, bind_token=None,
+                   parent_session=None, agent_id=None) -> dict:
     """幂等：有身份就复用，没身份就继承最近有身份祖先 / 退 provisional。**绝不轮换**。
 
     四支行为（113 §5.4）：
@@ -4805,6 +4825,12 @@ def ensure_session(conn, *, session_key, host, evidence, display_name=None,
       · `--citizen`→ 显式绑定（证明口径与 `start` 共用 `_prove_citizen_binding`）；
       · `inherited`→ 父链上最近一个有身份的祖先；凭证 `inherited`+`parent`；
       · 无可继承   → 根会话 `direct`（机器事实照旧），有父链但整链无身份 `provisional`。
+
+    `parent_session` / `agent_id`（113 §7.1 · W4.6）：宿主 payload 里**已有父证据**的
+    入口（WorkBuddy hook 从 `transcript_path` 反解父、从 `agent_id` 知道这是子代理）。
+    给了 `parent_session` 就**不再走 lineage IO**——证据已经在手上，判父只有一处实现
+    （`fish_lineage_wb.path_parent`），这里只负责用上；`agent_id` 只作"这是子代理"的
+    信号：有父证据但真判不到父时**宁可 provisional，也不造 machine**（宁可不推，不串推）。
 
     签发规则（**唯一的"写"**）：该 session_key 当前**没有活凭证**时才 `issue_session_token`；
     已经有活的就原样返回（`token=None` + `token_source='existing'`）。
@@ -4847,7 +4873,14 @@ def ensure_session(conn, *, session_key, host, evidence, display_name=None,
         _write_session_identity(conn, key, citizen_id, origin="direct",
                                 inherited_from=None, evidence="machine")
     if citizen_id is None:
-        ancestor_key, hit = _nearest_identity_ancestor(conn, host=host, session_key=key)
+        explicit = _explicit_parent_key(key, parent_session)
+        if explicit:
+            # 父证据来自宿主 payload（WB hook 的 `transcript_path`）：不再现读会话头。
+            # 父**没有**身份时就到此为止（下面的 provisional 支）——替父建公民是另一个
+            # 进程的另一条 `ensure`（hook 先 ensure 父再 ensure 子），不在库里顺手造。
+            ancestor_key, hit = explicit, find_session_citizen(conn, explicit)
+        else:
+            ancestor_key, hit = _nearest_identity_ancestor(conn, host=host, session_key=key)
         if hit is not None:
             citizen_id, origin = hit["citizen_id"], "inherited"
             inherited_from = ancestor_key
@@ -4858,7 +4891,10 @@ def ensure_session(conn, *, session_key, host, evidence, display_name=None,
         else:
             # 没有可继承的祖先：**有父链但整链无身份**才是 provisional；
             # 根会话（判不到父）仍是 direct —— 那是今天就在走的机器事实路径。
-            has_parent = bool(fish_lineage.ancestor_sessions(conn, host, _session_id_of(key)))
+            # `agent_id` 是第四个"有父"信号：宿主说这是子代理，只是真判不到父是谁
+            # （payload 里没有可反解的 transcript_path）→ provisional，**不许**造 machine。
+            has_parent = bool(explicit) or bool(agent_id) or bool(
+                fish_lineage.ancestor_sessions(conn, host, _session_id_of(key)))
             origin = "provisional" if has_parent else "direct"
             who = find_or_create_session_citizen(
                 conn, session_key=key,
@@ -8312,7 +8348,11 @@ def cmd_session_ensure(args):
             account_id=resolve_account_id(account=getattr(args, "account", None),
                                           alias=ident["alias"]),
             projects=projects, citizen=getattr(args, "citizen", None),
-            bind_token=getattr(args, "bind_token", None))
+            bind_token=getattr(args, "bind_token", None),
+            # 113 §7.1（W4.6）：WB hook 把 payload 里的父证据直接交进来
+            # （`transcript_path` 反解的父 + `agent_id`），不在这里猜。
+            parent_session=getattr(args, "parent_session", None),
+            agent_id=getattr(args, "agent_id", None))
     except ValueError as e:
         conn.close()
         print(f"错误：{e}", file=sys.stderr)

@@ -26,9 +26,31 @@ stdout 只允许输出 hook 协议要求的 JSON；日志走 stderr。
   2. 查到就把 `--citizen <id>` 传给 inject；查不到就**诚实降级**（输出可执行提示），
      绝不编一个身份。
 
-**为什么不在这里调 `fish session start`**：`start_session` 会轮换（吊销）同一
+**为什么当时不在这里调 `fish session start`**：`start_session` 会轮换（吊销）同一
 session_key 的旧凭证——hook 每次会话开始都签一次，会把 MCP 侧刚签发的 token
 一起吊销。"查身份"不该有写副作用。
+
+## 2026-11-25（113 W4.6 §7）：上面那条理由解决了 → 查不到就 `session ensure`
+
+W4 把 `start`（人驱动、会轮换）与 `ensure`（hook 用、**幂等、绝不轮换**）拆开了：
+`ensure` 有活凭证就原样复用，没有才补签一条。于是"hook 签发"不再等于"互踢"，
+只查不签也就不再必要——**只查不签的代价是这些会话永远拿不到身份**：7d 内
+WorkBuddy prompt 推送 243/317 行「无身份」（2026-11-25 02:5x 设计快照；同日晚
+00:3xZ 复读已漂到 238/1,398 —— 判据只锚「剩余为 0」，不锚这些数字）。
+
+现在三支行为：
+  · **已有身份** → 只读查询后直接返回（稳态零写，与旧行为逐字节相同）；
+  · **父证据在 payload 里**（113 §7.1）：
+      - `transcript_path` = `<父>/subagents/agent-<uuid>.jsonl` → 父会话 id
+        （反解只有一处：`fish_lineage_wb.path_parent`，本文件不写第二份正则）；
+      - `agent_id`（= storeId，子代理才有）→ 只作"这是子代理"的信号，**不当会话键**
+        （实测 7d 推送键 12/12 都是会话目录名，没有一个 `agent-*`；键口径不改）；
+    先按父链**由远及近** ensure（`seen` + 跳数上限防环），再 ensure 自己：父有身份 →
+    子继承父公民（`session_identity.origin='inherited'`、凭证 `inherited`/`parent`）；
+    父链整条都判不到 → `provisional`，**绝不造 machine**（宁可不推，不串推）。
+  · **判不到任何父** → 当根会话 ensure（`direct`/machine，宿主 session_id 是机器事实）。
+
+紧急关停：`FISH_WB_ENSURE=0` → 退回"只查不签"（不建 config 键；闸门是 W4.7 的事）。
 """
 from fish_common import warn_ignored
 from hook_io import log_child_stderr  # noqa: F401
@@ -50,49 +72,239 @@ DATA = Path(os.environ.get("FISH_DATA") or (HERE / "data"))
 # 现默认 inject：注入真实的「权威当下」
 MODE = os.environ.get("FISH_HOOK_MODE", "inject")
 
+#: hook 调的会话子命令（113 W4.6）。**只此一处**：`test_wb_identity` 的变异 M1
+#: 把它换成 `start` 来证明"退回轮换口径 → 同会话两公民 → J4 必红"。
+ENSURE_VERB = "ensure"
+#: 关停开关（环境变量，不是 config 键）：`0`/`false` → 退回"只查不签"。
+ENSURE_ENV = "FISH_WB_ENSURE"
+#: 父链跳数上限。WB 树只有"会话 → 子代理"一层，上限是给防环/防病态数据用的
+#: （与 `fish_lineage.ancestor_sessions(max_hops=64)` 同口径）。
+MAX_PARENT_HOPS = 64
+#: 血缘表的 host 值。**不是**会话键前缀：`fish_hosts_vocab.PREFIX_OVERRIDES`
+#: 把 `workbuddy` 映射成 `codebuddy:` 前缀（历史原因，两宿主同族），
+#: 而 `session_lineage.host` 用适配器名 `workbuddy`（113 §2.3 值域）。
+WB_LINEAGE_HOST = "workbuddy"
+#: 会话键前缀。**必须**等于 `fish_activity.make_session_key("workbuddy", sid)` 的前缀
+#: ——推送侧就是用它解析公民的（`fish_push_hook.py` / `cmd_prompt_push`），
+#: 对拍判据在 `test_wb_identity.KeyContractTest`（改了它就红）。
+WB_KEY_PREFIX = "codebuddy:"
+
 
 def _emit(text: str) -> None:
     """输出 additionalContext（委托统一出口：编码只在一处决定）。"""
     hook_io.emit("SessionStart", text)
 
 
-def _session_citizen(req):
-    """按 payload 的 session_id 查**已有**的会话公民（只读，不签发）。
+def _key_of(session_id) -> str:
+    """会话 id → 会话键（与 MCP/CLI 同口径；空 id → 空串，**不编一个**）。"""
+    sid = str(session_id or "").strip()
+    return (WB_KEY_PREFIX + sid) if sid else ""
 
-    返回 (citizen_id | None, 原因)。
+
+def _read_identity(conn, key):
+    """该会话键**已有**的公民 id（只读，不签发）；没有 → `None`。
+
+    与旧实现逐字同口径（`session_tokens` 活凭证 → `citizens_all.host_session_key`）。
+    第三级（`session_identity`）刻意**不**在这里查：那一级正是"凭证过期/继承会话"的
+    语义，交给 `ensure` 去判——它知道该不该补签，也知道父链在哪。
+
+    **读失败一律返回 None**（不抛）：全新的库还没建表，而建表/迁移正是 `session ensure`
+    的第一步（它跑 `SCHEMA` + `migrate`）。在这里抛出去会把"首次启动"变成
+    "注入失败"——实测过：干净目录下第一条 SessionStart 就是这么降级的。
     """
-    sid = (req.get("session_id") or "").strip()
+    if not key:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT citizen_id FROM session_tokens WHERE session_key=? "
+            "AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) "
+            "ORDER BY issued_at DESC LIMIT 1",
+            (key, fish_now())).fetchone()
+        if not row:
+            row = conn.execute(
+                "SELECT citizen_id FROM citizens_all WHERE host_session_key=? "
+                "AND status='active' ORDER BY created_at LIMIT 1",
+                (key,)).fetchone()
+        return row[0] if row else None
+    except Exception as exc:      # noqa: BLE001 —— 没表/没库都只是"判不到身份"
+        warn_ignored('fish_session_hook.py:_read_identity', exc)
+        return None
+
+
+def fish_now():
+    """`fish.now_utc()` 的迟延导入（本 hook 不 import fish 到模块顶层：启动要快）。"""
+    import fish
+    return fish.now_utc()
+
+
+def _payload_facts(req):
+    """payload → 宿主事实：`{session_id, parent, agent_id, transcript, same_dir}`。
+
+    `parent` 只在**路径给得出父、且父不是自己**时才有值（113 §7.1）。反解委托
+    `fish_lineage_wb.path_parent`——那是"路径即父"的唯一实现，本文件不写第二份正则。
+
+    `same_dir` = 路径是 `<本会话 id>/subagents/agent-x.jsonl`：这时"路径即父"反解出来的
+    父就是自己。它不是父，但**是证据**——这条路径证明本 id 是一个真实会话目录
+    （子代理挂在它下面），所以身份按根会话的机器事实走，别把它降成 provisional。
+    """
+    req = req or {}
+    sid = str(req.get("session_id") or "").strip()
+    transcript = str(req.get("transcript_path") or "").strip()
+    agent_id = str(req.get("agent_id") or "").strip()
+    parent = None
+    if transcript:
+        try:
+            import fish_lineage_wb
+            parent = fish_lineage_wb.path_parent(transcript)
+        except Exception as exc:      # noqa: BLE001 —— 反解失败只影响继承，不影响注入
+            warn_ignored('fish_session_hook.py:_payload_facts', exc)
+            parent = None
+    if not agent_id and transcript:
+        # `agent_id` 缺席时用 transcript 文件名兜底判"这是子代理"（两条都是宿主事实）
+        stem = Path(transcript).stem
+        agent_id = stem if stem.startswith("agent-") else ""
+    parent = (parent or "").strip()
+    same_dir = bool(parent) and parent == sid
+    if not parent or same_dir:        # 父 == 自己 → 不当父用（会自指、会绕圈）
+        parent = None
+    return {"session_id": sid, "parent": parent, "agent_id": agent_id or None,
+            "transcript": transcript, "same_dir": same_dir}
+
+
+def _ensure_enabled() -> bool:
+    """`FISH_WB_ENSURE` 关停开关（缺省开）。"""
+    return (os.environ.get(ENSURE_ENV) or "").strip().lower() not in ("0", "false", "off")
+
+
+def _fields_of(stdout: str) -> dict:
+    """解析 `session ensure` 的 `key: value` 契约面（与 `fish_dsh_hook` 同一手法）。"""
+    out = {}
+    for line in (stdout or "").splitlines():
+        if ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        key, val = key.strip(), val.strip()
+        if key and val:
+            out[key] = val
+    return out
+
+
+def _ensure_via_cli(session_id, *, parent=None, agent_id=None, cwd=None):
+    """调 `fish session <ENSURE_VERB>`（幂等、不轮换），返回字段字典；失败 → `None`。
+
+    两个必须：① `--root` 是**全局参数**，要在子命令之前（`argparse` 的硬规则）；
+    ② 宿主会话 env 必须**覆盖**（payload 才是本次事件的会话，与 `fish_dsh_hook`
+    同一条教训）；`DSH_SESSION_ID`/`CLAUDE_SESSION_ID` 优先级更高，必须摘掉，
+    否则 identity 会串到调用者的会话上。
+    """
+    cmd = [PY, str(FISH), "--root", str(DATA), "session", ENSURE_VERB]
+    if parent:
+        cmd += ["--parent-session", str(parent)]
+    if agent_id:
+        cmd += ["--agent-id", str(agent_id)]
+    if cwd:
+        cmd += ["--cwd", str(cwd)]
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("DSH_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_SESSION_ID")}
+    env["CODEBUDDY_SESSION_ID"] = str(session_id)
+    env["PYTHONIOENCODING"] = "utf-8"
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", env=env, timeout=60)
+    except Exception as exc:          # noqa: BLE001 —— 起不来也只是一次失败
+        return None
+    log_child_stderr("fish_session_hook.py:ensure", proc.stderr)
+    if proc.returncode != 0:
+        return None
+    return _fields_of(proc.stdout)
+
+
+def _plan_chain(conn, child_sid, parent_sid):
+    """父链**由远及近**：返回 `(待 ensure 的祖先[远→近], 最近有身份的祖先|None)`。
+
+    只在父链上做两件事：① 用 `fish_lineage.parent_of`（唯一判父实现，投影表优先、
+    没行才现读宿主）向上走，`seen` 防环、`MAX_PARENT_HOPS` 防病态数据；
+    ② 已经**有身份**的祖先不再碰——继承只认最近的那一个，它上面的都无关。
+    """
+    ancestors, seen = [], {str(child_sid or "")}
+    cur = str(parent_sid or "").strip()
+    if cur and _read_identity(conn, _key_of(cur)):
+        # 常见路径（父会话自己的 SessionStart 早就签过了）：**一次 DB 读**就够，
+        # 不去碰 `parent_of` 的现读宿主（WB 适配器要读 runtime + 会话库，几百毫秒）。
+        return [], cur
+    while cur and cur not in seen and len(ancestors) < MAX_PARENT_HOPS:
+        ancestors.append(cur)                # 近 → 远
+        seen.add(cur)
+        try:
+            import fish_lineage
+            cur = fish_lineage.parent_of(conn, WB_LINEAGE_HOST, cur) or ""
+        except Exception as exc:      # noqa: BLE001 —— 判不到就是没有更远的祖先
+            warn_ignored('fish_session_hook.py:_plan_chain', exc)
+            cur = ""
+    for idx in range(len(ancestors) - 1, -1, -1):
+        if _read_identity(conn, _key_of(ancestors[idx])):
+            return list(reversed(ancestors[idx + 1:])), ancestors[idx]
+    return list(reversed(ancestors)), None
+
+
+def _session_citizen(req):
+    """会话公民：**已有就用**，没有就 `ensure`（幂等、不轮换）。返回 `(cid, why, note)`。
+
+    `note` 只进审计文件（`_audit/hook-calls.jsonl`），用来把"这次 payload 长什么样"
+    变成可回看的证据——WB 的真实 payload 至今只有 bundle 级证据（113 §0.4），
+    这里顺手把它记下来（不记 token、不记正文）。
+    """
+    facts = _payload_facts(req)
+    sid, key = facts["session_id"], _key_of(facts["session_id"])
     if not sid:
-        return None, "payload 里没有 session_id"
-    key = "codebuddy:" + sid
+        return None, "payload 里没有 session_id", ""
     try:
         import fish
         conn = fish.connect(DATA)
         try:
-            row = conn.execute(
-                "SELECT citizen_id FROM session_tokens WHERE session_key=? "
-                "AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?) "
-                "ORDER BY issued_at DESC LIMIT 1",
-                (key, fish.now_utc())).fetchone()
-            if not row:
-                row = conn.execute(
-                    "SELECT citizen_id FROM citizens_all WHERE host_session_key=? "
-                    "AND status='active' ORDER BY created_at LIMIT 1",
-                    (key,)).fetchone()
-            return (row[0] if row else None), None
+            cid = _read_identity(conn, key)
+            if cid:
+                return cid, None, f"existing citizen={cid}"
+            plan, anchor = _plan_chain(conn, sid, facts["parent"])
         finally:
             conn.close()
     except Exception as exc:  # noqa: BLE001 —— 查身份失败不能拖垮会话
-        return None, f"{type(exc).__name__}: {exc}"
+        return None, f"{type(exc).__name__}: {exc}", ""
+    if not _ensure_enabled():
+        return None, f"该会话尚未登记（{ENSURE_ENV}=0：ensure 已关）", "ensure-disabled"
+
+    cwd = str((req or {}).get("cwd") or "").strip()
+    previous = anchor
+    for node in plan:                 # 由远及近：先让祖先有身份，子才有东西可继承
+        got = _ensure_via_cli(node, parent=previous, cwd=cwd)
+        if not got:
+            return None, f"父会话 {node} ensure 失败", "ensure-parent-failed"
+        previous = node
+    fields = _ensure_via_cli(
+        sid, parent=(plan[-1] if plan else (facts["parent"] or None)),
+        # `same_dir` 已在 `_payload_facts` 里把父折成 None：那说明本 id 就是会话目录，
+        # 按根会话走机器事实，别再拿 `agent_id` 把它降成 provisional。
+        agent_id=(None if facts["same_dir"] else facts["agent_id"]), cwd=cwd)
+    if not fields:
+        return None, "session ensure 失败", "ensure-failed"
+    note = (f"ensured citizen={fields.get('citizen_id')} "
+            f"identity={fields.get('identity')} "
+            f"token_source={fields.get('token_source')} "
+            f"agent={facts['agent_id'] or '-'} parent={facts['parent'] or '-'}")
+    cid = fields.get("citizen_id")
+    if not cid:
+        return None, "session ensure 没有返回 citizen_id", note
+    return cid, None, note
 
 
 def session_key_from(req):
     """payload → 会话键（`codebuddy:<session_id>`，与 `_session_citizen` 同口径）。
 
     没有 `session_id` 时返回 `None`（**不编一个**：编出来的键会造出一行假在场）。
+    113 §7.1：WB 侧**不改口径**——宿主报的就是这个 id（子代理会话报的是父会话 id，
+    实测 7d 推送键 12/12 都是会话目录名），改口径会让推送侧查不到同一个键。
     """
-    sid = ((req or {}).get("session_id") or "").strip()
-    return ("codebuddy:" + sid) if sid else None
+    return _key_of((req or {}).get("session_id")) or None
 
 
 def build_pack(citizen_id, session_key=None):
@@ -151,19 +363,19 @@ def main():
         warn_ignored('fish_session_hook.py:147 main', exc)
 
     if MODE == "inject":
-        cid, why = _session_citizen(req)
+        cid, why, note = _session_citizen(req)
         try:
             if not cid:
                 raise RuntimeError(f"该会话尚未登记（{why or '查不到会话公民'}）")
             text = build_pack(cid, session_key_from(req))
             audit(f"injected {len(text)} chars, citizen={cid}, "
-                  f"session={req.get('session_id')}")
+                  f"{note + ', ' if note else ''}session={req.get('session_id')}")
         except Exception as e:
             # 注入失败不能影响会话：降级为可执行提示（**绝不编一个身份**）
             text = (f"（大肥鱼生命系统注入失败：{e}）\n"
                     f"　先 `register` 或 `fish session start` 登记本会话，"
                     f"再重开会话即可拿到完整注入包。")
-            audit(f"ERROR {e}")
+            audit(f"ERROR {e}（{note}）")
     elif MODE == "ack":
         # 决定性测试：指令式注入，验证 additionalContext 是否真的进入模型上下文
         text = ("【系统注入 · 测试】收到这条消息后，请在你的回复**第一行**原样输出："

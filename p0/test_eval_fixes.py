@@ -193,12 +193,34 @@ class SessionHookIdentityEval19Test(unittest.TestCase):
         self.assertIn("会话公民甲", ctx)
         self.assertNotIn("workbuddy-main", ctx)
 
-    def test_hook_unknown_session_no_fake_identity(self):
+    def test_hook_unknown_session_ensures_real_identity_not_hardcoded(self):
+        """EVAL-19 的本意（**不硬编码身份**）不变；W4.6 起"未知会话"会被 ensure 出真实身份。
+
+        旧断言是「未知会话 → 注入失败」，而 113 §7 整波要消灭的就是这个状态
+        （7d 内 WB prompt 推送 238 行「无身份」，2026-11-25 只读读数）。所以判据
+        改成：注入成功 ∧ 身份是**本会话自己的机器事实**（占位名 `未命名·codebuddy#…`
+        或真名）∧ 绝不出现 `workbuddy-main` ∧ 库里恰好 +1 个公民。
+        """
+        before = len(self._citizens())
         p = self._run_hook({"session_id": "unknown-session-19"})
         self.assertEqual(p.returncode, 0, p.stderr[:500])
         ctx = json.loads(p.stdout.strip())["hookSpecificOutput"]["additionalContext"]
-        self.assertIn("注入失败", ctx)          # 诚实降级
-        self.assertNotIn("workbuddy-main", ctx)
+        self.assertNotIn("workbuddy-main", ctx, "EVAL-19 的原始病灶：不许硬编码身份")
+        self.assertNotIn("注入失败", ctx, "W4.6 起未知会话应当被 ensure，不再降级")
+        rows = self._citizens()
+        self.assertEqual(len(rows), before + 1, f"必须恰好登记一个公民：{rows}")
+        mine = [r for r in rows if r[1] == "codebuddy:unknown-session-19"]
+        self.assertEqual(len(mine), 1, f"身份必须落在本会话键上：{rows}")
+        self.assertIn(mine[0][0], ctx, "注入包必须用刚 ensure 出来的那个公民")
+
+    def _citizens(self):
+        conn = fish.connect(self.data)
+        try:
+            return conn.execute(
+                "SELECT display_name,host_session_key FROM citizens_all "
+                "WHERE host_session_key IS NOT NULL ORDER BY created_at").fetchall()
+        finally:
+            conn.close()
 
 
 class OwnerFixEval21Test(unittest.TestCase):

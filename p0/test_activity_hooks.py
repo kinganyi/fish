@@ -313,7 +313,8 @@ class SessionStartRenderTest(HookBase):
     CID = "01SESSIONSTARTRENDER0000E5"
 
     def _register(self, session_key):
-        """登记一个**已存在**的会话公民（hook 只查身份、不签发，见其模块 docstring）。"""
+        """登记一个**已存在**的会话公民（W4.6 起 hook 在"查不到"时才会 ensure，
+        这里预先登记，于是判据只测签到/渲染那条路，不混入签发路径）。"""
         conn = self._conn()
         try:
             now = fish.now_utc()
