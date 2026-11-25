@@ -25,15 +25,23 @@
 - **J5 新模块不依赖模块自身身份**：不许出现 `__file__` / `__name__`
   ——搬迁后的函数若靠它们定位路径，指到的是**新文件**而不是原来的 `fish.py`。
 
+- **J-CG 抽层后的叶子契约**（W4.6c）：`fish_config_guard` 只许 stdlib、与
+  `fish_common` 里再导出的名字**同一个对象**、自带缺省值与 `CONFIG_DEFAULTS` 对齐、
+  静默点告警格式与 `fish_common.warn_ignored` 逐字一致。抽层最安静的失败形态是
+  "复制一份实现"与"缺省值两处不同步"——它们都不会让调用面报错。
+
 纪律：本文件**不建库、不写文件**（连 tempfile 都不需要）；只读源码与模块对象。
 """
 import gzip
 import ast
 import builtins
+import contextlib
 import hashlib
+import io
 import json
 import re
 import importlib.util
+import sqlite3
 import subprocess
 import symtable
 import sys
@@ -78,6 +86,12 @@ FISH_GIT_HOOK = P0 / "fish_git_hook.py"
 # 它**零内部依赖**（只 stdlib）：原来要 `load_citizen`，搬出后改成由调用方传
 # citizen dict——没必要为拿一个记录制造 `identity_diag → fish` 的上行依赖。
 FISH_IDENTITY_DIAG = P0 / "fish_identity_diag.py"
+# 2026-11-25（113 W4.6c）：身份开关判定叶子。W4.6b 把 `wb_ensure_enabled` /
+# `config_combo_warnings` 加进了 `fish_common`，把那边顶出了 J4 窗口（970 -> 1,055）；
+# 这两条判定不依赖 `fish_common` 的任何原语，所以整块下沉成叶子，`fish_common`
+# 只留 `from fish_config_guard import …`（同一对象）。
+# **它必须比 `fish_common` 更底层**：零 fish 业务 import（只有 stdlib）。
+FISH_CONFIG_GUARD = P0 / "fish_config_guard.py"
 
 spec = importlib.util.spec_from_file_location("fish", str(FISH))
 fish = importlib.util.module_from_spec(spec)
@@ -87,6 +101,7 @@ spec.loader.exec_module(fish)
 if str(P0) not in sys.path:
     sys.path.insert(0, str(P0))
 import fish_common  # noqa: E402
+import fish_config_guard  # noqa: E402 —— W4.6c 的身份开关判定叶子
 import fish_kb  # noqa: E402
 
 # 共享原语（设计 §1.2）：五个名字，两边必须是同一对象。
@@ -300,6 +315,15 @@ FISH_GIT_HOOK_LINES_MAX = 320
 # 身份诊断：当前 250 行 → 上界 420
 FISH_IDENTITY_DIAG_LINES_MIN = 150
 FISH_IDENTITY_DIAG_LINES_MAX = 420
+# 2026-11-25（113 W4.6c）：身份开关判定叶子。
+# 下界守「搬漏了」：两条判定 + 它们的四个私有辅助（含 docstring 里的理由）合计 160 行
+# 上下，掉到 80 以下说明只搬了签名、理由被丢在半路。
+# 上界守「长成第二个巨石」：它是**判定**叶子，不是第二个 fish_common。两条判定自身的
+# 注释已经占了大头，再加东西就该先问"这归它管吗"。
+# **口径与 fish_common 的 970 是同一件事的两端**：那边降下来的行数不许在这里长回去
+# （拆一次就降一次，不是搬完再抬窗——见上方 J4 的历史记录）。
+FISH_CONFIG_GUARD_LINES_MIN = 80
+FISH_CONFIG_GUARD_LINES_MAX = 260
 
 
 def _read(path: Path) -> str:
@@ -562,7 +586,19 @@ class SplitDependencyTest(unittest.TestCase):
                                                       "fish_profile", "fish_activity",
                                                       "fish_board", "fish_common",
                                                       "fish_schema", "fish_db",
-                                                      "fish_cli", "mcp_server"})):
+                                                      "fish_cli", "mcp_server"}),
+                                # 2026-11-25（113 W4.6c）：身份开关判定叶子。它比
+                                # `fish_common` 更底层，所以**连 fish_common 都不许碰**
+                                # ——碰了就与 `fish_common` 的再导出成环。
+                                (FISH_CONFIG_GUARD, {"fish", "fish_kb", "fish_push",
+                                                     "fish_trust", "fish_rebuild",
+                                                     "fish_profile", "fish_activity",
+                                                     "fish_board", "fish_common",
+                                                     "fish_schema", "fish_db",
+                                                     "fish_cli", "mcp_server",
+                                                     "fish_surface", "fish_git",
+                                                     "fish_lineage", "fish_corpus",
+                                                     "fish_purge"})):
             mods = _imported_modules(ast.parse(_read(path)))
             bad = sorted(m for m in mods if m in forbidden)
             self.assertEqual(bad, [], f"{path.name} 反向依赖了 {bad}")
@@ -877,7 +913,10 @@ class SplitSizeTest(unittest.TestCase):
                 ("fish_purge.py", FISH_PURGE_LINES_MIN, FISH_PURGE_LINES_MAX),
                 ("fish_git_hook.py", FISH_GIT_HOOK_LINES_MIN, FISH_GIT_HOOK_LINES_MAX),
                 ("fish_identity_diag.py", FISH_IDENTITY_DIAG_LINES_MIN,
-                 FISH_IDENTITY_DIAG_LINES_MAX)):
+                 FISH_IDENTITY_DIAG_LINES_MAX),
+                # 2026-11-25（113 W4.6c）：身份开关判定叶子（fish_common 回窗的那一刀）
+                ("fish_config_guard.py", FISH_CONFIG_GUARD_LINES_MIN,
+                 FISH_CONFIG_GUARD_LINES_MAX)):
             count = len(_read(P0 / module).split("\n"))
             self.assertGreaterEqual(count, low, f"{module} 只有 {count} 行：搬漏了")
             self.assertLessEqual(count, high, f"{module} 有 {count} 行：长回去了")
@@ -903,6 +942,180 @@ class SplitSizeTest(unittest.TestCase):
         top = _defined_names(ast.parse(_read(FISH)))
         self.assertNotIn("_kb_push_candidates", top,
                          "fish.py 顶层仍定义 _kb_push_candidates（应只在 fish_push）")
+
+
+class ConfigGuardLeafTest(unittest.TestCase):
+    """J-CG：W4.6c 抽层的五条承诺（2026-11-25 · 113 §7 身份开关）。
+
+    这一刀把两条身份开关判定从 `fish_common` 下沉到 `fish_config_guard`（那边因此
+    回到 J4 窗口内）。抽层失败的最常见形态**不是**"函数不见了"——那会立刻
+    ImportError；而是三件更安静的事：
+
+      ① **叶子偷偷依赖上层**：循环导入的症状是"某一侧拿到半初始化的模块"，属性缺失
+         会在随机位置变成 AttributeError；写在函数体里的"延迟导入"更狠，J2 的静态
+         检查根本看不见它（F-P2-1 就是这么来的）。
+      ② **缺省值出现两处**：叶子读不到 `CONFIG_DEFAULTS` 的类型表，只能自带一份
+         缺省值。两边改了不同步 = 同一个开关两个答案，而两边各自的判据都是绿的。
+      ③ **静默点的出口变成两种格式**：stderr 那一行是运维唯一看得见的东西。
+
+    所以这里逐条钉：只许 stdlib、同一对象、缺省值与读法对齐、告警格式逐字一致。
+    """
+
+    @staticmethod
+    def _conn(raw=None):
+        """最小 `config` 表夹具：`get_config` 只认表名与列名，不需要整库 schema。"""
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE config (key TEXT PRIMARY KEY, value TEXT)")
+        for key, value in (raw or {}).items():
+            conn.execute("INSERT INTO config (key, value) VALUES (?,?)", (key, value))
+        return conn
+
+    def test_jcg1_leaf_is_stdlib_only(self):
+        """J-CG-1：叶子只许 stdlib，且**函数体内**也不许藏 fish_* 的延迟导入。
+
+        为什么用 `sys.stdlib_module_names` 而不是"黑名单里那 20 个模块名"：黑名单
+        只能挡住列过的名字，新模块一出现就漏；而"只许 stdlib"是**可穷举**的性质。
+        """
+        tree = ast.parse(_read(FISH_CONFIG_GUARD))
+        mods = sorted(_imported_modules(tree))
+        stdlib = getattr(sys, "stdlib_module_names", ())
+        if stdlib:                      # 3.10+ 才有；没有就跳过这一半，不假装判过
+            non_std = [m for m in mods if m.split(".")[0] not in stdlib]
+            self.assertEqual(non_std, [],
+                             f"叶子里有非 stdlib 依赖：{non_std}（它要能在任何宿主里单独 import）")
+        self.assertIn("sqlite3", mods,
+                      "叶子没有 import sqlite3 —— 它靠什么读配置？判据可能失去靶点")
+
+        inner = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for sub in ast.walk(node):
+                names = []
+                if isinstance(sub, ast.Import):
+                    names = [a.name for a in sub.names]
+                elif isinstance(sub, ast.ImportFrom):
+                    names = [sub.module or ""]
+                for name in names:
+                    if name.split(".")[0].startswith(("fish", "mcp_server")):
+                        inner.append(f"{node.name}:{getattr(sub, 'lineno', '?')} {name}")
+        self.assertEqual(inner, [],
+                         "叶子在**函数体内部** import 了 fish 侧模块——那是隐藏的上行依赖，"
+                         "J2 的模块级判据看不见它：\n  " + "\n  ".join(inner))
+
+    def test_jcg2_defaults_match_the_config_registry(self):
+        """J-CG-2：叶子自带的两个缺省值必须与 `CONFIG_DEFAULTS` 一致。
+
+        叶子拿不到 `get_config`（那在上层），所以缺省值必然有两处。**两处就是两个真相的
+        温床**——这条把温床钉死：改一边不改另一边 → 红。
+        """
+        reg = fish_common.CONFIG_DEFAULTS
+        pairs = ((fish_config_guard.WB_ENSURE_KEY, fish_config_guard.WB_ENSURE_DEFAULT),
+                 (fish_config_guard.NO_IDENTITY_KEY, fish_config_guard.NO_IDENTITY_DEFAULT))
+        for key, leaf_default in pairs:
+            self.assertIn(key, reg,
+                          f"{key} 没在 CONFIG_DEFAULTS 里登记——`get_config` 会抛 KeyError")
+            self.assertEqual(
+                leaf_default, reg[key][0],
+                f"{key} 的缺省值：叶子里 {leaf_default!r}，CONFIG_DEFAULTS 里 {reg[key][0]!r}"
+                "——同一个开关两个缺省，改一边不改另一边就是这个后果")
+
+    def test_jcg2b_config_reads_agree_with_get_config(self):
+        """J-CG-2b：叶子的两种读法在**每一档**上与 `get_config` 给出同一答案。
+
+        只对常量不够：取值形态（`true` / `True` / `1` / 空串）与"缺行"才是真正会分叉的
+        地方。判据调的是**应用自己的函数** `get_config`，不是在这里另写一份"应该怎么读"。
+        """
+        for raw in ("true", "false", "True", "1", "0", "", "skip", "allow", "yes"):
+            conn = self._conn({"identity.wb_ensure": raw, "push.no_identity": raw})
+            try:
+                self.assertEqual(
+                    bool(fish_config_guard._cfg_bool(
+                        conn, fish_config_guard.WB_ENSURE_KEY,
+                        fish_config_guard.WB_ENSURE_DEFAULT)),
+                    bool(fish_common.get_config(conn, fish_config_guard.WB_ENSURE_KEY)),
+                    f"bool 读法在 raw={raw!r} 上与 get_config 分叉")
+                self.assertEqual(
+                    str(fish_config_guard._cfg_str(
+                        conn, fish_config_guard.NO_IDENTITY_KEY,
+                        fish_config_guard.NO_IDENTITY_DEFAULT)),
+                    str(fish_common.get_config(conn, fish_config_guard.NO_IDENTITY_KEY)),
+                    f"字符串读法在 raw={raw!r} 上与 get_config 分叉")
+            finally:
+                conn.close()
+        conn = self._conn()             # 缺行：两边都必须走缺省
+        try:
+            self.assertEqual(
+                bool(fish_config_guard._cfg_bool(
+                    conn, fish_config_guard.WB_ENSURE_KEY,
+                    fish_config_guard.WB_ENSURE_DEFAULT)),
+                bool(fish_common.get_config(conn, fish_config_guard.WB_ENSURE_KEY)),
+                "缺行时两边的 bool 缺省不一致")
+            self.assertEqual(
+                str(fish_config_guard._cfg_str(
+                    conn, fish_config_guard.NO_IDENTITY_KEY,
+                    fish_config_guard.NO_IDENTITY_DEFAULT)),
+                str(fish_common.get_config(conn, fish_config_guard.NO_IDENTITY_KEY)),
+                "缺行时两边的字符串缺省不一致")
+        finally:
+            conn.close()
+
+    def test_jcg3_warn_output_is_the_same_line(self):
+        """J-CG-3：两个"出声"出口打出的那一行**逐字相同**。
+
+        同一件事（旁路失败）在两个模块里打两种格式，读到的人会以为"有两类错误"，
+        而运维的命令行 grep 只能匹配其中一种。
+        """
+        def capture(fn):
+            buf = io.StringIO()
+            with contextlib.redirect_stderr(buf):
+                fn("probe:unit", ValueError("probe-42"))
+            return buf.getvalue()
+
+        leaf = capture(fish_config_guard._warn_ignored)
+        common = capture(fish_common.warn_ignored)
+        self.assertEqual(leaf, common,
+                         "两个静默点出口的格式不一样：\n"
+                         f"  叶子   {leaf!r}\n  common {common!r}")
+        self.assertIn("probe:unit", leaf)
+        self.assertIn("ValueError", leaf, "告警里没有异常类型，等于只说'出错了'")
+
+    def test_jcg4_same_object_and_the_definition_moved(self):
+        """J-CG-4：`fish_common.<name>` 与叶子里是**同一个对象**，且定义面已搬走。
+
+        "已经在 fish_common 里 re-export" 不等于 "搬走了"：`_defined_names` 只看 def，
+        所以它能区分「再导出」与「又写了一份实现」——后者调用面看着一样，行为却会漂。
+        """
+        for name in ("wb_ensure_enabled", "config_combo_warnings"):
+            self.assertIs(getattr(fish_common, name), getattr(fish_config_guard, name),
+                          f"{name} 在 fish_common 与叶子里不是同一个对象（复制了一份实现？）")
+        common_defs = _defined_names(ast.parse(_read(FISH_COMMON)))
+        guard_defs = _defined_names(ast.parse(_read(FISH_CONFIG_GUARD)))
+        for name in ("wb_ensure_enabled", "config_combo_warnings"):
+            self.assertIn(name, guard_defs, f"叶子里没有定义 {name}")
+            self.assertNotIn(name, common_defs,
+                             f"fish_common 顶层仍在**定义** {name}（应只在叶子里定义、在这里再导出）")
+        # 消费侧：hook 的判定必须仍然委托同一处（两份解析 = 两次漂移的机会）
+        self.assertIn("fish_common.wb_ensure_enabled(conn)", _read(P0 / "fish_session_hook.py"),
+                      "hook 的判定委托点变了——它必须走同一处判定")
+
+    def test_jcg5_unreadable_config_falls_back_to_the_old_behaviour(self):
+        """J-CG-5：**读不到配置**时按缺省走（开 + 静默），一个异常都不许漏出去。
+
+        这是 W4.6b 写在 docstring 里的底线：旧库 / 只读介质上 `config` 表可能根本没有，
+        此时"读不到开关"必须等于"照 W4.6 的老行为办"，不能变成"永久只查不签"
+        （那会让新会话**静默**失去身份）。搬进叶子以后这条底线最容易丢——叶子自带的
+        读取实现是新代码，一旦它把 `sqlite3.Error` 抛穿，hook 就会自己兜（看起来也没事），
+        但判定点就不在"唯一"的那一处了。
+        """
+        bare = sqlite3.connect(":memory:")      # 连 config 表都没有
+        try:
+            self.assertEqual(fish_config_guard.wb_ensure_enabled(bare), (True, ""),
+                             "配置表不存在时必须按缺省=开（老行为），不是关")
+            self.assertEqual(fish_config_guard.config_combo_warnings(bare), [],
+                             "配置表不存在时体检必须静默，不许把异常漏给调用方")
+        finally:
+            bare.close()
 
 
 class PushModuleContractTest(unittest.TestCase):

@@ -26,11 +26,14 @@
 （`from fish_common import …` 再导出，不是复制实现）。
 """
 import datetime
-import os
 import re
 import sys
 import uuid
 from pathlib import Path
+
+# 2026-11-25（W4.6c）：W4.6b 加进来的两条身份开关判定**又下沉**到叶子
+# `fish_config_guard`（它们把本文件顶出了 J4 窗口）。同一对象再导出，调用面零变化。
+from fish_config_guard import config_combo_warnings, wb_ensure_enabled  # noqa: F401
 
 def warn_ignored(what, exc):
     """静默点的**统一出口**（2026-10-29，静默吞错分档清单 v1.0 的 B 档）。
@@ -97,12 +100,7 @@ def _exc_text(exc) -> str:
 # ------------------------------------------------------
 # 语料层要自建 FTS（`corpus_fts`），而"索引侧怎么切"与"查询侧怎么切"**必须是同一套**：
 # 两套切法的典型症状是"存进去搜不到"——单测各自都绿，因为谁也不查对方建的索引。
-# 这次下沉是把唯一一份实现放到两个子系统都能 import 的最低层：
-#
-#     fish.py ─┐                    ┌─→ memory_fts（记忆）
-#              ├─→ fish_common ─────┤
-#     fish.py ←┘                    └─→ corpus_fts（语料）
-#
+# 所以唯一一份实现放在两个子系统都能 import 的最低层（`fish_common`）；
 # 搬运动作与原拆包第一轮同法：**整段搬运**，`fish.index_tokens` 等旧名字仍然可用，
 # 且与这里**是同一个对象**（`from … import` 再导出，不是复制实现）。
 _CJK = re.compile(r"[\u4e00-\u9fff]+")
@@ -142,15 +140,12 @@ def fts_match_expr(query: str):
         return None
     return " AND ".join('"' + t.replace('"', '""') + '"' for t in toks)
 
-# F-P2-1：注入标记原来定义在 `fish_activity`（上层），而 `clean_prompt` 在本模块
-# （基层）要用它——于是有个函数内 `import fish_activity`。那是**隐藏的上行依赖**：
-# 写进代码不留痕，J2 也看不见。下沉后方向是 `fish_activity → fish_common`，单向。
+# F-P2-1：注入标记原在 `fish_activity`（上层）→ 函数内 `import fish_activity`，
+# 那是**隐藏的上行依赖**（写进代码不留痕，J2 也看不见）。下沉后方向单向。
 INJECTION_MARKERS = ("fsh_", "【当前状态", "[fish]", "登记身份")
 
-# ============================================================
-# 基础层下沉（T02，2026-10-27）：配置/时间/衰减/别名/FTS/看板辅助
-# 为什么下沉：fish_push 的闭包（1,048 行）依赖这些，而新模块不许 import fish（J2）。
-# ============================================================
+# 基础层下沉（T02，2026-10-27）：配置/时间/衰减/别名/FTS/看板辅助。
+# 为什么下沉：fish_push 的闭包（1,048 行）依赖它们，而新模块不许 import fish（J2）。
 
 import json
 import sqlite3
@@ -221,14 +216,10 @@ CONFIG_DEFAULTS = {
     # 这正是用户担心的"变质"：三个月前的"最近在忙"注入进去只会误导。
     # 值本身不删（它还是事实），只是不当作"当下"递给人。
     "profile.volatile_max_days": (14, "int", None),
-    # 2026-10-25 · P1-a：1500 → 1600。**这不是"不够用所以加"，是"留缓冲"**。
-    # 实测（同一次注入包）：L2 精简前 1371/1500（只剩 129）；精简后 906/1500（剩 594）。
-    # 594 已够装 16 §5.7 设计的 ~450 开场推送段。那为什么还加？
-    #   · 加了候选段后约 1206–1356，1500 只剩 144–294 缓冲，任何一段波动都会触发裁剪，
-    #     而裁剪第一位是 L2——L2 精简后只剩 139，被裁就完全没索引了；
-    #   · 1600 给 244–394 缓冲，够吸收"某个项目 L1 条目变多"这类正常波动。
-    # 为什么不是 1800：那会留 444–594 缓冲，超出必要，等于白占上下文。
-    # **判据比数字重要**：每段都必须能被"这个会话里真的会用到"证明（见 `31` §3.2）。
+    # 2026-10-25 · P1-a：1500 → 1600。**这是"留缓冲"，不是"不够用所以加"**：
+    # L2 精简后 906/1500（剩 594）已够 ~450 开场推送段；但加了候选段后到 1206–1356，
+    # 1500 只剩 144–294 缓冲，任何波动都会触发裁剪（第一位就是 L2 → 索引全没）。
+    # 1600 给 244–394 缓冲；1800 则白占上下文。**判据比数字重要**（见 `31` §3.2）。
     # W6（2026-11-18）：压缩接缝开关。**默认 0（关闭）**——实测 fish 自己的负载
     # （中文 markdown）压缩率 0%，唯一确定能省的是 kb_asset 这类结构化元数据。
     # 装了不用的依赖是负债，所以默认不压，需要时再打开。
@@ -261,14 +252,8 @@ CONFIG_DEFAULTS = {
     "owner_citizen": ("", "string", None),   # 系统主人（resident）
     "default_citizen": ("", "string", None), # 已弃用：旧键，回退为 owner
     "actor_name": ("", "string", None),      # MCP 启动时由 FISH_ACTOR 覆盖
-    # 2026-11-25（113 §7 · W4.6b）：WorkBuddy SessionStart 的"查不到就 ensure"开关。
-    # **默认 true = W4.6 已经上线的那条行为**：这个键不是"打开一个新行为"，而是把
-    # 既有行为变成可配——**改默认值才是改行为**，登记一个键不是。
-    # 为什么不写成"缺省 false、要人显式开"：WB 侧 7d 有 238/312 行推送无身份
-    # （2026-11-25T01:42Z 活读数），"要人手动开"等于让这个数字一直停在那里；
-    # 而 ensure 是幂等、不轮换的（W4.6 的 J-W46 已钉），默认开不制造新风险。
-    # 紧急停用口仍然保留 `FISH_WB_ENSURE=0`：应急路径不许依赖"读库成功"——
-    # 库坏了正是最需要立刻停 ensure 的时候。方向单一：环境变量**只能关**，不能开。
+    # 2026-11-25（113 §7 · W4.6b）：WorkBuddy SessionStart「查不到就 ensure」开关，
+    # **默认 true = W4.6 行为**；判定与全部理由已随逻辑下沉到 `fish_config_guard`（W4.6c）。
     "identity.wb_ensure": (True, "bool", None),
 
     # ── 衰减参数（全部可配置；天数 = 0 表示永不衰减）─────────────────────
@@ -514,80 +499,6 @@ def get_config(conn, key):
 def push_outcome_window_hours(conn) -> int:
     """结果判定窗口（小时）。<=0 = 关闭判定（沿用 decay.*=0「永不」的既有约定）。"""
     return int(get_config(conn, "push.outcome_window_hours"))
-
-
-def wb_ensure_enabled(conn, environ=None) -> tuple:
-    """WorkBuddy 身份 ensure 的**唯一判定点**（113 §7 · W4.6b）：`(enabled, why_off)`。
-
-    优先级（方向**单一**）：
-      · 环境变量 `FISH_WB_ENSURE` 只能**关**（`0` / `false` / `off`）——它是应急口；
-      · 否则由配置键 `identity.wb_ensure` 决定（默认 `true` = W4.6 的行为）。
-
-    为什么环境变量**不能**把配置关掉的开关再打开：那会让"配置文件里写着 false"
-    变成一句谎话；而应急口的方向从来不需要"开"（默认就是开，要开就别写 false）。
-
-    为什么读配置失败 = **开**：旧库 / 只读介质上 `get_config` 可能抛错（配置表还没建），
-    这时退回 W4.6 的默认行为。把"读不到开关"解释说成"永久只查不签"，会让新会话
-    **静默**失去身份——那正是 W4.6 要治的病，不能用另一种方式复现它。
-
-    `environ` 显式可传，是为了判据能在**不改进程环境**的前提下跑两档
-    （与本仓 `start_session(conn, environ=…)` 同一手法）；缺省读 `os.environ`。
-    """
-    env = os.environ if environ is None else environ
-    raw = str((env or {}).get("FISH_WB_ENSURE") or "").strip().lower()
-    if raw in ("0", "false", "off"):
-        return False, "FISH_WB_ENSURE=0（环境变量应急关断）"
-    try:
-        enabled = bool(get_config(conn, "identity.wb_ensure"))
-    except Exception as exc:      # noqa: BLE001 —— 读不到开关按缺省（开），见上
-        warn_ignored('fish_common.py:wb_ensure_enabled', exc)
-        return True, ""
-    if not enabled:
-        return False, "identity.wb_ensure=false（配置关断）"
-    return True, ""
-
-
-def config_combo_warnings(conn) -> list:
-    """危险**配置组合**体检（113 J-W46-3）：返回告警列表，空 = 没有危险格。
-
-    ## 为什么单键校验不够
-
-    `identity.wb_ensure` 与 `push.no_identity` 各自都是**合理的单独开关**：
-    前者关掉是"只查不签"（应急），后者切 `skip` 是"无身份不推"（防串推）。
-    但两者**同时生效**会让 WorkBuddy 的推送面**归零**——WB 会话永远拿不到身份
-    （不 ensure），而"无身份不推"把它们全部挡掉：2026-11-25T01:42Z 实测，
-    此刻切 `skip` 会挡掉 7d 内 **238/312** 行 WB prompt 推送（76.3%）。
-    两个键都"对"，组合是事故；**组合事故只能靠组合体检抓住**，单键校验永远绿。
-
-    ## 为什么是"告警"而不是"拒绝"
-
-    写入口 `set_config` 住在 `fish_db`（本波 W5 正在改，禁碰），而且同一个库会被
-    多进程共写：写入侧拦一次也拦不住第二次（`fish config set` 之外还有 MCP、UI、
-    手工 SQL 三条路）。所以判定放在**读侧**——谁消费这两个键，谁喊。
-
-    ## 只看持久配置，不看环境变量
-
-    `FISH_WB_ENSURE=0` 是运维的**一次性应急口**（人已经在场，知道后果）；持久配置
-    才是无人值守会一直生效的那个。对着应急动作喊告警 = 训练人忽略告警。
-
-    返回每条是 `{"keys": [...], "why": "..."}`：`keys` 让人知道改哪个键能解，
-    `why` 写清后果（不是"看起来不对"，是"会挡掉多少"）。
-    """
-    out = []
-    try:
-        ensure_on = bool(get_config(conn, "identity.wb_ensure"))
-        if not ensure_on and str(get_config(conn, "push.no_identity")) == "skip":
-            out.append({
-                "keys": ["identity.wb_ensure", "push.no_identity"],
-                "why": ("identity.wb_ensure=false × push.no_identity=skip："
-                        "WorkBuddy 会话永远拿不到身份，"
-                        "而'无身份不推'会把它们的 prompt 推送全部挡掉"
-                        "（2026-11-25T01:42Z 实测 7d 会挡 238/312 行 = 76.3%）"
-                        "——两个键各自合理，合起来是推送面归零"),
-            })
-    except Exception as exc:      # noqa: BLE001 —— 体检失败不该拖垮调用方
-        warn_ignored('fish_common.py:config_combo_warnings', exc)
-    return out
 
 
 _ALIAS_KINDS = ("project", "citizen")
