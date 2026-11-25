@@ -429,10 +429,9 @@ CONFIG_DEFAULTS = {
     #      · 自己看不到：`viewer_citizen_id` 全仓 **0 个生产调用点** —— 打开后
     #        连 owner 自己都查不到（实测 `命中 0 条`）。
     #    所以**默认关、且请勿打开**，直到接线与其余读路径补齐。
-    #   · memory_citizen_isolation：**死开关**（声明了但全仓零读取）。保留它只是为了
-    #     让"将来要隔离"这件事有名字；实现前**不要**把它当成已生效的隔离。
+    #   · 记忆级隔离（memory_citizen_isolation）**尚未实现**：不要声明一个零读取的
+    #     开关——那会让人以为"已生效的隔离"。要做时先接读路径，再加键。
     "privacy.visibility_enforced": (False, "bool", None),
-    "privacy.memory_citizen_isolation": (False, "bool", None),
     # 同会话 24h 内不重复推同一编码（与 _recent_pushed_codes 同一口径）。
     "push.prompt_exclude_hours": (24, "int", None),
     # 113 §6.2（W4.5）：路由"三开关"里的两个（`push.enabled` 见上）；默认 = 今天的行为。

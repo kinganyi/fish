@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""fish · 动作采集 / 聚合 / 快照 / 撞车判定（stdlib only，**不 import fish**）。
+"""fish · 动作采集 / 聚合 / 快照 / 撞车判定（stdlib + 叶子模块，**不 import fish**）。
 
 ## 位置与边界
 
-`import fish` 约 400ms、Python 进程启动约 157ms，而 PostToolUse 是**每次工具
-调用**都要跑的。所以采集层是一个独立小模块：只依赖 `sqlite3/json/hashlib/re/
-datetime/os` + 两个纯函数模块（`fish_surface`/`fish_naming`），import ~5ms。
+`import fish` 实测 400–600ms、Python 进程启动约 157ms，而 PostToolUse 是**每次工具
+调用**都要跑的。所以采集层是一个独立小模块：标准库 + 6 个叶子模块
+（`fish_common`/`fish_clock`/`fish_atomic`/`fish_hosts_vocab`/`fish_naming`/
+`fish_surface`）；**不 import fish**，因此不形成上行依赖。import 实测 190–400ms
+（受负载影响，2026-11-25 审查读数 326–401ms；早先写的 ~5ms 已过时）。
 
 **共享核心**：分类、路径归一、聚合、快照、撞车全在这里，`fish.py`（看板/推送/
 CLI）与两个 hook（Pre/Post）都调这里——不在任何一处再写第二份判定。
