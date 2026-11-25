@@ -71,6 +71,7 @@
 import hashlib
 import json
 import re
+import sqlite3
 from pathlib import Path
 
 from fish_common import get_config, now_utc, ulid, warn_ignored

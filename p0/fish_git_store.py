@@ -262,7 +262,7 @@ def rebuild_commit_projection(conn):
             # 2026-11-22：这里原本是裸 `continue`。我自己踩过一次：`_json` 没定义
             # 导致 NameError，被这个 except 吞掉，于是 rebuild 恒返回 0 行——
             # **看起来"没有事件"，实际是代码坏了**。坏 payload 必须能查出原因。
-            warn_ignored("fish_git_store.rebuild_commit_projection", exc)
+            fish_common.warn_ignored("fish_git_store.rebuild_commit_projection", exc)
             continue
         sha, repo_id = p.get("sha"), p.get("repo_id")
         if not sha or not repo_id:
