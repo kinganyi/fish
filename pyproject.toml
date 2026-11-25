@@ -1,0 +1,17 @@
+# ruff 配置（P2-3 测试基建，2026-11-26）
+#
+# 本卡只建基线，不要求一次性清零：先只开 F（pyflakes：未定义名 / 未使用 import）
+# 与 E9（语法错误），当前告警数与分类见 docs/145-ruff基线-20261126.md。
+# 不因为本配置改任何业务代码。
+#
+# 用法（仓库根目录）：
+#   python -m ruff check p0
+#   # 首次使用若报 "No module named ruff"：python -m pip install ruff
+#
+# 版本口径：基线用 ruff 0.17.6 生成；换版本后重跑同一条命令对账。
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["F", "E9"]

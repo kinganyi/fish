@@ -42,9 +42,14 @@ MUTATIONS = [
         "test_A_active_count_excludes_non_active",
     ),
     (
+        # 2026-11-26（P2-3）：旧靶点写的是 `"AND status='active' ORDER BY ...` 的连续
+        # 字符串，后来 recent 查询接入了 `_visibility_sql`（见 fish.py 的 F-P1-X 修复），
+        # `+ _vis_sql +` 把这段字面量切成两半 → 旧靶点 0 命中、M-B 长期 SKIP。
+        # 现在按**当前源码**钉：整段包含 `"AND status='active'" + _vis_sql +`；
+        # 去掉 status 过滤后 SQL 变成 `dormant=0  ORDER BY ...`，作废条目会冒进 → B 必红。
         "M-B", "去掉 recent 查询的 status 过滤（可能推已作废）",
-        'WHERE project=? AND dormant=0 "\n            "AND status=\'active\' ORDER BY code DESC LIMIT 3',
-        'WHERE project=? AND dormant=0 "\n            "ORDER BY code DESC LIMIT 3',
+        'WHERE project=? AND dormant=0 "\n            "AND status=\'active\'" + _vis_sql + " ORDER BY code DESC LIMIT 3',
+        'WHERE project=? AND dormant=0 "\n            "" + _vis_sql + " ORDER BY code DESC LIMIT 3',
         "test_B_recent_excludes_non_active",
     ),
     (

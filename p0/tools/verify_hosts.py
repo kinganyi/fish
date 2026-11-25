@@ -10,7 +10,7 @@
 | ② | 每项的 `configPath` **真存在**；为 null 时必须给原因（`missing` 或 `path_unresolved`）且 `fishPresence=none`（**不许「判不到」被报成「没有」**） | 把 `configPath` 换成不存在的路径 → 判据红 |
 | ③ | `fishPresence` 与**逐字 grep 配置文本**的结论一致（不复用 `fish_hosts` 的结构解析：这是独立证据） | 把某项的 `fishPresence` 改成 `mcp`（真值是 both）→ 判据红 |
 | ④ | `protocol` **取自** `fish_naming.SESSION_HOSTS`：非空值必须能被 `split_session_key()` 当成合法前缀（调应用自己的函数，不自建解析器） | 把某项 protocol 写成 `codex`（不在词表里）→ 判据红 |
-| ⑤ | `POST /api/hosts/<id>/refresh` 返回 200，且**探测前后所有宿主配置文件逐字节不变**（sha256 + mtime 纳秒 + 字节数 + 目录清单） | 把比较函数的 before 里 mtime 改 1 ns → 判据红 |
+| ⑤ | `POST /api/hosts/<id>/refresh` 返回 200，且**探测前后所有宿主配置文件逐字节不变**（sha256 + mtime 纳秒 + 字节数 + fish 写面白名单的目录清单） | 把比较函数的 before 里 mtime 改 1 ns → 判据红 |
 | ⑥ | 一致性 warning **不阻断**：词表缺失时只产 warning，`/api/hosts` 仍出全量 | 从注册表里摘掉一个 `SESSION_HOSTS` 值 → warning 出现；不阻断由同一个断言保证 |
 | ⑦ | `version` 必须是 **asar 里应用清单**的版本（**独立实现**重新读一遍对拍）；Electron 的 `version` 文件只许出现在 `electronVersion`，**任何宿主的 `version` 都不许等于它** | 把 `version` 换成 Electron 版本（DSH `44.7.0`）→ 判据红 |
 | ⑧ | `push` 能力必须由**已装采集器脚本的源码**推出（独立正则读源码，与端点逐条对拍）；WorkBuddy 的 `fish_posttool_hook.py` 必须判「已接」；同一份脚本挂在两个宿主上结论必须一致 | 把 command 指向 `fish_session_hook.py`（无推送入口）→ push 必须从 `yes` 翻成 `no` |
@@ -251,15 +251,33 @@ def check_protocol(api: str) -> None:
            f"变异输入 protocol=codex → {'未被抓到（判据失效）' if mutant_ok else '被抓到（判据有效）'}")
 
 
-# ── ⑤ refresh 不写盘：指纹（sha256 + mtime 纳秒 + 字节数 + 目录清单）────────
+# ── ⑤ refresh 不写盘：指纹（sha256 + mtime 纳秒 + 字节数 + 写面白名单）────────
+def _fish_write_whitelist(paths: list[str]) -> dict[str, set[str]]:
+    """fish 的写面白名单：注册表里的宿主配置文件名 + 原子写的临时名 `<name>.tmp`。
+
+    为什么需要白名单（P2-3，2026-11-26）：WorkBuddy 的配置目录就是它的家目录
+    `~/.workbuddy`，里面 `sessions/` / `logs/` 由宿主自己持续写入。旧实现
+    `os.listdir(folder)` 把整目录条目都算进快照，于是这条判据在活宿主上周期性
+    20/21——那是宿主在干活，不是 fish 的 refresh 写盘。判据只该盯 fish 会写的东西：
+    `install_hooks` / `install_mcp` 只会写这些配置文件（原子替换用 `<name>.tmp`）。
+    """
+    out: dict[str, set[str]] = {}
+    for path in paths:
+        folder = os.path.dirname(path)
+        name = os.path.basename(path)
+        out.setdefault(folder, set()).update((name, name + ".tmp"))
+    return out
+
+
 def _dir_snapshot(paths: list[str]) -> dict[str, list[str]]:
-    dirs = sorted({os.path.dirname(path) for path in paths})
+    """配置目录里**只列 fish 会写的文件名**（白名单），不列宿主自写目录。"""
     out: dict[str, list[str]] = {}
-    for folder in dirs:
+    for folder, names in _fish_write_whitelist(paths).items():
         try:
-            out[folder] = sorted(os.listdir(folder))
+            entries = os.listdir(folder)
         except OSError:
-            out[folder] = []
+            entries = []
+        out[folder] = sorted(name for name in entries if name in names)
     return out
 
 
@@ -297,7 +315,7 @@ def check_refresh(api: str, verbose: bool) -> None:
                     if before_dirs[folder] != after_dirs.get(folder)]
     ok = all(entry.endswith("=200") for entry in codes) and not problems and not dir_problems
     detail = (f"POST {codes} · 指纹 {len(before)} 份 · 逐字节相同={not problems} · "
-              f"目录清单不变={not dir_problems}")
+              f"写面白名单不变={not dir_problems}")
     if problems:
         detail += f" · 差异：{problems[:4]}"
     if dir_problems:
