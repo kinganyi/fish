@@ -30,8 +30,10 @@
 """
 import argparse
 import json
+import shutil
 import sqlite3
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -121,6 +123,28 @@ def _backup(conn, data_root):
     return str(dest), rows
 
 
+def _copy_db_for_read(db_path: Path, dest_dir: Path) -> Path:
+    """把 WAL 库（主文件 + `-wal`）复制到临时目录，返回副本路径。
+
+    ## 为什么 dry-run 不能直接 `mode=ro`
+
+    实测（2026-11-26，Windows/SQLite 3.x）：只读打开 WAL 库仍会改写 `index.sqlite-shm`
+    的读者标记——32768 B 的 shm 文件哈希前后不同；"dry-run 零字节"的承诺就破了。
+
+    ## 为什么不用 `mode=ro&immutable=1`
+
+    `immutable=1` 跳过 WAL 重放：对未 checkpoint 的库直接报 `no such table`（实测）。
+    复制后再打开副本，SQLite 会正常重放 `-wal`，读到的是**最新提交**，源目录一个字节不动。
+    """
+    src = Path(db_path)
+    dst = Path(dest_dir) / src.name
+    for suffix in ("", "-wal"):
+        part = Path(str(src) + suffix)
+        if part.exists():
+            shutil.copyfile(part, str(dst) + suffix)
+    return dst
+
+
 def _emit(result, as_json):
     if as_json:
         print(json.dumps(result, ensure_ascii=False))
@@ -159,14 +183,17 @@ def main(argv=None):
               "count": 0, "rows": [], "written": 0, "backup": None,
               "backup_rows": None, "skipped_missing_body": []}
     if not args.apply:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-        try:
-            result["rows"] = collect(conn, data)
-        except sqlite3.Error as exc:
-            print(f"判不到：读取失败 {type(exc).__name__}: {exc}", file=sys.stderr)
-            return 2
-        finally:
-            conn.close()
+        # dry-run 必须在**副本**上读：`mode=ro` 会改动生产库的 -shm（见 _copy_db_for_read）。
+        with tempfile.TemporaryDirectory(prefix="fish-backfill-ro-") as tmp:
+            copy_db = _copy_db_for_read(Path(db), Path(tmp))
+            conn = sqlite3.connect(str(copy_db))
+            try:
+                result["rows"] = collect(conn, data)
+            except sqlite3.Error as exc:
+                print(f"判不到：读取失败 {type(exc).__name__}: {exc}", file=sys.stderr)
+                return 2
+            finally:
+                conn.close()
         result["count"] = len(result["rows"])
         _emit(result, args.json)
         return 0

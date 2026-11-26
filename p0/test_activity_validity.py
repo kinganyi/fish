@@ -12,12 +12,14 @@
 
   V1  retired 公民的活 token → `SQL_SESSION_TOKEN_CITIZEN` 返回 None
   V2  active 公民的活 token → 返回 citizen_id
-  V3  `resolve_citizen` 与 `fish.validate_session_token` 对拍（active / retired / 不存在三态）
+  V3  `resolve_citizen` 与 `fish.validate_session_token` 对拍（active / retired / missing / revoked / expired / archived 六态）
   V4  吊销 / 过期 token 仍按旧口径失效（不能被新 JOIN 误伤）
+  V5  **归档公民**的活 token → SQL None，且与 `validate_session_token` 一致
+      （归档是搬行：冷表里的行可能仍 `status='active'`，只查 status 会误判有效）
 
-变异：去掉 `c.status='active'` → V1 必须红（见 `mutation_perf_validity.py`）。
+变异：去掉 `c.status='active'` → V1 必须红（见 `mutation_perf_validity.py`）；
+把 `JOIN citizens` 改成 `JOIN citizens_all`（放进冷表归档行）→ V5 必须红。
 """
-import sqlite3
 import sys
 import tempfile
 import unittest
@@ -55,10 +57,18 @@ class ActivityValidityTest(unittest.TestCase):
                 "INSERT INTO citizens (citizen_id,display_name,kind,status,"
                 "host_session_key,created_at) VALUES (?,?,?,?,?,?)",
                 (citizen_id, name, kind, status, host_session_key, created))
+        # 归档公民：**只在冷表里**，且 status 仍是 'active'（归档是搬行，不清 status）。
+        # 这正是「只查 citizens_all.status」会误判的场景：热表查不到它。
+        self.conn.execute(
+            "INSERT INTO citizens_archive (citizen_id,display_name,kind,status,"
+            "created_at,archived_at) VALUES (?,?,?,?,?,?)",
+            ("01CIT_ARCHIVED", "archived-citizen", "visitor", "active",
+             _iso(), _iso()))
         self.tokens = {
             "active": self._insert_token("01CIT_ACTIVE", "dsh:valid-active"),
             "retired": self._insert_token("01CIT_RETIRED", "dsh:valid-retired"),
             "missing": self._insert_token("01CIT_MISSING", "dsh:valid-missing"),
+            "archived": self._insert_token("01CIT_ARCHIVED", "dsh:valid-archived"),
             "revoked": self._insert_token("01CIT_ACTIVE", "dsh:valid-revoked",
                                           revoked_at=now),
             "expired": self._insert_token("01CIT_ACTIVE", "dsh:valid-expired",
@@ -101,6 +111,7 @@ class ActivityValidityTest(unittest.TestCase):
             ("dsh:valid-active", self.tokens["active"]),
             ("dsh:valid-retired", self.tokens["retired"]),
             ("dsh:valid-missing", self.tokens["missing"]),
+            ("dsh:valid-archived", self.tokens["archived"]),
             ("dsh:valid-revoked", self.tokens["revoked"]),
             ("dsh:valid-expired", self.tokens["expired"]),
         ]
@@ -115,6 +126,24 @@ class ActivityValidityTest(unittest.TestCase):
     def test_v4_revoked_and_expired_still_invalid(self):
         self.assertIsNone(self._sql_lookup("dsh:valid-revoked"))
         self.assertIsNone(self._sql_lookup("dsh:valid-expired"))
+
+    # ---- V5：归档公民（冷表 status 仍 active）必须判无效 ----
+
+    def test_v5_archived_citizen_token_is_invalid_and_matches_validate(self):
+        """归档反例：冷表 status='active' ≠ 有效；SQL 与 validate 必须一致。"""
+        row = self.conn.execute(
+            "SELECT status,archived_at FROM citizens_all WHERE citizen_id='01CIT_ARCHIVED'"
+        ).fetchone()
+        self.assertIsNotNone(row, "前置：归档公民必须在 citizens_all 里（否则不是反例）")
+        self.assertEqual(row[0], "active", "前置：归档行 status 仍是 active")
+        self.assertIsNotNone(row[1], "前置：归档行必须带 archived_at")
+        self.assertIsNone(self._sql_lookup("dsh:valid-archived"),
+                          "归档公民的活 token 仍被 SQL 判成有效（缺 archived_at 过滤）")
+        self.assertIsNone(fish.validate_session_token(self.conn, self.tokens["archived"]),
+                          "validate_session_token 也不该把归档公民判成有效")
+        self.assertEqual(self._sql_lookup("dsh:valid-archived"),
+                         fish.validate_session_token(self.conn, self.tokens["archived"]),
+                         "归档公民：hook 侧与 MCP 侧判定漂移")
 
     def test_v4b_active_citizen_join_does_not_require_host_session_key(self):
         """JOIN 只按 citizen_id+status，不要求 citizens.host_session_key（那是另一级兜底）。"""

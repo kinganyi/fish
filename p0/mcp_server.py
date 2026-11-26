@@ -1171,17 +1171,24 @@ class FishServer:
         # 写前查重（2026-10-25 · 阶段 C）：只提示不拦。精确重名上面已经挡掉，
         # 这里补的是"可能是同一个项目"的三种形态（大小写 / 包含 / 描述同义）。
         hints = fish.find_similar_projects(self.conn, prefix, namespace=ns)
-        self.conn.execute(
-            "INSERT INTO code_registry (prefix,namespace,last_date,last_seq,status) "
-            "VALUES (?,?,?,?,?)", (prefix, ns, "", 0, "active"))
-        self.conn.commit()
-        fish.append_event(self.conn, "project.added",
-                          # evidence_level 如实写：MCP 面不签发 machine（评审 R-2），
-                          # 有凭证就写凭证的证据级别，没凭证就 'none'——绝不冒充 machine。
-                          {"citizen_id": self._owner_value(ident),
-                           "evidence_level": ident.evidence or "none"},
-                          {"kind": "project", "id": prefix},
-                          {"prefix": prefix, "namespace": ns})
+        # P1-2 残留（W2 评审）：状态写与事件必须同事务——旧写法先 commit 再
+        # append_event，事件写失败时前缀已经落库，事件流与状态分裂（ADR-001）。
+        try:
+            self.conn.execute(
+                "INSERT INTO code_registry (prefix,namespace,last_date,last_seq,status) "
+                "VALUES (?,?,?,?,?)", (prefix, ns, "", 0, "active"))
+            fish.append_event(self.conn, "project.added",
+                              # evidence_level 如实写：MCP 面不签发 machine（评审 R-2），
+                              # 有凭证就写凭证的证据级别，没凭证就 'none'——绝不冒充 machine。
+                              {"citizen_id": self._owner_value(ident),
+                               "evidence_level": ident.evidence or "none"},
+                              {"kind": "project", "id": prefix},
+                              {"prefix": prefix, "namespace": ns},
+                              commit=False)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         return (f"已注册前缀：{prefix} → {ns}\n"
                 f"现在可以 remember(project='{prefix}', ...) 写入。\n"
                 + fish.format_dup_hint(project_hints=hints))
@@ -1498,17 +1505,24 @@ class FishServer:
                     + fish.cli_entry_hint() + "\n")
 
         cid = fish.ulid()
-        self.conn.execute(
-            "INSERT INTO citizens (citizen_id,display_name,kind,role,host,status,created_at) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (cid, name, kind, role, host, "active", fish.now_utc()))
-        self.conn.commit()
-        fish.append_event(self.conn, "citizen.registered",
-                          # MCP 面不签发 machine（评审 R-2）：这里没有任何东西可校验，
-                          # 写 self-reported 才是如实；有凭证就沿用凭证的证据级别。
-                          {"citizen_id": cid, "evidence_level": ident.evidence or "self-reported"},
-                          {"kind": "citizen", "id": cid},
-                          {"display_name": name, "kind": kind, "role": role, "host": host})
+        # P1-2 残留（W2 评审）：状态写与事件同事务（同 tool_add_project）。
+        try:
+            self.conn.execute(
+                "INSERT INTO citizens (citizen_id,display_name,kind,role,host,status,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (cid, name, kind, role, host, "active", fish.now_utc()))
+            fish.append_event(self.conn, "citizen.registered",
+                              # MCP 面不签发 machine（评审 R-2）：这里没有任何东西可校验，
+                              # 写 self-reported 才是如实；有凭证就沿用凭证的证据级别。
+                              {"citizen_id": cid,
+                               "evidence_level": ident.evidence or "self-reported"},
+                              {"kind": "citizen", "id": cid},
+                              {"display_name": name, "kind": kind, "role": role, "host": host},
+                              commit=False)
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
         return (f"{cid}\n{name} / {kind}\n"
                 + self._identity_source_line(ident, registered=True) + "\n"
                 + self._register_boundary_note(ident)

@@ -7,6 +7,7 @@
   M-P2-2-A  `read_body_path` 的 body_sha256 比对改成 `if False`（不比对）→ B2 必红
   M-P2-2-B  补齐工具把 `memory.imported` 写成 `memory.recorded` → F2 必红
   M-P2-2-C  `fish_rebuild.py` 的 upsert 改回 `INSERT OR IGNORE` → D1 必红
+  M-P2-2-D  dry-run 改回直接 `mode=ro` 读生产库（去掉零字节修复）→ F1 必红
 
 每条都是：基线必须绿 → 变异后必须红 → 按 sha256 字节还原 → 复跑必须回到绿。
 
@@ -72,19 +73,44 @@ MUTATIONS = [
         )],
         ["test_rebuild_duplicate_codes.DuplicateCodesTest.test_D1_last_event_wins_and_reported"],
     ),
+    (
+        "M-P2-2-D",
+        "变异自证-P2-2-D.log",
+        "dry-run 改回直接 mode=ro 读生产库（去掉零字节修复：会改写 -shm）",
+        [(
+            "tools/backfill_projection_events.py",
+            '            conn = sqlite3.connect(str(copy_db))\n',
+            '            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)\n',
+        )],
+        ["test_rebuild_duplicate_codes.BackfillProjectionEventsTest."
+         "test_F1_dry_run_lists_and_writes_nothing"],
+    ),
 ]
 
 EXPECT = {
     "M-P2-2-A": "B2：篡改正文必须报 corrupt；不比对就会以 exact/ok 通过",
     "M-P2-2-B": "F2：apply 必须写 memory.imported（cause=backfill:p2-2）",
     "M-P2-2-C": "D1：同一编码两条事件，rebuild 后 title 必须是第二条",
+    "M-P2-2-D": "F1：dry-run 的 index.sqlite* 文件集合与哈希必须前后完全一致",
 }
 
 
 def main() -> int:
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--only", default=None, help="逗号分隔，如 M-P2-2-D")
+    args = parser.parse_args()
+    picked = MUTATIONS
+    if args.only:
+        wanted = {x.strip().upper() for x in args.only.split(",") if x.strip()}
+        picked = [m for m in MUTATIONS if m[0].upper() in wanted]
+        if not picked:
+            print(f"没有匹配的变异体：{sorted(wanted)}")
+            return 2
+
     AUDIT.mkdir(parents=True, exist_ok=True)
     failures = []
-    for mid, log_name, desc, patches, tests in MUTATIONS:
+    for mid, log_name, desc, patches, tests in picked:
         log_path = AUDIT / log_name
         files = sorted({name for name, _old, _new in patches})
         backups = {name: HERE / (name + ".p22mut-bak") for name in files}
@@ -150,7 +176,7 @@ def main() -> int:
         for mid, why in failures:
             print(f"  {mid}: {why}")
         return 1
-    print(f"{len(MUTATIONS)} 条变异自证成立（基线绿 → 变异红 → 还原字节一致 → 复跑绿）。")
+    print(f"{len(picked)} 条变异自证成立（基线绿 → 变异红 → 还原字节一致 → 复跑绿）。")
     return 0
 
 

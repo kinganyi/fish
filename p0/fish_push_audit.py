@@ -23,8 +23,10 @@
    （`push.enabled` 在 DSH 上设 false 会连 `tool_activity` 采集一起停，见
    `fish_push_hook.py:138` —— 那是「把仪表盘关掉」不是「调安静」）。
 3. **审计**：每次成功写入追加一行到 `<data>/_audit/push-config.jsonl`：
-   `{ts, actor, key, old, new}`（预设写入额外带 `preset`）。审计写失败**不阻断主写**
-   （配置已经生效了，回滚更糟），但必须 `fish_common.warn_derived` 出声。
+   `{ts, actor, key, old, new}`（预设写入额外带 `preset`）。
+   **`write_config` 的配置写与审计同事务**：审计（事件 + JSONL）失败 → 配置回滚到写前，
+   绝不出现「配置改了、审计 0 行」。`apply_preset` 的多键语义仍是「失败也留审计」，
+   审计文件写失败只出声（`warn_derived`），不改变已应用键。
 4. **串行化**：`write_config` / `apply_preset` 的「读 old → 写库 → 追加审计」整段在
    模块级 `_WRITE_LOCK` 里。审计链的 `old == 上一行 new` 是它唯一的可核性，而**读 old**
    与**追加审计**都在库外——不串行化，两个并发写就会各读同一个 old，链断（评审 🟡-1）。
@@ -1153,8 +1155,13 @@ def audit_path(db_path: str) -> str:
 
 
 def _append_audit(db_path: str, entries: list[dict], *, actor: str,
-                  preset: str | None = None) -> str | None:
-    """追加审计行；**写失败不阻断主写**，但必须出声（`warn_derived`）。"""
+                  preset: str | None = None, strict: bool = False) -> str | None:
+    """追加审计行。
+
+    `strict=False`（apply_preset 用）：写失败不阻断主写，但要 `warn_derived` 出声。
+    `strict=True`（write_config 用）：**写失败必须向上抛**，让配置事务整体回滚——
+    审计与配置同生共死，否则会出现「配置改了、审计 0 行」的不可核状态。
+    """
     if not entries:
         return None
     ts = _iso(now_utc_dt())
@@ -1173,6 +1180,8 @@ def _append_audit(db_path: str, entries: list[dict], *, actor: str,
             handle.flush()
             os.fsync(handle.fileno())
     except OSError as exc:
+        if strict:
+            raise
         # 审计失败 → 配置已经生效了（回滚更糟），但读日志的人必须知道证据缺了一行。
         fish_common.warn_derived(None, "push-config-audit", exc)
         return None
@@ -1203,12 +1212,29 @@ def write_config(db_path: str, key, value, *, actor: str = ACTOR_DEFAULT) -> dic
                 # 看起来改过的行）。与 `apply_preset` 的同值短路同一口径（`changed=False`）。
                 return {"key": key, "old": old, "new": new, "source": "workbench",
                         "auditAt": None, "changed": False}
-            fish_db.set_config(conn, key, new)  # 已 commit + 写 config.changed 事件
+            # P1-2 残留（W2 评审）：配置与审计必须同事务。
+            # ① `config.changed` 事件先挂进当前事务（commit=False，不落盘）；
+            # ② JSONL 审计在 commit 之前写，失败就抛 → 下面 rollback 掉事件；
+            # ③ `set_config(..., emit_event=False)` 的 commit 把「配置 + 事件」一起落盘。
+            # 旧写法是先 `set_config`（内部 commit）再追加审计，审计失败时配置已生效、
+            # 审计 0 行——这条路径从此不存在：审计失败 = 配置回到写前。
+            fish_db.append_event(
+                conn, "config.changed",
+                {"citizen_id": "system", "evidence_level": "signed"},
+                {"kind": "config", "id": key},
+                {"key": key, "old_value": old, "new_value": new,
+                 "source": "workbench", "actor": actor},
+                commit=False)
+            audit_at = _append_audit(db_path, [{"key": key, "old": old, "new": new}],
+                                     actor=actor, strict=True)
+            fish_db.set_config(conn, key, new, emit_event=False)  # 只写配置，不重复写事件
+            conn.commit()  # 末尾收口：配置 + 上一步的 config.changed 同一事务
+        except BaseException:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
-        # 审计也在锁里：不加锁时「提交顺序」与「追加顺序」可以相反，审计链就断了。
-        audit_at = _append_audit(db_path, [{"key": key, "old": old, "new": new}], actor=actor)
         invalidate_cache()
     return {"key": key, "old": old, "new": new, "source": "workbench",
             "auditAt": audit_at, "changed": True}

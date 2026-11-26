@@ -16,6 +16,7 @@
 `memory.imported` 改成 `memory.recorded` → F2 必红）。
 """
 import contextlib
+import hashlib
 import io
 import json
 import shutil
@@ -43,6 +44,19 @@ def _setup(testcase):
         "INSERT INTO code_registry (prefix,namespace,last_date,last_seq,status) "
         "VALUES ('P','P',NULL,0,'active')")
     testcase.conn.commit()
+
+
+def _db_file_snapshot(root):
+    """`index.sqlite*` 的文件集合 + 大小 + sha256（dry-run 零字节判据的尺子）。
+
+    为什么连 `-wal` / `-shm` 都要：实测 `mode=ro` 打开 WAL 库会改写 `-shm` 的
+    读者标记（32768 B 文件哈希前后不同）——只比主库文件会漏掉这条真实写入。
+    """
+    out = {}
+    for path in sorted(Path(root).glob("index.sqlite*")):
+        out[path.name] = (path.stat().st_size,
+                          hashlib.sha256(path.read_bytes()).hexdigest())
+    return out
 
 
 class DuplicateCodesTest(unittest.TestCase):
@@ -143,11 +157,22 @@ class BackfillProjectionEventsTest(unittest.TestCase):
 
     def test_F1_dry_run_lists_and_writes_nothing(self):
         before = self._event_count()
+        # 关键夹具：先关掉测试自己的连接——真实维护场景里没有进程持有这个库。
+        # 旧实现 `mode=ro` 打开 WAL 库会**新建** `-shm`（32768 B）与 `-wal`（0 B），
+        # 不关连接时这两个文件本来就存在，判据抓不到那次写入（实测：同连接打开时
+        # shm 哈希不变，判据会假绿）。关掉后快照才能看见「集合 + 哈希」的变化。
+        self.conn.close()
+        files_before = _db_file_snapshot(self.root)
         rc, out = self._run()
+        files_after = _db_file_snapshot(self.root)
+        self.conn = fish.connect(self.root)      # 后半段断言/tearDown 仍需连接
         self.assertEqual(rc, 0)
         self.assertEqual(out["count"], 1, f"dry-run 没列出 projection-only：{out}")
         self.assertEqual(out["rows"][0]["code"], self.CODE)
         self.assertEqual(out["written"], 0)
+        self.assertEqual(files_after, files_before,
+                         "dry-run 改动了 index.sqlite*（集合/大小/哈希必须完全一致）："
+                         f"{ {k: (files_before.get(k), files_after.get(k)) for k in set(files_before) | set(files_after) if files_before.get(k) != files_after.get(k)} }")
         self.assertEqual(self._event_count(), before, "dry-run 写了事件——违反零写承诺")
         self.assertFalse((self.root / "_backups").exists(),
                          "dry-run 不该生成备份")

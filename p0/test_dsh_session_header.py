@@ -26,7 +26,9 @@
 
 1. 根会话样本 → 归一字段逐项正确（含 createdAt → ISO、is_seeded 保留布尔）；
 2. 子代理样本 → `classify` 判 `origin='subagent'` 且父正确；
-3. **变异**：把 `parentSession` 改成 `parent_session`（模拟宿主改字段名）→ 正判据必须红；
+3. **变异（样本级）**：把样本 dict 的 `parentSession` 改成 `parent_session`
+   （模拟宿主改字段名）→ 正判据必须红。**源码级**变异另见 `mutation_dsh_header.py`
+   （把 `fish_lineage_dsh.header_from_event` 的提取表达式改掉 → 本文件必须红，逐字节还原后绿）；
 4. `header_from_event` 对 `sessionId` 旧写法仍兼容（本机 828 份首帧扫描未发现旧写法，
    但适配器保留 fallback，这条锁住兼容性）。
 """
@@ -153,10 +155,11 @@ class DshSessionHeaderTest(unittest.TestCase):
 
     # ---------------------------------------------------------------- 3
     def test_03_mutation_parentSession_renamed_must_turn_red(self):
-        """变异：`parentSession` → `parent_session`（宿主改字段名）→ 正判据必须红。
+        """变异（**样本级**）：样本 dict 的 `parentSession` → `parent_session` → 正判据红。
 
-        这不是"适配器有 bug"：适配器只认 camelCase 是**有意**的。变异判据的作用是
-        证明第 2 条判据有判别力——将来宿主真改字段名时，这条会红，而不是父链悄悄断。
+        这不是"适配器有 bug"：适配器只认 camelCase 是**有意**的。本判据证明
+        "输入字段名变了 → 父链读不到"。**源码级**变异（改 `header_from_event` 的
+        提取表达式）在 `mutation_dsh_header.py`——两者互补：这里钉行为，那里钉实现。
         """
         mutated = copy.deepcopy(REAL_SUBAGENT_HEADER)
         mutated["parent_session"] = mutated.pop("parentSession")

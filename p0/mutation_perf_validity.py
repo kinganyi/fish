@@ -52,9 +52,9 @@ MUTANTS = [
     ("M3", ACT,
      "test_v1_retired_citizen_token_is_invalid or "
      "test_v3_resolve_citizen_matches_validate_session_token",
-     "JOIN citizens_all c ON c.citizen_id=session_tokens.citizen_id AND c.status='active' ",
-     "JOIN citizens_all c ON c.citizen_id=session_tokens.citizen_id ",
-     "V1：去掉 citizens_all.status='active'（退役公民 token 又变成有效）"),
+     '    "JOIN citizens c ON c.citizen_id=session_tokens.citizen_id AND c.status=\'active\' "\n',
+     '    "JOIN citizens c ON c.citizen_id=session_tokens.citizen_id "\n',
+     "V1：去掉 citizens.status='active'（退役公民 token 又变成有效）"),
     ("M4", WB,
      "test_p5_cache_is_bounded_and_evicts_oldest",
      "        while len(_CACHE) > CACHE_MAX_ENTRIES:\n"
