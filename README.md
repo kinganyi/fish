@@ -117,11 +117,14 @@ flowchart TB
 
 ## 模块地图
 
-`p0/` 下 **47 个模块**，按层排列（下表只列主要的）：
+`p0/` 下 **87 个生产模块**（另 45 个变异脚本 / 190 个测试文件），按层排列（下表只列主要的）：
 
 | 层 | 模块 | 职责 |
 |---|---|---|
-| **入口** | `fish.py` · 10,600 行 | 记忆/检索/事件/注入/编码/看板的汇合点 |
+| **入口** | `fish.py` · 5,511 行 | 装配 / re-export / CLI 汇合点（域实现见下三行） |
+| | `fish_session.py` · 1,943 行 | 身份/会话域：token、公民、workspace 映射、project stint |
+| | `fish_memory.py` · 1,934 行 | 记忆域：record/rebuild、检索、关系链、访问日志 |
+| | `fish_inject_pack.py` · 2,021 行 | 注入装配 + 工具审计/知识盲区 |
 | | `fish_cli.py` | argparse 装配与命令分发 |
 | | `fish_ui.py` | 只读读口（给界面用） |
 | | `fish_dsh_hook.py` · `fish_posttool_hook.py` | 会话签发、动作采集、绕路提醒、推送 |
