@@ -52,6 +52,11 @@ from unittest import mock
 spec = importlib.util.spec_from_file_location("fish", "fish.py")
 fish = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fish)
+# 2026-11-26（W3-c · 144 刀三）：`build_attention_block` / `_attention_gaps` 搬进
+# fish_inject_pack.py，函数读的是**fish_inject_pack** 的全局。本文件用 module_from_spec
+# 载了一个未登记到 sys.modules 的 fish 副本，垫片同步不到它——所以 HN7 的 patch 目标
+# 按新所属文件登记（断言未改；沿用 W3-b test_identity_host_and_mentions 的先例）。
+import fish_inject_pack  # noqa: E402
 
 import mcp_server        # noqa: E402
 
@@ -581,7 +586,7 @@ class HN7GapCapTest(_TempRoot):
         """扫描到上限 → 段头印「别处读过 2/≥50」，不印确切的 50。"""
         fake = [{"code": f"HN7-261026-{i:02d}", "title": f"别处读过 {i}"}
                 for i in range(1, fish.ATTENTION_GAP_SCAN_LIMIT + 1)]
-        with mock.patch.object(fish, "_attention_gaps", return_value=fake):
+        with mock.patch.object(fish_inject_pack, "_attention_gaps", return_value=fake):
             blk = fish.build_attention_block(self.conn, self.root, citizen_id=self.cid,
                                              session_actor="hn7-sess",
                                              project=self.prefix)
@@ -596,7 +601,7 @@ class HN7GapCapTest(_TempRoot):
     def test_HN7_below_limit_stays_exact(self):
         """没到上限仍是确切值（别把正常读数也加上 ≥）。"""
         fake = [{"code": "HN7-261026-01", "title": "只有一条"}]
-        with mock.patch.object(fish, "_attention_gaps", return_value=fake):
+        with mock.patch.object(fish_inject_pack, "_attention_gaps", return_value=fake):
             blk = fish.build_attention_block(self.conn, self.root, citizen_id=self.cid,
                                              session_actor="hn7-sess",
                                              project=self.prefix)

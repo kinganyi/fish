@@ -42,6 +42,11 @@ from unittest import mock
 spec = importlib.util.spec_from_file_location("fish", "fish.py")
 fish = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fish)
+# 2026-11-26（W3-c · 144 刀三）：`_render_project_head` 搬进 fish_inject_pack.py，
+# 它读的是**fish_inject_pack** 的全局常量。本文件用 module_from_spec 载了一个未登记
+# 到 sys.modules 的 fish 副本，垫片同步不到它——所以 F5 的 patch 目标按新所属文件
+# 登记（断言未改；沿用 W3-b test_identity_host_and_mentions 的先例）。
+import fish_inject_pack  # noqa: E402
 
 PY = sys.executable
 P0 = Path(__file__).resolve().parent
@@ -145,7 +150,7 @@ class FallbackProjectRenderTest(unittest.TestCase):
         若改掉常量后标注仍在，说明 F3 命中的不是"兜底语义"而是"所有项目行都会追加"，
         那 F4 的反向断言也就失去意义了。
         """
-        with mock.patch.object(fish, "FALLBACK_PROJECT_NAME", "别的名字"):
+        with mock.patch.object(fish_inject_pack, "FALLBACK_PROJECT_NAME", "别的名字"):
             line = fish._render_project_head("未分类", 3, "", "stint")
         self.assertNotIn("兜底项目", line,
                          f"改了常量却仍标注——F3 命中的不是兜底语义：{line!r}")

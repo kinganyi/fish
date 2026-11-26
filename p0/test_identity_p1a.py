@@ -141,10 +141,6 @@ FROZEN_CITIZENS_SQL = {
             "SELECT citizen_id,display_name,kind,role,host FROM citizens WHERE citizen_id=?",
             "SELECT display_name,kind FROM citizens WHERE citizen_id=?",
         ),
-        "build_injection_pack": (
-            "SELECT display_name,kind FROM citizens WHERE citizen_id=?",
-            "SELECT display_name,kind,role,host FROM citizens WHERE citizen_id=?",
-        ),
         "cmd_owner": (
             "SELECT display_name,kind,is_owner FROM citizens WHERE citizen_id=?",
         ),
@@ -186,6 +182,15 @@ FROZEN_CITIZENS_SQL = {
             "SELECT citizen_id,display_name,kind,role,host FROM citizens "
             "WHERE display_name=? AND status='active' "
             "ORDER BY created_at, citizen_id LIMIT 1",
+        ),
+    },
+    # 2026-11-26（W3-c · 144 刀三）：注入装配域 46 函数搬进 `fish_inject_pack.py`。
+    # 下面两条 citizens 查询原属 fish.py 的 `build_injection_pack`——语句一字未改，
+    # 只是所在文件变了；判据 G 的本意是"一条都不许改"，搬家不算改，按新位置登记。
+    "fish_inject_pack.py": {
+        "build_injection_pack": (
+            "SELECT display_name,kind FROM citizens WHERE citizen_id=?",
+            "SELECT display_name,kind,role,host FROM citizens WHERE citizen_id=?",
         ),
     },
     # 2026-11-11（E-11 拆包）：`resolve_owner` 与 `rebuild_projection` 连同它们各自的
@@ -235,6 +240,10 @@ DECLARED_NEW_FUNCS = {
     # 显式列出空集而不是靠 `.get(fname, set())` 兜底：这样"忘了登记"会红。
     "fish_common.py": set(),
     "fish_rebuild.py": set(),
+    # 2026-11-26（W3-c · 144 刀三）：注入装配域搬家后，原 fish.py 里的
+    # `build_injection_pack`（2 条 citizens 查询）随函数落到 fish_inject_pack.py——
+    # 同一个函数、同一批语句，未新增查询。逐条见上面 FROZEN 条目。
+    "fish_inject_pack.py": set(),
     # 2026-11-26（W3-a · 144 刀一）：身份/会话域搬家后，原 fish.py 里**已声明**的
     # 会话公民读写点随函数落到 fish_session.py——同一个函数、同一批语句，未新增查询。
     # 逐条理由见上面 `"fish.py"` 条目（历史注释不重复搬，避免两处漂）。
@@ -792,11 +801,14 @@ class FishIdentityP1aTest(unittest.TestCase):
                         # 查询（--all 要列归档公民，而归档是搬行、不在 citizens 里）。
                         # **这是本轮唯一一处有意的 SQL 变更**，已在上面的冻结元组里
                         # 逐条写明；其余 21 条一个字未动。
-                        "fish.py": 17, "fish_session.py": 5, "fish_common.py": 4,
+                        # 2026-11-26（W3-c）：`build_injection_pack` 的 2 条随函数搬到
+                        # fish_inject_pack.py——17-2=15，另立一条 2，总数仍 29。
+                        "fish.py": 15, "fish_inject_pack.py": 2,
+                        "fish_session.py": 5, "fish_common.py": 4,
                                   "fish_rebuild.py": 0,
                                   "mcp_server.py": 2, "daily_report.py": 1},
-                         f"基线自检：fish 17 / fish_session 5 / common 4 / rebuild 0 / mcp 2 / daily 1"
-                         f"（总数 29；原 28 + fish_common 里一条"
+                         f"基线自检：fish 15 / fish_inject_pack 2 / fish_session 5 / common 4 / "
+                         f"rebuild 0 / mcp 2 / daily 1（总数 29；原 28 + fish_common 里一条"
                          f"此前未被覆盖的 resolve_name），实际 {counts}")
         for fname, frozen in FROZEN_CITIZENS_SQL.items():
             got = citizens_sql_by_function(HERE / fname)

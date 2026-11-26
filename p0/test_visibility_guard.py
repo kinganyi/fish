@@ -889,7 +889,9 @@ FILTERED = {
     "fish_memory.py:recent_fallback":            "_visibility_sql",
     "fish_memory.py:neighbors":                  "_visibility_sql",
     "fish_memory.py:distill_clusters":           "_visibility_sql（自带 SQL，第 25 轮补）",
-    "fish.py:build_injection_pack":       "_visibility_sql（最近三件事）",
+    # 2026-11-26（W3-c · 144 刀三）：`build_injection_pack` / `_titles_of` 随注入装配域
+    # 搬进 `fish_inject_pack.py`。判据内容不变，只改登记的文件（F-P1-X 的冻结基线）。
+    "fish_inject_pack.py:build_injection_pack": "_visibility_sql（最近三件事）",
     "fish.py:cmd_list":                   "_visibility_sql（第 43 轮补：它自己查标题并逐行打印）",
     "fish.py:cmd_report":                 "_visibility_sql（第 43 轮补：hot 前 5 + 全部反馈标题）",
     "fish.py:render_memory_index":        "_visibility_sql（第 41 轮补：自跑 SQL 且写成落盘明文）",
@@ -918,7 +920,7 @@ FILTERED = {
 
 BY_EXACT_CODE = {
     # ---- 按精确 code 取单条：持有编号即访问检查（**前提：编号不可枚举**）----
-    "fish.py:_titles_of":       "按精确 code 批量取标题",
+    "fish_inject_pack.py:_titles_of":       "按精确 code 批量取标题",
     "fish_memory.py:archive_body":     "按精确 code 取正文",
     "fish_memory.py:read_body_path":   "按精确 code 取正文（第 39 轮起另有 viewer 判定做二次确认）",
     "fish_memory.py:supersede_memory": "按精确 code 改状态",
