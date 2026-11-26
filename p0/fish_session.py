@@ -186,30 +186,39 @@ def rename_citizen(conn, citizen_id, new_name, *, actor=None, reason="") -> dict
         return {"citizen_id": citizen_id, "old_name": old_name, "new_name": new_name,
                 "changed": False, "same_name_exists": [], "event": None}
 
-    cur = conn.execute("UPDATE citizens SET display_name=? WHERE citizen_id=?",
-                       (new_name, citizen_id))
-    conn.commit()
-    if cur.rowcount == 0:
-        # 公民在归档表里（`citizens` 热表查不到）——`load_citizen` 走 citizens_all
-        # 能读到它，但改名只该发生在活跃行上。响亮失败，不静默成功。
-        raise ValueError(f"公民不在热表里（可能已归档），不能改名：{citizen_id}")
+    # 2026-11-26（W2 评审 🟠 P1-2 残留）：名字与 `citizen.renamed` 必须同一事务。
+    # 旧写法先 commit 名字再写事件——事件失败时名字已落盘、事件 0 条，改名不可审计。
+    try:
+        cur = conn.execute("UPDATE citizens SET display_name=? WHERE citizen_id=?",
+                           (new_name, citizen_id))
+        if cur.rowcount == 0:
+            # 公民在归档表里（`citizens` 热表查不到）——`load_citizen` 走 citizens_all
+            # 能读到它，但改名只该发生在活跃行上。响亮失败，不静默成功。
+            raise ValueError(f"公民不在热表里（可能已归档），不能改名：{citizen_id}")
 
-    same = []
-    for d in find_duplicate_display_names(conn):
-        if d["display_name"] != new_name:
-            continue
-        for cid in str(d["citizen_ids"] or "").split(","):
-            cid = cid.strip()
-            if cid and cid != citizen_id:
-                same.append(cid)
+        same = []
+        for d in find_duplicate_display_names(conn):
+            if d["display_name"] != new_name:
+                continue
+            for cid in str(d["citizen_ids"] or "").split(","):
+                cid = cid.strip()
+                if cid and cid != citizen_id:
+                    same.append(cid)
 
-    append_event(conn, "citizen.renamed",
-                 {"citizen_id": citizen_id, "evidence_level": "self-reported"},
-                 {"kind": "citizen", "id": citizen_id},
-                 {"from": old_name, "to": new_name,
-                  "actor": actor, "reason": reason or ""})
+        append_event(conn, "citizen.renamed",
+                     {"citizen_id": citizen_id, "evidence_level": "self-reported"},
+                     {"kind": "citizen", "id": citizen_id},
+                     {"from": old_name, "to": new_name,
+                      "actor": actor, "reason": reason or ""}, commit=False)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return {"citizen_id": citizen_id, "old_name": old_name, "new_name": new_name,
             "changed": True, "same_name_exists": same, "event": "citizen.renamed"}
+
+
+
 def resolve_actor_from_token(conn, token=None):
     """把 `FISH_SESSION_TOKEN`（或显式给的 token）解成公民行；解不出返回 None。
 

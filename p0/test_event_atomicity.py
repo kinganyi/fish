@@ -52,6 +52,7 @@ if str(HERE) not in sys.path:
 
 import fish  # noqa: E402
 import fish_db  # noqa: E402
+import fish_session  # noqa: E402
 
 
 class _Base(unittest.TestCase):
@@ -282,6 +283,29 @@ class SessionAtomicityTest(_Base):
             "SELECT revoked_at FROM session_tokens WHERE token_hash=?",
             (res["token_hash"],))[0], "重试后 token 必须已吊销")
         self.assertEqual(self._event_count("session.closed"), before_events + 1)
+
+
+class RenameAtomicityTest(_Base):
+    """`rename_citizen` 的名字与 `citizen.renamed` 必须同一事务（W2 评审 🟠 残留）。"""
+
+    def test_rename_failure_rolls_back_name_and_event(self):
+        cid = self._citizen("旧名")
+        before = self._one("SELECT display_name FROM citizens WHERE citizen_id=?", (cid,))[0]
+        with self._fail_append(fish_session):
+            with self.assertRaises(RuntimeError, msg="append_event 异常必须向上抛"):
+                fish_session.rename_citizen(self.conn, cid, "新名", actor=cid)
+        got = self._same_state_both_connections(
+            "SELECT display_name FROM citizens WHERE citizen_id=?", (cid,), "改名失败后名字")
+        self.assertEqual(got[0], before, "事件失败时名字必须回滚")
+        self.assertEqual(self._event_count("citizen.renamed"), 0)
+
+    def test_rename_success_commits_both(self):
+        cid = self._citizen("旧名")
+        out = fish_session.rename_citizen(self.conn, cid, "新名", actor=cid)
+        self.assertTrue(out["changed"])
+        self.assertEqual(self._one("SELECT display_name FROM citizens WHERE citizen_id=?",
+                                   (cid,))[0], "新名")
+        self.assertEqual(self._event_count("citizen.renamed"), 1)
 
 
 class MemoryAtomicityTest(_Base):
