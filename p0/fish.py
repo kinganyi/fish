@@ -3412,6 +3412,26 @@ def cmd_prompt_push(args):
         conn.close()
 
 
+def scan_orphan_bodies(conn, root) -> list:
+    """P2-6：扫 `projects/**/*.md` 里**没有 code_index.file_path 指向**的孤儿正文。
+
+    为什么会有：正文先原子写、再写库；异常路径会删正文，但 SIGKILL/断电不会——
+    于是留下一个"文件在、索引无"的孤儿。它不会让任何查询出错，只会悄悄占盘、
+    并让"记忆总数"与磁盘对不上。**列出来**，不自动删（可能是人工放进来的资料）。
+    """
+    root = Path(root)
+    known = {str(r[0]).replace("\\", "/") for r in
+             conn.execute("SELECT file_path FROM code_index WHERE file_path IS NOT NULL")}
+    orphans = []
+    proj = root / "projects"
+    if proj.exists():
+        for p in proj.rglob("*.md"):
+            rel = p.relative_to(root).as_posix()
+            if rel not in known:
+                orphans.append(rel)
+    return sorted(orphans)
+
+
 def cmd_healthcheck(args):
     # F-P1-6（2026-11-18 外部审查）：体检必须是**只读**检查。
     #
@@ -3452,6 +3472,13 @@ def cmd_healthcheck(args):
         for _day, _n in _bi["by_date"].items():
             print(f"    {_day}  {_n}")
         print("  查详情/修复：fish purge-broken（先看 dry-run，确认后加 --apply）")
+    # P2-6（2026-11-26）：孤儿正文——硬杀/断电留下"文件在、索引无"的 .md。
+    try:
+        _orphans = scan_orphan_bodies(conn, root)
+        print(f"  孤儿正文 {len(_orphans)} 条"
+              + (f"（前 5：{', '.join(_orphans[:5])}；确认后可人工清理）" if _orphans else ""))
+    except Exception as exc:      # noqa: BLE001 —— 附属检查，判不到要出声
+        print(f"  孤儿正文：判不到（{type(exc).__name__}: {exc}）")
     # git 关联度（2026-11-22 · F1/F8）：**让"关联不上"这件事可见**。
     #
     # 为什么必须有这一段：fish 建了完整的 git 观测体系（仓库/工作副本/观测/提交/关联

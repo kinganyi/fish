@@ -362,7 +362,14 @@ def read_body_path(conn, root, code, *, viewer_citizen_id=None, verify=True):
 
 
 def next_code(conn: sqlite3.Connection, prefix: str) -> str:
-    """P0 已验证：BEGIN IMMEDIATE + 撞号重试，50 并发零重号。"""
+    """P0 已验证：BEGIN IMMEDIATE + 撞号重试，50 并发零重号。
+
+    **空号语义（2026-11-26 明确，P2-6）**：编码分配与 `record_memory` 的正文/投影写入
+    不在同一个事务里（`BEGIN IMMEDIATE` 不能嵌套）。因此"分配后写入失败"会留下一个
+    空号——这是**允许的**：编码是标识符，不是连续票据；`code_registry.last_seq` 仍单调
+    前进，不会重号。不要为了消灭空号把 `BEGIN IMMEDIATE` 塞进别的事务（那会引入写锁
+    争用与死锁）。若将来要回收空号，必须另建"作废编码"事件与对账，而不是回退 seq。
+    """
     today = local_date()
     conn.execute("BEGIN IMMEDIATE")
     try:

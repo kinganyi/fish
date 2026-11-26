@@ -31,6 +31,7 @@ P2-5：体检用 `connect()`（读写 + 设 WAL）。一个自称"只读检查"�
 import contextlib
 import io
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -184,3 +185,38 @@ class HealthcheckTristateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class OrphanBodyScanTest(unittest.TestCase):
+    """P2-6：孤儿正文扫描——只列"文件在、索引无"的 .md，不误报已索引正文。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="fish-orphan-"))
+        self.root = self.tmp / "data"
+        self.conn = fish.connect(self.root)
+        self.conn.executescript(fish.SCHEMA)
+        fish.migrate(self.conn)
+        self.conn.commit()
+
+    def tearDown(self):
+        try:
+            self.conn.close()
+        except Exception:
+            pass
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_lists_only_unindexed_markdown(self):
+        self.conn.execute(
+            "INSERT INTO code_registry (prefix,namespace,last_date,last_seq,status) "
+            "VALUES (?,?,?,?,?)", ("P", "P", "", 0, "active"))
+        self.conn.commit()
+        code, rel = fish.record_memory(self.conn, self.root, project="P", title="已索引", body="x")
+        self.conn.commit()
+        extra = self.root / "projects" / "P" / "人工放入.md"
+        extra.write_text("人工资料", encoding="utf-8")
+        got = fish.scan_orphan_bodies(self.conn, self.root)
+        self.assertEqual(got, ["projects/P/人工放入.md"], got)
+        self.assertNotIn(rel, got)
+
+    def test_empty_root_returns_empty(self):
+        self.assertEqual(fish.scan_orphan_bodies(self.conn, self.root), [])
+
