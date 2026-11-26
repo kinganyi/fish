@@ -208,7 +208,9 @@ class BodyAtomicityTest(unittest.TestCase):
         # `write_text` 做变异 → 前面两条仍绿。所以必须再问一句：
         # **record_memory 到底有没有走原子写？**
         import ast as _ast
-        src = (Path(__file__).resolve().parent / "fish.py").read_text(
+        # 2026-11-26（W3-b · 144 刀二）：`record_memory` 搬进 fish_memory.py——
+        # 判据本意是"它走没走原子写"，函数搬到哪就查哪个文件（断言一字未改）。
+        src = (Path(__file__).resolve().parent / "fish_memory.py").read_text(
             encoding="utf-8")
         target = None
         for node in _ast.walk(_ast.parse(src)):

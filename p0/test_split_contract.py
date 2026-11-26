@@ -54,6 +54,8 @@ FISH_KB = P0 / "fish_kb.py"
 # 2026-11-26（W3-a · 144 刀一）：身份/会话域拆出（70 函数 + 26 常量）。
 # 与 fish_kb 同构：只许 import 下层模块，禁止 import fish（J2）。
 FISH_SESSION = P0 / "fish_session.py"
+# 2026-11-26（W3-b · 144 刀二）：记忆域拆出（43 函数 + 18 常量 + 1 个设计图外 helper）。
+FISH_MEMORY = P0 / "fish_memory.py"
 FISH_COMMON = P0 / "fish_common.py"
 FISH_PUSH = P0 / "fish_push.py"
 # 2026-11-11（E-11 拆包）新增的两个模块：同样必须守 J2 单向依赖。
@@ -109,6 +111,7 @@ if str(P0) not in sys.path:
 import fish_common  # noqa: E402
 import fish_config_guard  # noqa: E402 —— W4.6c 的身份开关判定叶子
 import fish_kb  # noqa: E402
+import fish_memory  # noqa: E402 —— W3-b 的记忆域
 import fish_session  # noqa: E402 —— W3-a 的身份/会话域
 
 # 共享原语（设计 §1.2）：五个名字，两边必须是同一对象。
@@ -283,6 +286,13 @@ FISH_TRUST_LINES_MAX = 260
 # 说明只搬了签名/漏了一整段；上界守「长成第二个巨石」。
 FISH_SESSION_LINES_MIN = 1700
 FISH_SESSION_LINES_MAX = 1950
+# 2026-11-26（W3-b · 144 刀二）：记忆域（43 函数 + 18 常量）。
+# 设计图按函数体 1,603 行估算约 1,660；本树实测函数体 1,641 行（P2-2 的
+# `_recorded_body_sha` 12 行在设计取证 HEAD 7dc278b 之后新增），随迁 18 个常量与
+# 逐字设计注释后实测 1,926——窗口按实测收到 1,800–2,000（下界守「搬漏」；
+# 上界仍远低于 fish.py / fish_board，长成第二个巨石会被咬）。
+FISH_MEMORY_LINES_MIN = 1800
+FISH_MEMORY_LINES_MAX = 2000
 
 # 2026-11-20（本轮）：**窗口覆盖补全**。上面这些模块都有窗口，但 fish_board / fish_inject /
 # fish_cli / fish_activity / fish_visibility / fish_naming / fish_surface 一直没有——没有窗口
@@ -517,6 +527,34 @@ class SplitSurfaceTest(unittest.TestCase):
         self.assertEqual(missing, [], "fish 侧缺名（外部引用会在运行时消失）")
         self.assertEqual(not_same, [], "fish 侧的名字与 fish_session 不是同一对象")
 
+    def test_j1_every_memory_name_is_the_same_object_in_fish(self):
+        """J1（W3-b）：`fish_memory` 全量名字在 `fish` 侧都在，且**是同一个对象**。
+
+        覆盖两部分：
+          · `fish_memory.__all__` 的 43 个函数（含 `_` 私有，设计图刀二）；
+          · `fish.py` 从 `fish_memory` 再导出的 18 个常量 + `_recorded_body_sha`
+            （后者是设计取证 HEAD `7dc278b` 之后 P2-2 新增的 `read_body_path`
+            专用 helper，属于 43 名之外；不进 `__all__`，但旧名字必须可用）。
+        为什么必须是同一对象：复制一份常量/再写一遍函数会让两边慢慢漂，而判据仍绿；
+        这也是 `mock.patch.object(fish, …)` 能打到实现模块的前提（见 J1 兼容垫片）。
+        """
+        self.assertEqual(len(fish_memory.__all__), 43,
+                         "fish_memory.__all__ 不是 43 名（设计图刀二）")
+        names = set(fish_memory.__all__)
+        for node in ast.parse(_read(FISH)).body:
+            if isinstance(node, ast.ImportFrom) and node.module == "fish_memory":
+                names.update(a.asname or a.name for a in node.names)
+        self.assertGreater(len(names), 55, "再导出面太小：常量那一批可能漏了")
+        missing, not_same = [], []
+        for name in sorted(names):
+            if not hasattr(fish, name):
+                missing.append(name)
+                continue
+            if getattr(fish, name) is not getattr(fish_memory, name):
+                not_same.append(name)
+        self.assertEqual(missing, [], "fish 侧缺名（外部引用会在运行时消失）")
+        self.assertEqual(not_same, [], "fish 侧的名字与 fish_memory 不是同一对象")
+
     def test_j1b_reexport_list_matches_ast(self):
         """J1b：`fish.py` 的 `from fish_kb import (...)` 与 `fish_kb` 的导出面**双向**相等。
 
@@ -561,6 +599,33 @@ class SplitSurfaceTest(unittest.TestCase):
         self.assertEqual(sorted(funcs), sorted(fish_session.__all__),
                          "fish_session.__all__ 与它自己的顶层 def 集合不一致")
         self.assertEqual(len(funcs), 70, "fish_session 顶层 def 不是 70 个")
+
+    def test_j1b_memory_reexport_list_matches_ast(self):
+        """J1b（W3-b）：`fish.py` 的 `from fish_memory import (...)` 与 fish_memory 顶层定义**双向**相等。
+
+        与 fish_kb 的区别：`fish_memory.__all__` 只装 43 个**函数**（设计图刀二），
+        18 个常量由 fish.py 另起一条 import 再导出。`_recorded_body_sha` 是设计取证后
+        P2-2 新增的域内 helper（43 名之外），也单独再导出——所以这里分三层判：
+          ① fish.py 从 fish_memory import 的全部名字 == fish_memory 顶层定义集合
+             （44 函数 + 18 常量；少一个 = 静默从 `fish` 消失）；
+          ② fish_memory 顶层 def 集合 == `__all__` ∪ `{_recorded_body_sha}`；
+          ③ `__all__` 恰为 43 个设计图函数名。
+        """
+        tree = ast.parse(_read(FISH))
+        imported = set()
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module == "fish_memory":
+                imported.update(a.asname or a.name for a in node.names)
+        self.assertTrue(imported, "fish.py 里没有 from fish_memory import（拆包没做完？）")
+        tree_m = ast.parse(_read(FISH_MEMORY))
+        defined = (_defined_names(tree_m) - {"__all__", "_IMPORTED"})  # 记账名不算定义面
+        self.assertEqual(sorted(imported), sorted(defined),
+                         "fish.py 的再导出清单与 fish_memory 顶层定义不一致")
+        funcs = {n.name for n in tree_m.body
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        self.assertEqual(sorted(funcs), sorted(set(fish_memory.__all__) | {"_recorded_body_sha"}),
+                         "fish_memory 顶层 def 集合与 __all__（+P2-2 helper）不一致")
+        self.assertEqual(len(fish_memory.__all__), 43, "fish_memory.__all__ 不是 43 名")
 
     def test_j1c_kb_commands_ready_is_true(self):
         """J1c：`_kb_commands_ready()` 必须为 True。
@@ -649,6 +714,8 @@ class SplitDependencyTest(unittest.TestCase):
         for path, forbidden in ((FISH_KB, {"fish"}),
                                 # 2026-11-26（W3-a · 144 刀一）：身份/会话域新模块。
                                 (FISH_SESSION, {"fish"}),
+                                # 2026-11-26（W3-b · 144 刀二）：记忆域新模块。
+                                (FISH_MEMORY, {"fish"}),
                                 (FISH_COMMON, {"fish", "fish_kb"}),
                                 # 评审 🟡-8：T02 新增的 fish_push 也要查（漏 import 炸弹）
                                 (FISH_PUSH, {"fish"}),
@@ -804,7 +871,7 @@ class SplitDependencyTest(unittest.TestCase):
             walk(table, "<module>")
             return {k: sorted(v) for k, v in sorted(missing.items())}
 
-        for path in (FISH_KB, FISH_COMMON, FISH_PUSH, FISH_SESSION):
+        for path in (FISH_KB, FISH_COMMON, FISH_PUSH, FISH_SESSION, FISH_MEMORY):
             self.assertEqual(missing_of(path), {},
                              f"{path.name} 里有全局名既没定义也没 import（运行时才会炸）")
 
@@ -815,7 +882,7 @@ class SplitDependencyTest(unittest.TestCase):
         搬进 `fish_kb` 后指向的是 `p0/`（恰好一样），搬进别处就指向别处——
         它让"这个模块在哪"变成隐式依赖。`type(x).__name__` 不在禁列（那是类型名）。
         """
-        for path in (FISH_KB, FISH_COMMON, FISH_PUSH, FISH_SESSION):
+        for path in (FISH_KB, FISH_COMMON, FISH_PUSH, FISH_SESSION, FISH_MEMORY):
             tree = ast.parse(_read(path))
             hits = [node.lineno for node in ast.walk(tree)
                     if isinstance(node, ast.Name) and node.id in ("__file__", "__name__")]
@@ -836,11 +903,12 @@ class SplitDependencyTest(unittest.TestCase):
 #
 # 这不是密码学意义上的防篡改（人能重算并改字面量），但它把"改一个数字"
 # 变成"必须动一个看起来就不是数据文件的测试文件"。**诚实地说，这是威慑，不是证明。**
-EXPECTED_CHAIN_HEAD = "45ce65a399506cb42eec84bd823bed5f64cdfe6dcb06cef4decb4572964a1b5b"
-EXPECTED_HISTORY_LEN = 11
+EXPECTED_CHAIN_HEAD = "179376b26dde70ef6e49750b3f879a9bfc9a25e07a35a607b69a4372fc7de91a"
+EXPECTED_HISTORY_LEN = 12
 # 与上面链头同一时刻的 max。新增历史前，max 不许偏离它。
-# 第 11 条是 W3-a 刀一（144）：70 函数迁出，窗口 10,300–11,250 → 8,900–9,450。
-EXPECTED_RATCHET_MAX_AT_ANCHOR = 9450
+# 第 12 条是 W3-b 刀二（144）：43 函数迁出，窗口 8,900–9,450 → 7,300–7,550
+# （实测 7,368；上界留 182 行余量——"+300 行必红"的变异自证成立）。
+EXPECTED_RATCHET_MAX_AT_ANCHOR = 7550
 
 class J4RatchetTest(unittest.TestCase):
     """J4 窗口的**棘轮**（F-P1-10，2026-11-18 外部审查）。
@@ -1126,7 +1194,9 @@ class SplitSizeTest(unittest.TestCase):
                 ("fish_config_guard.py", FISH_CONFIG_GUARD_LINES_MIN,
                  FISH_CONFIG_GUARD_LINES_MAX),
                 # 2026-11-26（W3-a · 144 刀一）：身份/会话域（70 函数 + 26 常量）
-                ("fish_session.py", FISH_SESSION_LINES_MIN, FISH_SESSION_LINES_MAX)):
+                ("fish_session.py", FISH_SESSION_LINES_MIN, FISH_SESSION_LINES_MAX),
+                # 2026-11-26（W3-b · 144 刀二）：记忆域（43 函数 + 18 常量）
+                ("fish_memory.py", FISH_MEMORY_LINES_MIN, FISH_MEMORY_LINES_MAX)):
             count = len(_read(P0 / module).split("\n"))
             self.assertGreaterEqual(count, low, f"{module} 只有 {count} 行：搬漏了")
             self.assertLessEqual(count, high, f"{module} 有 {count} 行：长回去了")

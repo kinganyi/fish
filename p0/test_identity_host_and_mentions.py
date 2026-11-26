@@ -47,6 +47,11 @@ spec = importlib.util.spec_from_file_location("fish", "fish.py")
 fish = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fish)
 
+# 2026-11-26（W3-b · 144 刀二）：`code_mentions_in` 搬进 fish_memory.py，实现读的是
+# **fish_memory** 的全局常量。本文件用 `module_from_spec` 载了一个未登记到 sys.modules
+# 的 fish 副本，垫片同步不到它——所以 M4 的 patch 目标按新所属文件登记（断言与正则不变）。
+import fish_memory  # noqa: E402
+
 # 旧口径的正则原件（2026-10-25 之前）。变异判据 M4 要用它把行为打回旧形态。
 # 刻意**逐字抄自备份 `历史版本/fish.py.bak-A-20261025-0205:1387`**，不是凭记忆重写。
 OLD_CODE_MENTION_RE = re.compile(
@@ -198,7 +203,7 @@ class CodeMentionCharsetTest(unittest.TestCase):
         """
         self._memory("A1-261025-01", "A1")
         self._memory("PROJ_2-261025-01", "PROJ_2")
-        with mock.patch.object(fish, "CODE_MENTION_RE", OLD_CODE_MENTION_RE):
+        with mock.patch.object(fish_memory, "CODE_MENTION_RE", OLD_CODE_MENTION_RE):
             got = fish.code_mentions_in(self.conn, "见 A1-261025-01 与 PROJ_2-261025-01")
         self.assertEqual(got, [],
                          "旧正则居然也能反解含数字/下划线的前缀——那 T2 的改动是无效的")

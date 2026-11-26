@@ -233,7 +233,9 @@ class AttachmentGuardTest(unittest.TestCase):
         行为判据（上面那条）能验结果，但说不清"如果下次有人调换顺序会怎样"。
         这条直接钉顺序。
         """
-        src = (HERE / "fish.py").read_text(encoding="utf-8")
+        # 2026-11-26（W3-b · 144 刀二）：`record_memory` / `next_code` 搬进 fish_memory.py，
+        # 判据按新所属文件读源码；断言的两个位置关系一字未改。
+        src = (HERE / "fish_memory.py").read_text(encoding="utf-8")
         i_val = src.index("validate_attachment(_ap")
         i_code = src.index("    code = next_code(conn, project)")
         self.assertLess(i_val, i_code,

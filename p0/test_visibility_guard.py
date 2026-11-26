@@ -884,17 +884,17 @@ class WorkbenchStatsVisibilityTest(unittest.TestCase):
 # **新加一个读路径忘了过滤 → 它自己会红**，不用等评审。
 FILTERED = {
     # ---- 有过滤的读路径（键改成 `模块:函数`，第五轮指出的 `main` 重名洞）----
-    "fish.py:search_memories":            "调 _filter_by_visibility（后置过滤，含 FTS 结果）",
-    "fish.py:list_memories":              "_visibility_sql 插进 WHERE",
-    "fish.py:recent_fallback":            "_visibility_sql",
-    "fish.py:neighbors":                  "_visibility_sql",
-    "fish.py:distill_clusters":           "_visibility_sql（自带 SQL，第 25 轮补）",
+    "fish_memory.py:search_memories":            "调 _filter_by_visibility（后置过滤，含 FTS 结果）",
+    "fish_memory.py:list_memories":              "_visibility_sql 插进 WHERE",
+    "fish_memory.py:recent_fallback":            "_visibility_sql",
+    "fish_memory.py:neighbors":                  "_visibility_sql",
+    "fish_memory.py:distill_clusters":           "_visibility_sql（自带 SQL，第 25 轮补）",
     "fish.py:build_injection_pack":       "_visibility_sql（最近三件事）",
     "fish.py:cmd_list":                   "_visibility_sql（第 43 轮补：它自己查标题并逐行打印）",
     "fish.py:cmd_report":                 "_visibility_sql（第 43 轮补：hot 前 5 + 全部反馈标题）",
     "fish.py:render_memory_index":        "_visibility_sql（第 41 轮补：自跑 SQL 且写成落盘明文）",
     "fish.py:render_memory_recent":       "_visibility_sql（第 41 轮补：同上，写 20-记忆库/最近.md）",
-    "fish.py:find_similar_memories":      "内联可见性判定（第 39 轮补：查重提示会显示标题）",
+    "fish_memory.py:find_similar_memories":      "内联可见性判定（第 39 轮补：查重提示会显示标题）",
     "fish.py:search_by_relevance":        "按精确 code 集合取相关性（push 用）",
     "fish_inject.py:_lesson_rows":        "_visibility_sql（第 32 轮补）",
     "fish_inject.py:_rule_rows":          "_visibility_sql（第 32 轮补）",
@@ -919,10 +919,10 @@ FILTERED = {
 BY_EXACT_CODE = {
     # ---- 按精确 code 取单条：持有编号即访问检查（**前提：编号不可枚举**）----
     "fish.py:_titles_of":       "按精确 code 批量取标题",
-    "fish.py:archive_body":     "按精确 code 取正文",
-    "fish.py:read_body_path":   "按精确 code 取正文（第 39 轮起另有 viewer 判定做二次确认）",
-    "fish.py:supersede_memory": "按精确 code 改状态",
-    "fish.py:withdraw_memory":  "按精确 code 改状态",
+    "fish_memory.py:archive_body":     "按精确 code 取正文",
+    "fish_memory.py:read_body_path":   "按精确 code 取正文（第 39 轮起另有 viewer 判定做二次确认）",
+    "fish_memory.py:supersede_memory": "按精确 code 改状态",
+    "fish_memory.py:withdraw_memory":  "按精确 code 改状态",
     # ---- 本机管理员 / 治理 / 维护工具：没有 viewer 概念 ----
     "fish_rebuild.py:rebuild_projection":   "重建投影：管理员身份跑，系统级",
     "fish_maintenance.py:_task_links_rebuild": "维护任务重建链接：系统级",
