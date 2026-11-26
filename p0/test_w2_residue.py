@@ -160,6 +160,25 @@ class PushConfigAtomicityTest(_Base):
         self.assertFalse(self.audit_file.exists(),
                          "审计失败却创建/留下了审计文件（旧行为是配置已生效、审计 0 行）")
 
+    def test_B1b_fsync_failure_truncates_audit_file(self):
+        """真实文件层失败（fsync 抛错）→ 配置回滚 + 审计文件被截回写前长度。
+
+        只 patch `_append_audit` 测不到"文件已写一半"；这里让真正的 fsync 失败，
+        验证 write_config 的截断回滚（W2 评审 🟡 的证据缺口）。
+        """
+        before = self._value()
+        before_events = self._count("events", "type='config.changed'")
+        before_size = self.audit_file.stat().st_size if self.audit_file.exists() else 0
+        with mock.patch.object(fish_push_audit.os, "fsync",
+                               side_effect=OSError("inject: fsync 失败")):
+            with self.assertRaises(OSError):
+                fish_push_audit.write_config(self.db_path, self.KEY, 322)
+        self.assertEqual(self._value(), before, "fsync 失败后配置没有回到写前")
+        self.assertEqual(self._count("events", "type='config.changed'"), before_events,
+                         "fsync 失败后 config.changed 仍然落盘")
+        now_size = self.audit_file.stat().st_size if self.audit_file.exists() else 0
+        self.assertEqual(now_size, before_size, "审计文件没有被截回写前长度")
+
     def test_B2_event_failure_rolls_back_config(self):
         before = self._value()
         before_events = self._count("events", "type='config.changed'")

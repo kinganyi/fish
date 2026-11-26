@@ -25,7 +25,7 @@ P0 = Path(__file__).resolve().parent
 # (编号, 说明, 目标文件, 旧片段, 新片段, 判据节点)
 MUTATIONS = [
     ("M-RA-COMMIT", "record_access 改回「先 commit 状态、再 append_event」",
-     "fish.py",
+     "fish_memory.py",
      '        append_event(conn, "memory.accessed",\n'
      '                     {"citizen_id": actor or "unknown", "evidence_level": "machine"},\n'
      '                     {"kind": "memory", "id": codes[0] if len(codes) == 1 else "*"},\n'
@@ -45,7 +45,7 @@ MUTATIONS = [
       "::test_record_access_failure_rolls_back_counters"]),
 
     ("M-RA-NOROLLBACK", "record_access 删掉 rollback（只留 raise）",
-     "fish.py",
+     "fish_memory.py",
      '                     {"codes": codes, "source": source, "counted": bool(counted)}, commit=False)\n'
      '        conn.commit()\n'
      '    except Exception: conn.rollback(); raise\n'
@@ -58,7 +58,7 @@ MUTATIONS = [
       "::test_record_access_failure_rolls_back_counters"]),
 
     ("M-SS-COMMIT", "start_session 改回「先 commit 状态、再 append_event」",
-     "fish.py",
+     "fish_session.py",
      '        append_event(\n'
      '            conn, "session.opened",\n',
      '        conn.commit()          # 变异：状态先落盘\n'
@@ -68,7 +68,7 @@ MUTATIONS = [
       "::test_start_session_failure_rolls_back_all_state"]),
 
     ("M-SS-NOROLLBACK", "start_session 删掉 rollback（只留 raise）",
-     "fish.py",
+     "fish_session.py",
      '        conn.commit()\n'
      '    except Exception: conn.rollback(); raise\n'
      '    # FB-08：签发后查**同名在用公民**。查在签发之后是刻意的——名字不唯一是既定\n',
@@ -79,7 +79,7 @@ MUTATIONS = [
       "::test_start_session_failure_rolls_back_all_state"]),
 
     ("M-NESTED-COMMIT", "start 的 find_or_create 恢复默认提交（嵌套事件提前落盘）",
-     "fish.py",
+     "fish_session.py",
      '                kind=kind, role=role, commit=False)\n',
      '                kind=kind, role=role)          # 变异：嵌套 append_event 恢复默认提交\n',
      ["test_event_atomicity.py::SessionAtomicityTest"

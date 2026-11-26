@@ -527,7 +527,7 @@ class SplitSurfaceTest(unittest.TestCase):
         for node in ast.parse(_read(FISH)).body:
             if isinstance(node, ast.ImportFrom) and node.module == "fish_session":
                 names.update(a.asname or a.name for a in node.names)
-        self.assertGreater(len(names), 90, "再导出面太小：常量那一批可能漏了")
+        self.assertEqual(len(names), 96, "fish_session 再导出面必须恰好 96 名（漏一名都算破坏兼容）")
         missing, not_same = [], []
         for name in sorted(names):
             if not hasattr(fish, name):
@@ -555,7 +555,7 @@ class SplitSurfaceTest(unittest.TestCase):
         for node in ast.parse(_read(FISH)).body:
             if isinstance(node, ast.ImportFrom) and node.module == "fish_memory":
                 names.update(a.asname or a.name for a in node.names)
-        self.assertGreater(len(names), 55, "再导出面太小：常量那一批可能漏了")
+        self.assertEqual(len(names), 62, "fish_memory 再导出面必须恰好 62 名（漏一名都算破坏兼容）")
         missing, not_same = [], []
         for name in sorted(names):
             if not hasattr(fish, name):
@@ -582,7 +582,7 @@ class SplitSurfaceTest(unittest.TestCase):
         for node in ast.parse(_read(FISH)).body:
             if isinstance(node, ast.ImportFrom) and node.module == "fish_inject_pack":
                 names.update(a.asname or a.name for a in node.names)
-        self.assertGreater(len(names), 70, "再导出面太小：常量那一批可能漏了")
+        self.assertEqual(len(names), 76, "fish_inject_pack 再导出面必须恰好 76 名（漏一名都算破坏兼容）")
         missing, not_same = [], []
         for name in sorted(names):
             if not hasattr(fish, name):

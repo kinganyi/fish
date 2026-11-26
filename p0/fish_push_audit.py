@@ -1205,6 +1205,14 @@ def write_config(db_path: str, key, value, *, actor: str = ACTOR_DEFAULT) -> dic
 
     with _WRITE_LOCK:
         conn = _write_conn(db_path)
+        # B1b（2026-11-26 W2 评审）：审计是 JSONL 文件，不能跟 DB 一起回滚。
+        # 记下写前字节数；事务失败时把文件截回原长，避免留下"配置没改、审计却有一行"
+        # 的孤儿证据（只 patch _append_audit 测不到真实半写，这条才是文件层）。
+        _audit_file = audit_path(db_path)
+        try:
+            _audit_before = os.path.getsize(_audit_file)
+        except OSError:
+            _audit_before = 0
         try:
             old = fish_common.get_config(conn, key)
             if old == new:
@@ -1231,6 +1239,13 @@ def write_config(db_path: str, key, value, *, actor: str = ACTOR_DEFAULT) -> dic
             conn.commit()  # 末尾收口：配置 + 上一步的 config.changed 同一事务
         except BaseException:
             conn.rollback()
+            # 审计文件截回写前（只截本次新增的字节；外部并发写由 _WRITE_LOCK 串行化）。
+            try:
+                if os.path.exists(_audit_file) and os.path.getsize(_audit_file) > _audit_before:
+                    with open(_audit_file, "r+b") as _af:
+                        _af.truncate(_audit_before)
+            except OSError as _exc:
+                fish_common.warn_derived(None, "push-config-audit-rollback", _exc)
             raise
         finally:
             conn.close()

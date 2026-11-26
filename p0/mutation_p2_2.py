@@ -36,7 +36,7 @@ MUTATIONS = [
         "变异自证-P2-2-A.log",
         "body_sha256 比对改成 if False（回到“有字段、无校验”）",
         [(
-            "fish.py",
+            "fish_memory.py",
             "    if sha != fish_atomic.sha256_of_file(p):\n",
             "    if False:  # 变异：不比对正文哈希\n",
         )],

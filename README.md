@@ -6,7 +6,7 @@
 
 单机 · 单仓 · 事件溯源 —— SQLite + FTS5 + MCP + CLI + 宿主 hooks
 
-![criteria](https://img.shields.io/badge/criteria-2540%20total-brightgreen)
+![criteria](https://img.shields.io/badge/criteria-2541%20total-brightgreen)
 ![fish.py](https://img.shields.io/badge/fish.py-5510%20lines-blue)
 ![modules](https://img.shields.io/badge/domain%20modules-47-informational)
 ![mutants](https://img.shields.io/badge/mutants-27-blue)
@@ -214,7 +214,7 @@ fish activity attribute --session codebuddy:xxx --citizen <id> --apply
 |---|---|---|
 | **单机单进程** | SQLite + WAL，同目录只能一个写入方 | 跨设备同步未做 |
 | **89.7% 写入无归属** | 12 个 codebuddy 会话从未调用 `session start` | `healthcheck` 已能看见 + `activity attribute` 显式补账；**不自动建公民** |
-| **`fish.py` 到顶** | 10,600/10,600（J4 棘轮上限） | 下次十行需求就该**拆模块**，不是再压注释 |
+| **`fish.py` 已拆三刀** | 5,511/5,650（J4 棘轮上限；W3 已拆 fish_session/fish_memory/fish_inject_pack） | 后续新增走域模块，不再往 fish.py 塞 |
 | **自动签到不编造占用面** | 自动签到占 85%，surface 留空 | 刻意：编造的面会让重叠检测失去意义 |
 | **一个 flaky 判据** | `test_push_rerank::R6a2`（hook 子进程分布，时序敏感） | 全量负载下偶红，隔离复跑稳定通过 |
 | **工作区文档不入库** | `/[0-9][0-9]-*.md` 被 `.git/info/exclude` 排除 | 公开仓只放代码；内部设计文档留本地 |
