@@ -381,7 +381,8 @@ class KeyContractTest(_WbBase):
         self.assertEqual(proc.returncode, 0, proc.stderr[-300:])
         self.assertIn("--parent-session", proc.stdout)
         self.assertIn("--agent-id", proc.stdout)
-        src = (FISH_PY).read_text(encoding="utf-8")
+        # 2026-11-26（W3-a · 144 刀一）：`ensure_session` 随身份/会话域搬进 fish_session.py。
+        src = (HERE / "fish_session.py").read_text(encoding="utf-8")
         self.assertIn("parent_session=None, agent_id=None", src,
                       "ensure_session 必须收这两个参数（不碰 start/rotate 的语义）")
 

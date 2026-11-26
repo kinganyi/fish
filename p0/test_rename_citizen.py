@@ -39,6 +39,10 @@ from unittest import mock
 spec = importlib.util.spec_from_file_location("fish", "fish.py")
 fish = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fish)
+# 2026-11-26（W3-a · 144 刀一）：`rename_citizen` 随身份/会话域搬进 fish_session；
+# 本文件用 module_from_spec 装载 fish（不进 sys.modules），兼容垫片不生效，
+# 所以 R7b 的变异靶点直接指向实现模块（语句与断言一字未改）。
+import fish_session  # noqa: E402
 
 CID = "01RENAME000000000000001"
 CID2 = "01RENAME000000000000002"
@@ -174,7 +178,7 @@ class RenameCitizenTest(unittest.TestCase):
         若这里仍能扫到事件，说明 R7 命中的不是"本次调用写的事件"（可能读到了
         别处的历史行），那 R7 就没有判别力。
         """
-        with mock.patch.object(fish, "append_event"):
+        with mock.patch.object(fish_session, "append_event"):
             res = fish.rename_citizen(self.conn, CID, "fish-主AI-2")
         self.assertTrue(res["changed"], "改名本身应该成功（变异只针对事件写入）")
         self.assertEqual(self._rename_events(), [],

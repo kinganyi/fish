@@ -133,30 +133,6 @@ FROZEN_CITIZENS_SQL = {
             "SELECT 1 FROM citizens WHERE is_owner=1",
             "UPDATE citizens SET is_owner=1 WHERE citizen_id=?",
         ),
-        "resolve_owner_arg": (
-            # 2026-11-11（序3 跑归档时暴露，**有记录的改动**）：
-            # ① 原来的 `SELECT 1 FROM citizens WHERE citizen_id=?` 换成
-            #    `fish_common.citizen_ids_known()`——它查 `citizens_all`（热+冷）。
-            #    只用热表时，已归档公民名下的记忆会被判"无效 owner"，
-            #    rebuild 进而把 owner **归一成系统主人**（实测改写 6 条，D-10 同类）。
-            # ② 报错时的候选清单同理改为 `citizens_all`（否则提示会漏掉冷公民）。
-            "SELECT citizen_id,display_name,kind FROM citizens_all "
-            "WHERE status='active' ORDER BY created_at",
-        ),
-        "set_owner": (
-            "SELECT kind,status,display_name FROM citizens WHERE citizen_id=?",
-            "UPDATE citizens SET is_owner=0 WHERE is_owner=1",
-            "UPDATE citizens SET is_owner=1 WHERE citizen_id=?",
-        ),
-        "find_citizen_by_name": (
-            # 2026-10-24 补记：那句 ORDER BY created_at, citizen_id LIMIT 1 是
-            # "同名多公民时结果必须确定"那一步的**有记录的修改**（理由见 fish.py 里
-            # 该函数的 docstring）。判据 G 的目的是抓"没登记的改动"，不是禁止一切改动——
-            # 有据可查的改动就该同步进基线，否则判据会从那天起一直红着（真实发生过）。
-            "SELECT citizen_id,display_name,kind,role,host FROM citizens "
-            "WHERE display_name=? AND status='active' "
-            "ORDER BY created_at, citizen_id LIMIT 1",
-        ),
         "cmd_citizen_add": (
             "INSERT INTO citizens (citizen_id,display_name,kind,role,host,status,created_at) "
             "VALUES (?,?,?,?,?,?,?)",
@@ -190,6 +166,26 @@ FROZEN_CITIZENS_SQL = {
         "cmd_report": (
             "SELECT display_name,kind,status FROM citizens WHERE status='active' "
             "ORDER BY created_at",
+        ),
+    },
+    # 2026-11-26（W3-a · 144 刀一）：身份/会话域 70 函数搬进 `fish_session.py`。
+    # 下面三条是**原 fish.py 冻结基线里属于该域的三个函数**——查询语句一字未改，
+    # 只是所在文件变了。判据本意是"一条都不许改"，搬家不算改，所以按新位置登记，
+    # 而不是把基线放宽或删掉（沿用 2026-11-11 `fish_common` 的处理先例）。
+    "fish_session.py": {
+        "resolve_owner_arg": (
+            "SELECT citizen_id,display_name,kind FROM citizens_all "
+            "WHERE status='active' ORDER BY created_at",
+        ),
+        "set_owner": (
+            "SELECT kind,status,display_name FROM citizens WHERE citizen_id=?",
+            "UPDATE citizens SET is_owner=0 WHERE is_owner=1",
+            "UPDATE citizens SET is_owner=1 WHERE citizen_id=?",
+        ),
+        "find_citizen_by_name": (
+            "SELECT citizen_id,display_name,kind,role,host FROM citizens "
+            "WHERE display_name=? AND status='active' "
+            "ORDER BY created_at, citizen_id LIMIT 1",
         ),
     },
     # 2026-11-11（E-11 拆包）：`resolve_owner` 与 `rebuild_projection` 连同它们各自的
@@ -239,6 +235,13 @@ DECLARED_NEW_FUNCS = {
     # 显式列出空集而不是靠 `.get(fname, set())` 兜底：这样"忘了登记"会红。
     "fish_common.py": set(),
     "fish_rebuild.py": set(),
+    # 2026-11-26（W3-a · 144 刀一）：身份/会话域搬家后，原 fish.py 里**已声明**的
+    # 会话公民读写点随函数落到 fish_session.py——同一个函数、同一批语句，未新增查询。
+    # 逐条理由见上面 `"fish.py"` 条目（历史注释不重复搬，避免两处漂）。
+    "fish_session.py": {"_forced_citizen", "archive_citizens", "find_duplicate_display_names",
+                        "find_or_create_session_citizen", "find_same_name_citizens",
+                        "find_session_citizen", "fix_owner", "load_citizen", "rename_citizen",
+                        "resolve_actor_from_token", "touch_citizen", "validate_session_token"},
     "fish.py": {"_ensure_identity_tables", "_ensure_citizens_all_view",
                 "_citizens_all_view_ddl",
                 # P1-b（session 命令族）新增的 4 个会话公民读写点。按本判据的纪律，
@@ -789,11 +792,11 @@ class FishIdentityP1aTest(unittest.TestCase):
                         # 查询（--all 要列归档公民，而归档是搬行、不在 citizens 里）。
                         # **这是本轮唯一一处有意的 SQL 变更**，已在上面的冻结元组里
                         # 逐条写明；其余 21 条一个字未动。
-                        "fish.py": 22, "fish_common.py": 4,
+                        "fish.py": 17, "fish_session.py": 5, "fish_common.py": 4,
                                   "fish_rebuild.py": 0,
                                   "mcp_server.py": 2, "daily_report.py": 1},
-                         f"基线自检：fish 21 / common 4 / rebuild 0 / mcp 2 / daily 1（总数 28）"
-                         f"daily_report 1（总数 29；原 28 + fish_common 里一条"
+                         f"基线自检：fish 17 / fish_session 5 / common 4 / rebuild 0 / mcp 2 / daily 1"
+                         f"（总数 29；原 28 + fish_common 里一条"
                          f"此前未被覆盖的 resolve_name），实际 {counts}")
         for fname, frozen in FROZEN_CITIZENS_SQL.items():
             got = citizens_sql_by_function(HERE / fname)

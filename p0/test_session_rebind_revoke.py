@@ -158,7 +158,8 @@ class SelfClaimNeedsNoProofTest(_TempRoot):
         **说明**当成**代码**。AST 只看真正的 `if` 测试表达式。
         """
         import ast
-        src = (HERE / "fish.py").read_text(encoding="utf-8")
+        # 2026-11-26（W3-a · 144 刀一）：`start_session` 随身份/会话域搬进 fish_session.py。
+        src = (HERE / "fish_session.py").read_text(encoding="utf-8")
         tree = ast.parse(src)
         func = next((n for n in tree.body
                      if isinstance(n, ast.FunctionDef) and n.name == "start_session"), None)

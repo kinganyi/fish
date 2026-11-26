@@ -55,6 +55,9 @@ FISH = HERE / "fish.py"
 # T02 拆包（2026-10-27）：`_session_labels_for` 已搬进 `fish_push.py`——判据 I 扫**模块树**
 # 而不是单文件（SQL 冻结的语义不变：同名函数的 citizens 语句仍逐条比对）。
 FISH_PUSH = HERE / "fish_push.py"
+# 2026-11-26（W3-a · 144 刀一）：身份/会话域搬进 `fish_session.py`——判据 I 的
+# 扫描面跟着扩到该模块（SQL 冻结语义不变：同名函数的 citizens 语句仍逐条比对）。
+FISH_SESSION = HERE / "fish_session.py"
 MCP = HERE / "mcp_server.py"
 
 # 身份类 env：跑子进程前必须全部清掉（见模块头）。
@@ -903,7 +906,7 @@ class FishIdentityP1bTest(unittest.TestCase):
         self.assertEqual(len(counts), 6, "基线自检：应为 6 个函数")
         self.assertEqual(EXPECTED_STMT_COUNT, 8, "基线自检：应为 8 条语句")
         got = {}
-        for path in (FISH, FISH_PUSH):
+        for path in (FISH, FISH_PUSH, FISH_SESSION):
             if path.exists():
                 got.update(citizens_sql_by_function(path))
         for func, stmts in SESSION_CITIZEN_SQL.items():
@@ -922,7 +925,7 @@ class FishIdentityP1bTest(unittest.TestCase):
 
     def test_I_mutation_editing_session_sql_goes_red(self):
         """变异自证：把会话查找里的 status='active' 去掉 → 判据 I 必红（在临时副本上改）。"""
-        source = FISH.read_text(encoding="utf-8")
+        source = FISH_SESSION.read_text(encoding="utf-8")
         marker = "WHERE host_session_key=? AND status='active' ORDER BY created_at LIMIT 1"
         self.assertIn(marker, source, "变异夹具失效：源码里找不到这句")
         broken = source.replace(marker, "WHERE host_session_key=? ORDER BY created_at LIMIT 1")

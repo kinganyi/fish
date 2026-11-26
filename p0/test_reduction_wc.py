@@ -178,7 +178,9 @@ class SingleSourceTest(unittest.TestCase):
     """结构面：`fish.resolve_project_by_cwd` 只剩"查表 + 交给 fish_surface"。"""
 
     def test_fish_resolver_delegates(self):
-        src = (P0 / "fish.py").read_text(encoding="utf-8")
+        # 2026-11-26（W3-a · 144 刀一）：`resolve_project_by_cwd` 随身份/会话域搬进
+        # fish_session.py——单源判据的靶点跟着搬，断言一字未改。
+        src = (P0 / "fish_session.py").read_text(encoding="utf-8")
         # 取 resolve_project_by_cwd 的函数体（到下一个顶层 def 为止）
         start = src.index("def resolve_project_by_cwd(")
         end = src.index("\ndef ", start + 10)
