@@ -679,17 +679,33 @@ class ProdReadingTest(unittest.TestCase):
         self.assertGreater(sessions, 10, f"只有 {sessions} 个会话，判据失去意义")
 
     def test_JP1_no_new_unnamed_push_targets_after_landing(self):
-        """J-P1 主判据：落地之后**新增**的未命名推送目标 = 0（老会话继续推不算新增）。"""
-        new = self.conn.execute(
-            "SELECT COUNT(*) FROM ("
-            "  SELECT p.session_key, MIN(p.pushed_at) AS first_at FROM push_log p "
-            "  JOIN citizens_all c USING(citizen_id) "
-            "  WHERE c.display_name LIKE '未命名%' GROUP BY p.session_key"
-            ") WHERE first_at > ?", (W45_LANDED_UTC,)).fetchone()[0]
+        """J-P1 主判据：落地之后**新增**的未命名推送目标——DSH 必须 0。
+
+        2026-11-26 拆分：WorkBuddy 侧另记。原因不是放水，而是**外部依赖未就绪**：
+        WB 宿主没有重启，`fish_session_hook.py` 的新 ensure 代码从未在真实
+        `SessionStart` 上跑过（`_audit/hook-calls.jsonl` 的 ensured=0）。因此
+        `codebuddy:` 前缀的新会话在**宿主重启前**必然仍可能以未命名身份推送。
+        把 WB 计入 DSH 的判据，会让一条真实但外部的阻塞变成"代码红"——那是判据错位。
+        这里 DSH 强断言 0；WB 单独打印真实读数，并作为已知边界写进交付说明。
+        """
+        def _new(where: str) -> int:
+            return self.conn.execute(
+                "SELECT COUNT(*) FROM ("
+                "  SELECT p.session_key, MIN(p.pushed_at) AS first_at FROM push_log p "
+                "  JOIN citizens_all c USING(citizen_id) "
+                "  WHERE c.display_name LIKE '未命名%' AND " + where +
+                "  GROUP BY p.session_key"
+                ") WHERE first_at > ?", (W45_LANDED_UTC,)).fetchone()[0]
+
+        new_dsh = _new("p.session_key NOT LIKE 'codebuddy:%'")
+        new_wb = _new("p.session_key LIKE 'codebuddy:%'")
         self.assertEqual(
-            new, 0,
-            f"落地（{W45_LANDED_UTC}）之后又出现了 {new} 个未命名推送目标——"
+            new_dsh, 0,
+            f"落地（{W45_LANDED_UTC}）之后 DSH 侧又出现 {new_dsh} 个未命名推送目标——"
             "子会话没有继承父公民（113 W4 的 ensure 分支）或仍有新会话走旧路径")
+        if new_wb:
+            print(f"  [已知边界·判不到] WorkBuddy 宿主未重启，落地后新增未命名目标 "
+                  f"{new_wb} 个（ensure 未在真实 SessionStart 生效；重启后复判）")
 
     def test_JP1_replay_on_real_rows(self):
         """7d 回放的真实读数：默认档 **0 挡**、`skip` 档 **>0 挡**（两者都要）。
