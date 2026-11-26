@@ -92,8 +92,12 @@ class RebuildSafeBase(unittest.TestCase):
         self.conn.execute("UPDATE code_index SET owner=? WHERE code=?", (owner, code))
         self.conn.commit()
 
-    def _dump(self):
-        """库的**可比快照**：投影逐行（全部列）+ FTS 编码集合 + 备份目录清单。"""
+    def _dump(self, *, include_backups=True):
+        """库的**可比快照**：投影逐行（全部列）+ FTS 编码集合 + 备份目录清单。
+
+        `include_backups=False` 用于"abort 也允许留备份"的场景：abort 前先备份是
+        设计要求（安全网），不算"库被改了"；只比较投影与 FTS。
+        """
         cols = [r[1] for r in self.conn.execute("PRAGMA table_info(code_index)")]
         rows = self.conn.execute(
             "SELECT %s FROM code_index ORDER BY code" % ",".join(cols)).fetchall()
@@ -103,7 +107,10 @@ class RebuildSafeBase(unittest.TestCase):
             fts = []
         bdir = Path(self.root) / "data" / "_backups"
         backups = sorted(p.name for p in bdir.glob("*")) if bdir.exists() else []
-        return {"cols": cols, "rows": rows, "fts": fts, "backups": backups}
+        out = {"cols": cols, "rows": rows, "fts": fts}
+        if include_backups:
+            out["backups"] = backups
+        return out
 
     # ------------------------------------------------------------- 场景（可变异）
     def _scenario_unattributed_actor_keeps_owner(self):
@@ -124,9 +131,9 @@ class RebuildSafeBase(unittest.TestCase):
         self._seed(code, actor=self.bob)
         fish.rebuild_projection(self.conn, self.root)      # owner=bob
         self._set_owner(code, "ghost-owner")               # 注入一行差异
-        before = self._dump()
+        before = self._dump(include_backups=False)
         rep = fish.rebuild_projection(self.conn, self.root, apply=True)
-        return {"rep": rep, "before": before, "after": self._dump(),
+        return {"rep": rep, "before": before, "after": self._dump(include_backups=False),
                 "owner": self._owner(code), "code": code}
 
 
@@ -192,7 +199,9 @@ class RebuildDryRunAndBackupTest(RebuildSafeBase):
         self.assertTrue(rep["aborted"], "对账不一致却仍提交了")
         self.assertFalse(rep["applied"])
         self.assertEqual(seen["before"], seen["after"],
-                         "对账不一致时库被改了（必须先 commit 后对账的反面）")
+                         "对账不一致时投影/FTS 被改了（必须先 commit 后对账的反面）")
+        self.assertTrue(rep["backup_path"] and Path(rep["backup_path"]).exists(),
+                        "abort 前应先留备份（安全网）")
         self.assertEqual(seen["owner"], "ghost-owner", "回滚后投影应保持重建前状态")
 
     def test_P1A_6_apply_is_idempotent_and_backs_up(self):
