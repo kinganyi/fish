@@ -908,17 +908,62 @@ def a07_mut(ctx) -> tuple[bool, str]:
 
 
 # ── A-8 ─────────────────────────────────────────────────────────────────
+def _a08_seed_copy(ctx) -> tuple[str, str]:
+    """A-8 固定 fixture：从生产库**只读复制**一份，再种一条 CZHY 看板登记。
+
+    为什么必须种：A-8 断言「CZHY 24h 内有 post 来源」——生产数据会过期/被清，
+    原实现直接读真库，于是判据随数据运气红绿（2026-11-26 实测 posts=0）。
+    复制 + 种一条固定登记后，判据只测产品逻辑，不测数据有没有。
+    """
+    A = ctx["A"]
+    tmp = tempfile.mkdtemp(prefix="fish-wb-a08-")
+    target = os.path.join(tmp, "a08.sqlite")
+    src = sqlite3.connect(f"file:{ctx['db']}?mode=ro", uri=True)
+    dst = sqlite3.connect(target)
+    try:
+        src.backup(dst)
+        row = dst.execute(
+            "SELECT id FROM boards WHERE scope='project' AND scope_key=? "
+            "ORDER BY id DESC LIMIT 1", (PROJECT,)).fetchone()
+        now = A.now_dt().strftime("%Y-%m-%dT%H:%M:%SZ")
+        if row is None:
+            cur = dst.execute(
+                "INSERT INTO boards(scope,scope_key,period_key,path,status,created_at) "
+                "VALUES('project',?,?,?,'open',?)",
+                (PROJECT, A.now_dt().strftime("%Y%m%d"),
+                 f"10-项目库/{PROJECT}/看板-fixture.md", now))
+            board_id = cur.lastrowid
+        else:
+            board_id = row[0]
+        dst.execute(
+            "INSERT INTO board_posts(board_id,citizen_id,kind,text,created_at,session_key) "
+            "VALUES(?,?,?,?,?,?)",
+            (board_id, "A8FIXTURE", "progress", "A-8 固定 fixture", now, ""))
+        dst.commit()
+    finally:
+        src.close()
+        dst.close()
+    return tmp, target
+
+
 def a08(ctx) -> tuple[bool, str]:
     A = ctx["A"]
-    out = _stream(ctx, scope_kind="project", project=PROJECT, limit=100)
-    items = out["data"]["items"]
-    total = out["data"]["counts"]["total"]
-    wrong = [item["key"] for item in items if item["project"] != PROJECT]
-    posts = [item for item in items if item["src"] == "post"]
-    posts_ok = bool(posts) and all(item["project"] == PROJECT for item in posts)
-    # R-04 的第二半边：facets 的 CZHY 计数必须**包含**这些登记，且与流水"本刀 N 条"一致
-    # （四处用同一个表达式，才不会出现"筛得到行、左栏数字却少一块"）。
-    facets = A.collect_facets(ctx["conn"], win="24h", since=ctx["since"])
+    tmp, target = _a08_seed_copy(ctx)
+    conn = A.open_conn(target)
+    fctx = {"A": A, "conn": conn, "since": ctx["since"]}
+    try:
+        out = _stream(fctx, scope_kind="project", project=PROJECT, limit=100)
+        items = out["data"]["items"]
+        total = out["data"]["counts"]["total"]
+        wrong = [item["key"] for item in items if item["project"] != PROJECT]
+        posts = [item for item in items if item["src"] == "post"]
+        posts_ok = bool(posts) and all(item["project"] == PROJECT for item in posts)
+        # R-04 的第二半边：facets 的 CZHY 计数必须**包含**这些登记，且与流水"本刀 N 条"一致
+        # （四处用同一个表达式，才不会出现"筛得到行、左栏数字却少一块"）。
+        facets = A.collect_facets(conn, win="24h", since=ctx["since"])
+    finally:
+        conn.close()
+        shutil.rmtree(tmp, ignore_errors=True)
     czhy = next((p for p in facets["data"]["projects"] if p["name"] == PROJECT), None)
     facet_ok = (czhy is not None and czhy["count"] == total
                 and czhy["bySource"].get("post", 0) > 0)

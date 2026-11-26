@@ -278,6 +278,21 @@ def cache_get(scope: str, key: tuple):
     return value
 
 
+def cache_get_with_ts(scope: str, key: tuple):
+    """同 `cache_get`，但把**入缓存时刻**一起返回（V-30 要用它算 cacheAgeSec）。"""
+    cache_key = (scope, key)
+    with _CACHE_LOCK:
+        hit = _CACHE.get(cache_key)
+        if not hit:
+            return None
+        ts, value = hit
+        if time.time() - ts > CACHE_TTL_S.get(scope, 0):
+            del _CACHE[cache_key]
+            return None
+        _CACHE.move_to_end(cache_key)
+    return ts, value
+
+
 def cache_put(scope: str, key: tuple, value: dict) -> None:
     cache_key = (scope, key)
     with _CACHE_LOCK:
@@ -2475,10 +2490,17 @@ def api_push_overview(db_path: str, days: int) -> dict:
     保证「改了值 → 立刻看到新读数」。
     """
     cache_key = (os.path.abspath(db_path), int(days))
-    cached = cache_get("push_overview", cache_key)
-    if cached is not None:
+    hit = cache_get_with_ts("push_overview", cache_key)
+    if hit is not None:
+        ts, payload = hit
+        out = dict(payload)
+        # V-30：`asOf`/`cachedAt` 仍是数据构建时刻；只有 `cacheAgeSec` 随真实时间增长。
+        # 注意它在信封的 `data` 里（不是顶层）——两层都保留同一份数据，别只改外层。
+        inner = dict(out.get("data") or {})
+        inner["cacheAgeSec"] = round(max(0.0, time.time() - ts), 1)
+        out["data"] = inner
         log("cache_hit", scope="push_overview", days=days)
-        return cached
+        return out
     data = fish_push_audit.overview(db_path, days=days)
     sources = data.pop("sources", [])
     payload = push_envelope(data, as_of=data.get("asOf") or iso(now_dt()), sources=sources)

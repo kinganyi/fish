@@ -1174,6 +1174,11 @@ def main() -> int:
                                "float": [status_float, body_float.get("hint")]},
                               ensure_ascii=False))
 
+            # V-10/V-12/V-13 的共同前置：把生产副本的该键**重置到规范基线 10**。
+            # 生产值可能已经被别的会话改成 9999（不是代码问题）；不重置的话
+            # V-10 的 old 断言、V-12 的 resume=10、V-13 的 pause 变更都会随数据漂。
+            http_json(f"{base}/api/push/config", method="POST",
+                      body={"key": "push.after_tool_every_n_calls", "value": 10})
             before_audit = len(_audit_lines(copy_path))
             status_write, body_write = http_json(
                 f"{base}/api/push/config", method="POST",
